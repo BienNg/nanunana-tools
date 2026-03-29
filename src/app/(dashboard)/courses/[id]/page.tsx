@@ -36,17 +36,69 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
     );
   }
 
+  const { data: students } = await supabase
+    .from('students')
+    .select('id')
+    .eq('course_id', id);
+
+  const { data: lessons } = await supabase
+    .from('lessons')
+    .select(`
+      id,
+      date,
+      start_time,
+      end_time,
+      attendance_records (
+        status
+      )
+    `)
+    .eq('course_id', id)
+    .order('date', { ascending: true });
+
   const teachers = course.course_teachers
     ?.map((ct: any) => ct.teachers?.name)
     .filter(Boolean)
     .join(', ') || 'No teachers assigned';
+
+  // Calculate analytics
+  let totalDurationMinutes = 0;
+  let totalAttendance = 0;
+  let presentAttendance = 0;
+
+  lessons?.forEach(lesson => {
+    if (lesson.start_time && lesson.end_time) {
+      const [startH, startM] = lesson.start_time.split(':').map(Number);
+      const [endH, endM] = lesson.end_time.split(':').map(Number);
+      const startMinutes = startH * 60 + startM;
+      const endMinutes = endH * 60 + endM;
+      if (endMinutes > startMinutes) {
+        totalDurationMinutes += (endMinutes - startMinutes);
+      }
+    }
+    
+    lesson.attendance_records?.forEach((record: any) => {
+      totalAttendance++;
+      if (record.status === 'Present') presentAttendance++;
+    });
+  });
+
+  const totalDurationHours = Math.floor(totalDurationMinutes / 60);
+  const totalDurationRemainder = totalDurationMinutes % 60;
+  const totalDurationStr = `${totalDurationHours}h ${totalDurationRemainder}m`;
+
+  const attendanceRate = totalAttendance > 0 ? Math.round((presentAttendance / totalAttendance) * 100) : 0;
+
+  const validDates = lessons?.map(l => l.date).filter(Boolean) || [];
+  validDates.sort(); // String sorting works for YYYY-MM-DD format
+  const firstSessionDate = validDates.length > 0 ? new Date(validDates[0]).toLocaleDateString() : 'N/A';
+  const lastSessionDate = validDates.length > 0 ? new Date(validDates[validDates.length - 1]).toLocaleDateString() : 'N/A';
 
   // We fetch lessons on the client side using the ScheduleTable, 
   // but we can pass down the course filter to it.
   
   return (
     <div className="pt-24 px-10 pb-12 animate-fade-up">
-      <div className="mb-12">
+      <div className="mb-8">
         <div className="flex gap-4 mb-6">
           <Link href={`/groups/${course.group_id}`} className="text-primary text-sm font-semibold inline-flex items-center gap-1 hover:bg-primary/5 px-3 py-1.5 -ml-3 rounded-full transition-colors">
             <span className="material-symbols-outlined text-sm">arrow_back</span>
@@ -71,6 +123,59 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
               <span className="material-symbols-outlined text-[18px]">person</span>
               {teachers}
             </p>
+          </div>
+        </div>
+      </div>
+
+      {/* HubSpot-like Analytics Grid */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-10">
+        <div className="bg-surface-container-lowest p-5 rounded-2xl shadow-sm border border-outline-variant/10 flex flex-col justify-between group hover:translate-y-[-2px] transition-transform">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="material-symbols-outlined text-primary text-xl bg-primary/10 p-1.5 rounded-lg">timer</span>
+            <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Duration</span>
+          </div>
+          <div className="text-2xl font-black text-on-surface font-headline">{totalDurationStr}</div>
+        </div>
+
+        <div className="bg-surface-container-lowest p-5 rounded-2xl shadow-sm border border-outline-variant/10 flex flex-col justify-between group hover:translate-y-[-2px] transition-transform">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="material-symbols-outlined text-primary text-xl bg-primary/10 p-1.5 rounded-lg">group</span>
+            <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Students</span>
+          </div>
+          <div className="text-2xl font-black text-on-surface font-headline">{students?.length || 0}</div>
+        </div>
+
+        <div className="bg-surface-container-lowest p-5 rounded-2xl shadow-sm border border-outline-variant/10 flex flex-col justify-between group hover:translate-y-[-2px] transition-transform">
+          <div className="flex justify-between items-start mb-3">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-tertiary text-xl bg-tertiary/10 p-1.5 rounded-lg">fact_check</span>
+              <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Attendance</span>
+            </div>
+          </div>
+          <div>
+            <div className="text-2xl font-black text-on-surface font-headline">{attendanceRate}%</div>
+            <div className="w-full h-1 bg-surface-container-highest rounded-full mt-2 overflow-hidden">
+              <div className="h-full bg-tertiary" style={{ width: `${attendanceRate}%` }}></div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-surface-container-lowest p-5 rounded-2xl shadow-sm border border-outline-variant/10 flex flex-col justify-between group hover:translate-y-[-2px] transition-transform">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="material-symbols-outlined text-orange-500 text-xl bg-orange-500/10 p-1.5 rounded-lg">person</span>
+            <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Teachers</span>
+          </div>
+          <div className="text-sm font-bold text-on-surface font-headline leading-tight line-clamp-2">{teachers}</div>
+        </div>
+
+        <div className="bg-surface-container-lowest p-5 rounded-2xl shadow-sm border border-outline-variant/10 flex flex-col justify-between group hover:translate-y-[-2px] transition-transform">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="material-symbols-outlined text-secondary text-xl bg-secondary/10 p-1.5 rounded-lg">calendar_month</span>
+            <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Timeline</span>
+          </div>
+          <div className="text-sm font-medium text-on-surface">
+            <div className="flex items-center justify-between"><span className="text-on-surface-variant text-xs">First:</span> <span>{firstSessionDate}</span></div>
+            <div className="flex items-center justify-between mt-1"><span className="text-on-surface-variant text-xs">Last:</span> <span>{lastSessionDate}</span></div>
           </div>
         </div>
       </div>

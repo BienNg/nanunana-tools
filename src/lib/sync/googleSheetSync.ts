@@ -45,6 +45,15 @@ function parseSheetDate(raw: string | undefined | null): string | null {
   return null;
 }
 
+type ClassType = 'Online_DE' | 'Online_VN' | 'Offline';
+
+function detectClassType(title: string): ClassType | null {
+  if (title.includes('Online_DE')) return 'Online_DE';
+  if (title.includes('Online_VN')) return 'Online_VN';
+  if (title.includes('Offline')) return 'Offline';
+  return null;
+}
+
 type SheetRow = string[];
 
 function findHeaderRowIndex(rows: SheetRow[]): number {
@@ -302,6 +311,8 @@ export async function runGoogleSheetSync(
       (allTeachers ?? []).map((t: { id: string; name: string }) => [t.name, t.id])
     );
 
+    const classType = detectClassType(workbookTitle);
+
     let { data: group, error: groupSelectError } = await supabase
       .from('groups')
       .select('id')
@@ -313,7 +324,7 @@ export async function runGoogleSheetSync(
     if (!group) {
       const { data: inserted, error: insertErr } = await supabase
         .from('groups')
-        .insert({ name: workbookTitle, spreadsheet_id: spreadsheetId })
+        .insert({ name: workbookTitle, spreadsheet_id: spreadsheetId, class_type: classType })
         .select('id')
         .single();
       if (insertErr || !inserted) {
@@ -321,7 +332,10 @@ export async function runGoogleSheetSync(
       }
       group = inserted;
     } else {
-      await supabase.from('groups').update({ name: workbookTitle }).eq('id', group.id);
+      await supabase
+        .from('groups')
+        .update({ name: workbookTitle, class_type: classType })
+        .eq('id', group.id);
     }
 
     const sheetList = spreadsheet.data.sheets ?? [];
