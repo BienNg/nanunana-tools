@@ -1,3 +1,5 @@
+'use client';
+
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 
@@ -19,11 +21,11 @@ type Lesson = {
   } | null;
 };
 
-export default function ScheduleTable() {
+export default function ScheduleTable({ courseId }: { courseId?: string } = {}) {
   const [lessons, setLessons] = useState<Lesson[]>([]);
 
   const fetchLessons = async () => {
-    const { data } = await supabase
+    let query = supabase
       .from('lessons')
       .select(
         `*,
@@ -31,7 +33,13 @@ export default function ScheduleTable() {
           name,
           groups ( name )
         )`
-      )
+      );
+
+    if (courseId) {
+      query = query.eq('course_id', courseId);
+    }
+
+    const { data } = await query
       .order('date', { ascending: true })
       .order('start_time', { ascending: true });
     
@@ -42,8 +50,8 @@ export default function ScheduleTable() {
     fetchLessons();
 
     const channel = supabase
-      .channel('schema-db-changes-lessons')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'lessons' }, () => {
+      .channel(`schema-db-changes-lessons-${courseId || 'all'}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'lessons', filter: courseId ? `course_id=eq.${courseId}` : undefined }, () => {
         fetchLessons();
       })
       .subscribe();

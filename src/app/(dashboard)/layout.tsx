@@ -1,9 +1,8 @@
 import { headers } from "next/headers";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
-import DashboardContent from "@/components/DashboardContent";
 
-export default async function Home() {
+export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const h = await headers();
   const rawHost = h.get("x-forwarded-host") ?? h.get("host") ?? "";
   const hostname = rawHost.split(":")[0]?.toLowerCase() ?? "";
@@ -15,7 +14,7 @@ export default async function Home() {
       <Sidebar />
       <main className="ml-[280px] min-h-screen">
         <Topbar showClearDatabase={showClearDatabase} />
-        <DashboardContent />
+        {children}
       </main>
     </>
   );
