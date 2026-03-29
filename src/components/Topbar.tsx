@@ -1,13 +1,30 @@
+'use client';
+
 import ClearDatabaseButton from '@/components/ClearDatabaseButton';
+import { useSidebar } from '@/components/sidebar-context';
 
 type TopbarProps = {
   showClearDatabase?: boolean;
 };
 
 export default function Topbar({ showClearDatabase = false }: TopbarProps) {
+  const { open, toggle, widthPx } = useSidebar();
+
   return (
-    <header className="fixed top-0 right-0 w-[calc(100%-280px)] h-16 z-40 bg-slate-50/80 backdrop-blur-md shadow-sm flex items-center justify-between px-8">
-      <div className="flex items-center flex-1 max-w-xl">
+    <header
+      className="fixed top-0 right-0 z-[45] flex h-16 items-center justify-between bg-slate-50/80 px-8 shadow-sm backdrop-blur-md transition-[left] duration-300 ease-out"
+      style={{ left: open ? widthPx : 0 }}
+    >
+      <div className="flex flex-1 max-w-xl items-center gap-3">
+        <button
+          type="button"
+          onClick={toggle}
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-slate-600 transition-colors hover:bg-blue-50"
+          aria-label={open ? 'Collapse sidebar' : 'Expand sidebar'}
+          aria-expanded={open}
+        >
+          <span className="material-symbols-outlined">menu</span>
+        </button>
         <div className="relative w-full">
           <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
             search

@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useSidebar } from '@/components/sidebar-context';
 
 const navInactive =
   'flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300 rounded-xl';
@@ -10,23 +11,40 @@ const navActive =
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { open, setOpen, widthPx } = useSidebar();
   const dashboardActive = pathname === '/';
   const groupsActive = pathname.startsWith('/groups');
 
   return (
-    <aside className="fixed left-0 top-0 h-full w-[280px] z-50 bg-slate-100 flex flex-col p-6 space-y-2">
-      <div className="flex items-center space-x-3 px-2 mb-10">
-        <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
-          <span className="material-symbols-outlined text-white" style={{ fontVariationSettings: "'FILL' 1" }}>
-            school
-          </span>
+    <aside
+      className={`fixed left-0 top-0 z-50 flex h-full flex-col space-y-2 bg-slate-100 p-6 shadow-sm transition-transform duration-300 ease-out md:shadow-none ${
+        open ? 'translate-x-0' : '-translate-x-full'
+      }`}
+      style={{ width: widthPx }}
+      aria-hidden={!open}
+    >
+      <div className="mb-10 flex items-center justify-between gap-2 px-2">
+        <div className="flex min-w-0 items-center space-x-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary">
+            <span className="material-symbols-outlined text-white" style={{ fontVariationSettings: "'FILL' 1" }}>
+              school
+            </span>
+          </div>
+          <div className="min-w-0">
+            <h1 className="truncate font-black text-xl tracking-tighter text-slate-900">
+              The Atelier
+            </h1>
+            <p className="text-xs font-medium text-slate-500">Academic Curator</p>
+          </div>
         </div>
-        <div>
-          <h1 className="font-black text-xl text-slate-900 tracking-tighter">
-            The Atelier
-          </h1>
-          <p className="text-xs text-slate-500 font-medium">Academic Curator</p>
-        </div>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-white hover:text-slate-900"
+          aria-label="Collapse sidebar"
+        >
+          <span className="material-symbols-outlined text-xl">left_panel_close</span>
+        </button>
       </div>
       <nav className="flex-1 space-y-1">
         <Link href="/" className={dashboardActive ? navActive : navInactive}>
@@ -81,13 +99,6 @@ export default function Sidebar() {
         >
           <span className="material-symbols-outlined text-sm">upload_file</span>
           <span>Import Sheets</span>
-        </a>
-        <a
-          href="#"
-          className="flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 transition-all"
-        >
-          <span className="material-symbols-outlined">help</span>
-          <span className="font-headline text-sm font-medium">Support</span>
         </a>
         <a
           href="#"

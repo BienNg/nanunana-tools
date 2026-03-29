@@ -1,6 +1,5 @@
 import { headers } from "next/headers";
-import Sidebar from "@/components/Sidebar";
-import Topbar from "@/components/Topbar";
+import DashboardShell from "@/components/DashboardShell";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const h = await headers();
@@ -10,12 +9,8 @@ export default async function DashboardLayout({ children }: { children: React.Re
     hostname === "localhost" || hostname === "127.0.0.1";
 
   return (
-    <>
-      <Sidebar />
-      <main className="ml-[280px] min-h-screen">
-        <Topbar showClearDatabase={showClearDatabase} />
-        {children}
-      </main>
-    </>
+    <DashboardShell showClearDatabase={showClearDatabase}>
+      {children}
+    </DashboardShell>
   );
 }

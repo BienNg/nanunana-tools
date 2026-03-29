@@ -157,31 +157,28 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
                   const isPresent = record?.status === 'Present';
                   const isAbsent = record?.status === 'Absent';
 
+                  const cellClass =
+                    record && isPresent
+                      ? 'bg-green-100 group-hover:bg-green-200/85'
+                      : record && isAbsent
+                        ? 'bg-red-100 group-hover:bg-red-200/85'
+                        : '';
+
                   return (
-                    <td key={student.id} className="px-4 py-6 text-center align-top">
+                    <td
+                      key={student.id}
+                      title={record ? record.status : undefined}
+                      className={`px-4 py-6 text-center align-top transition-colors ${cellClass}`}
+                    >
                       {record ? (
-                        <div className="flex flex-col items-center gap-1.5">
-                          <span
-                            className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-sm font-bold shrink-0 ${
-                              isPresent
-                                ? 'bg-green-100 text-green-700'
-                                : isAbsent
-                                ? 'bg-red-100 text-red-600'
-                                : 'bg-surface-container text-on-surface-variant'
-                            }`}
-                            title={record.status}
+                        record.feedback ? (
+                          <p
+                            className="text-[10px] text-on-surface-variant leading-tight max-w-[110px] mx-auto text-center line-clamp-3"
+                            title={record.feedback}
                           >
-                            {isPresent ? '✓' : isAbsent ? '✗' : '?'}
-                          </span>
-                          {record.feedback && (
-                            <p
-                              className="text-[10px] text-on-surface-variant leading-tight max-w-[110px] text-center line-clamp-3"
-                              title={record.feedback}
-                            >
-                              {record.feedback}
-                            </p>
-                          )}
-                        </div>
+                            {record.feedback}
+                          </p>
+                        ) : null
                       ) : (
                         <span className="text-outline/30 text-base leading-none">—</span>
                       )}
