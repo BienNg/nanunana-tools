@@ -47,16 +47,8 @@ export default function DashboardContent() {
       <StatsGrid />
 
       {/* Main Interactive Content */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Schedule & Activity */}
-        <div className="lg:col-span-2 space-y-8 animate-fade-up">
-          <ScheduleTable />
-        </div>
-        
-        {/* Side Panels */}
-        <div className="space-y-8 animate-fade-up">
-          <StudentRollCall />
-        </div>
+      <div className="animate-fade-up">
+        <ScheduleTable />
       </div>
     </section>
   );
