@@ -124,19 +124,14 @@ async function syncOneCourseSheet(
   const colIndices = {
     folien: headers.findIndex((h) => h && String(h).includes('Folien') && !String(h).includes('gecheckt')),
     inhalt: headers.findIndex((h) => h && String(h).includes('Inhalt')),
-    notizen: headers.findIndex((h) => h && String(h).includes('Notizen')),
-    slidesChecked: headers.findIndex((h) => h && String(h).includes('gecheckt')),
-    gemacht: headers.findIndex((h) => h && String(h).includes('gemacht')),
     datum: headers.findIndex((h) => h && String(h).includes('Datum')),
     von: headers.findIndex((h) => h && String(h).includes('von')),
     bis: headers.findIndex((h) => h && String(h).includes('bis')),
-    nachrichten: headers.findIndex((h) => h && String(h).includes('Nachrichten')),
   };
   const lehrerCols = lehrerColumnIndices(headers);
   if (colIndices.folien === -1 && colIndices.inhalt === -1) return { ok: false, reason: 'no_course_columns' };
 
-  const studentStartIndex =
-    colIndices.nachrichten !== -1 ? colIndices.nachrichten + 1 : Math.max(10, ...lehrerCols) + 1;
+  const studentStartIndex = Math.max(10, ...lehrerCols) + 1;
   const studentNames: { index: number; name: string }[] = [];
   for (let i = studentStartIndex; i < headers.length; i++) {
     const cell = headers[i];
@@ -192,12 +187,6 @@ async function syncOneCourseSheet(
     const inhalt = colIndices.inhalt !== -1 ? row[colIndices.inhalt] : '';
     if (!folien && !inhalt) continue;
 
-    const slidesCheckedStr =
-      colIndices.slidesChecked !== -1 ? String(row[colIndices.slidesChecked] ?? '').toLowerCase() : '';
-    const gemachtStr = colIndices.gemacht !== -1 ? String(row[colIndices.gemacht] ?? '').toLowerCase() : '';
-    const isChecked = ['true', 'yes', 'x', 'v', '1', 'ja'].includes(slidesCheckedStr.trim());
-    const isDone = ['true', 'yes', 'x', 'v', '1', 'ja'].includes(gemachtStr.trim());
-
     const rawDate = colIndices.datum !== -1 ? row[colIndices.datum] : '';
     const parsedDate = parseSheetDate(rawDate != null ? String(rawDate) : null);
 
@@ -223,16 +212,10 @@ async function syncOneCourseSheet(
         course_id: courseId,
         slide_id: folien ? String(folien) : null,
         content: inhalt ? String(inhalt) : null,
-        notes: colIndices.notizen !== -1 && row[colIndices.notizen] ? String(row[colIndices.notizen]) : null,
-        slides_checked: isChecked,
-        is_done: isDone,
         date: parsedDate,
         start_time: startTime,
         end_time: endTime,
         teacher: teacherCell,
-        messages: colIndices.nachrichten !== -1 && row[colIndices.nachrichten]
-          ? String(row[colIndices.nachrichten])
-          : null,
       })
       .select('id')
       .single();
