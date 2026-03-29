@@ -4,7 +4,6 @@ import { useEffect, useRef } from 'react';
 import gsap from 'gsap';
 import SyncForm from './SyncForm';
 import StatsGrid from './StatsGrid';
-import ScheduleTable from './ScheduleTable';
 
 export default function DashboardContent() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -46,10 +45,6 @@ export default function DashboardContent() {
       {/* Bento Stats Grid */}
       <StatsGrid />
 
-      {/* Main Interactive Content */}
-      <div className="animate-fade-up">
-        <ScheduleTable />
-      </div>
     </section>
   );
 }
