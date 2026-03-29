@@ -35,13 +35,17 @@ function parseSheetDate(raw: string | undefined | null): string | null {
   if (raw == null || raw === '') return null;
   const s = String(raw).trim();
   if (!s) return null;
+  // YYYY-MM-DD (already correct format)
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  if (s.includes('/')) {
-    const parts = s.split('/');
-    if (parts.length === 3) {
-      const [d, m, y] = parts.map((p) => p.trim());
-      if (y && m && d) return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-    }
+  // DD/MM/YYYY
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
+    const [d, m, y] = s.split('/').map((p) => p.trim());
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  // DD.MM.YYYY  (format the sheet instructions prescribe, e.g. "21.06.2024")
+  if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(s)) {
+    const [d, m, y] = s.split('.').map((p) => p.trim());
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
   }
   return null;
 }
@@ -51,12 +55,10 @@ type SheetRow = string[];
 function findHeaderRowIndex(rows: SheetRow[]): number {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (row && (row.includes('Folien') || row.some((c) => c && String(c).includes('Folien')))) {
-      return i;
-    }
-    if (row && row.some((c) => c && String(c).includes('Inhalt'))) {
-      return i;
-    }
+    if (!row) continue;
+    // The actual header row has "Folien" as its very first cell value (exact match).
+    // We must NOT match rows where "Folien" only appears inside a long description text.
+    if (String(row[0] ?? '').trim() === 'Folien') return i;
   }
   return -1;
 }
