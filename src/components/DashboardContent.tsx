@@ -5,7 +5,6 @@ import gsap from 'gsap';
 import SyncForm from './SyncForm';
 import StatsGrid from './StatsGrid';
 import ScheduleTable from './ScheduleTable';
-import StudentRollCall from './StudentRollCall';
 
 export default function DashboardContent() {
   const containerRef = useRef<HTMLDivElement>(null);

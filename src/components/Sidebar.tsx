@@ -1,6 +1,18 @@
+'use client';
+
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+
+const navInactive =
+  'flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300 rounded-xl';
+const navActive =
+  'flex items-center space-x-3 px-4 py-3 bg-white text-blue-700 shadow-sm rounded-xl transition-all ease-out';
 
 export default function Sidebar() {
+  const pathname = usePathname();
+  const dashboardActive = pathname === '/';
+  const groupsActive = pathname.startsWith('/groups');
+
   return (
     <aside className="fixed left-0 top-0 h-full w-[280px] z-50 bg-slate-100 flex flex-col p-6 space-y-2">
       <div className="flex items-center space-x-3 px-2 mb-10">
@@ -17,12 +29,13 @@ export default function Sidebar() {
         </div>
       </div>
       <nav className="flex-1 space-y-1">
-        <Link
-          href="/"
-          className="flex items-center space-x-3 px-4 py-3 bg-white text-blue-700 shadow-sm rounded-xl transition-all ease-out"
-        >
+        <Link href="/" className={dashboardActive ? navActive : navInactive}>
           <span className="material-symbols-outlined">dashboard</span>
-          <span className="font-headline text-sm font-semibold">Dashboard</span>
+          <span
+            className={`font-headline text-sm ${dashboardActive ? 'font-semibold' : 'font-medium'}`}
+          >
+            Dashboard
+          </span>
         </Link>
         <Link
           href="#"
@@ -38,12 +51,13 @@ export default function Sidebar() {
           <span className="material-symbols-outlined">rule</span>
           <span className="font-headline text-sm font-medium">Attendance</span>
         </Link>
-        <Link
-          href="/groups"
-          className="flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300"
-        >
+        <Link href="/groups" className={groupsActive ? navActive : navInactive}>
           <span className="material-symbols-outlined">workspaces</span>
-          <span className="font-headline text-sm font-medium">Groups</span>
+          <span
+            className={`font-headline text-sm ${groupsActive ? 'font-semibold' : 'font-medium'}`}
+          >
+            Groups
+          </span>
         </Link>
         <Link
           href="#"
