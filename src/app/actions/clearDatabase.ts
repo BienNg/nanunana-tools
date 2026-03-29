@@ -27,6 +27,10 @@ export async function clearAllDatabaseEntries() {
   if (coursesError) {
     return { ok: false as const, error: coursesError.message };
   }
+  const { error: teachersError } = await supabase.from('teachers').delete().neq('id', SENTINEL_ID);
+  if (teachersError) {
+    return { ok: false as const, error: teachersError.message };
+  }
   revalidatePath('/');
   return { ok: true as const };
 }
