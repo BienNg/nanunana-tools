@@ -14,6 +14,7 @@ export default function Sidebar() {
   const { open, setOpen, widthPx } = useSidebar();
   const dashboardActive = pathname === '/';
   const groupsActive = pathname.startsWith('/groups');
+  const teachersActive = pathname.startsWith('/teachers');
 
   return (
     <aside
@@ -59,13 +60,6 @@ export default function Sidebar() {
           href="#"
           className="flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300"
         >
-          <span className="material-symbols-outlined">calendar_month</span>
-          <span className="font-headline text-sm font-medium">Schedule</span>
-        </Link>
-        <Link
-          href="#"
-          className="flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300"
-        >
           <span className="material-symbols-outlined">rule</span>
           <span className="font-headline text-sm font-medium">Attendance</span>
         </Link>
@@ -77,19 +71,20 @@ export default function Sidebar() {
             Groups
           </span>
         </Link>
+        <Link href="/teachers" className={teachersActive ? navActive : navInactive}>
+          <span className="material-symbols-outlined">badge</span>
+          <span
+            className={`font-headline text-sm ${teachersActive ? 'font-semibold' : 'font-medium'}`}
+          >
+            Teachers
+          </span>
+        </Link>
         <Link
           href="#"
           className="flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300"
         >
           <span className="material-symbols-outlined">group</span>
           <span className="font-headline text-sm font-medium">Students</span>
-        </Link>
-        <Link
-          href="#"
-          className="flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300"
-        >
-          <span className="material-symbols-outlined">grid_on</span>
-          <span className="font-headline text-sm font-medium">Integrations</span>
         </Link>
       </nav>
       <div className="mt-auto pt-6 border-t border-slate-200/50 space-y-1">
