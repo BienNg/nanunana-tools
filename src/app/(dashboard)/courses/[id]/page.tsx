@@ -45,8 +45,8 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
       ? supabase.from('groups').select('name, class_type').eq('id', course.group_id).maybeSingle()
       : Promise.resolve({ data: null as { name: string; class_type: string | null } | null });
 
-  const [{ data: students }, { data: lessons }, { data: groupRow }] = await Promise.all([
-    supabase.from('students').select('id').eq('course_id', id),
+  const [{ count: studentCount }, { data: lessons }, { data: groupRow }] = await Promise.all([
+    supabase.from('course_students').select('*', { count: 'exact', head: true }).eq('course_id', id),
     supabase
       .from('lessons')
       .select(`
@@ -140,7 +140,7 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
             <span className="material-symbols-outlined text-primary text-xl bg-primary/10 p-1.5 rounded-lg">group</span>
             <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Students</span>
           </div>
-          <div className="text-2xl font-black text-on-surface font-headline">{students?.length || 0}</div>
+          <div className="text-2xl font-black text-on-surface font-headline">{studentCount ?? 0}</div>
         </div>
 
         <div className="bg-surface-container-lowest p-5 rounded-2xl shadow-sm border border-outline-variant/10 flex flex-col justify-between group hover:translate-y-[-2px] transition-transform">

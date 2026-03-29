@@ -1,5 +1,81 @@
-import { google } from 'googleapis';
+import { google, sheets_v4 } from 'googleapis';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+
+type AttendanceFromColor = 'Present' | 'Absent' | null;
+
+function rgbFromCellFormat(fmt: sheets_v4.Schema$CellFormat | null | undefined): { r: number; g: number; b: number } | null {
+  if (!fmt) return null;
+  const rgb = fmt.backgroundColorStyle?.rgbColor ?? fmt.backgroundColor;
+  if (!rgb) return null;
+  const r = rgb.red ?? 0;
+  const g = rgb.green ?? 0;
+  const b = rgb.blue ?? 0;
+  const a = rgb.alpha;
+  if (a != null && a < 0.08) return null;
+  return { r, g, b };
+}
+
+/** Green-dominant (any shade) → present; red-dominant → absent; white/gray/default → no row. */
+function attendanceStatusFromRgb(r: number, g: number, b: number): AttendanceFromColor {
+  if (r > 0.93 && g > 0.93 && b > 0.93) return null;
+  if (r < 0.03 && g < 0.03 && b < 0.03) return null;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  if (max - min < 0.03) return null;
+
+  if (g > r) return 'Present';
+  if (r > g) return 'Absent';
+  return null;
+}
+
+function attendanceStatusFromCellData(cell: sheets_v4.Schema$CellData | undefined | null): AttendanceFromColor {
+  if (!cell) return null;
+  let rgb = rgbFromCellFormat(cell.effectiveFormat);
+  if (!rgb) rgb = rgbFromCellFormat(cell.userEnteredFormat);
+  if (!rgb) return null;
+  return attendanceStatusFromRgb(rgb.r, rgb.g, rgb.b);
+}
+
+function cellStringFromCellData(cell: sheets_v4.Schema$CellData | undefined | null): string {
+  if (!cell) return '';
+  if (cell.formattedValue != null && cell.formattedValue !== '') return String(cell.formattedValue);
+  const ev = cell.effectiveValue;
+  if (!ev) return '';
+  if (ev.stringValue != null) return String(ev.stringValue);
+  if (ev.numberValue != null) return String(ev.numberValue);
+  if (ev.boolValue != null) return String(ev.boolValue);
+  return '';
+}
+
+function sheetGridToRowsAndColorAttendance(
+  rowData: sheets_v4.Schema$RowData[] | null | undefined
+): { rows: string[][]; colorAttendance: AttendanceFromColor[][] } {
+  if (!rowData?.length) return { rows: [], colorAttendance: [] };
+
+  let maxCols = 0;
+  for (const rd of rowData) {
+    maxCols = Math.max(maxCols, rd.values?.length ?? 0);
+  }
+
+  const rows: string[][] = [];
+  const colorAttendance: AttendanceFromColor[][] = [];
+
+  for (const rd of rowData) {
+    const vals = rd.values ?? [];
+    const row: string[] = [];
+    const att: AttendanceFromColor[] = [];
+    for (let c = 0; c < maxCols; c++) {
+      const cell = vals[c];
+      row.push(cellStringFromCellData(cell));
+      att.push(attendanceStatusFromCellData(cell));
+    }
+    rows.push(row);
+    colorAttendance.push(att);
+  }
+
+  return { rows, colorAttendance };
+}
 
 /** Escape a worksheet title for use in A1 notation: 'Sheet Name'!A1:Z */
 function escapeSheetTitleForRange(title: string): string {
@@ -76,6 +152,56 @@ function lehrerColumnIndices(headers: SheetRow): number[] {
   return out;
 }
 
+/** Headers for notes/messages columns that sit among student columns in the template. */
+function isNonStudentColumnHeader(raw: string): boolean {
+  const t = String(raw).trim().toLowerCase();
+  if (!t) return true;
+  if (t.includes('nachricht')) return true;
+  if (t.includes('bemerkung')) return true;
+  if (t.includes('notiz')) return true;
+  if (t.includes('kommentar')) return true;
+  return false;
+}
+
+/** One logical student per trimmed name; duplicate header columns share indices for attendance merge. */
+type SheetStudentColumn = { indices: number[]; name: string };
+
+function dedupeSheetStudentColumns(studentNames: { index: number; name: string }[]): SheetStudentColumn[] {
+  const map = new Map<string, SheetStudentColumn>();
+  for (const { index, name } of studentNames) {
+    const key = name.trim();
+    if (!key) continue;
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, { indices: [index], name: key });
+    } else {
+      prev.indices.push(index);
+    }
+  }
+  return [...map.values()];
+}
+
+function pickFirstAttendanceStatus(
+  attRow: AttendanceFromColor[] | undefined,
+  indices: number[]
+): AttendanceFromColor {
+  for (const i of indices) {
+    const s = attRow?.[i] ?? null;
+    if (s !== null) return s;
+  }
+  return null;
+}
+
+function mergedFeedbackFromRow(row: SheetRow, indices: number[]): string {
+  const parts: string[] = [];
+  for (const i of indices) {
+    const cell = row[i];
+    const t = cell ? String(cell).trim() : '';
+    if (t) parts.push(t);
+  }
+  return parts.join(' ').trim();
+}
+
 /**
  * Sync teachers for one course using an in-memory cache to avoid per-row DB calls.
  *
@@ -120,7 +246,9 @@ async function syncOneCourseSheet(
   groupId: string,
   sheetTitle: string,
   rows: SheetRow[] | undefined,
-  teacherCache: Map<string, string>
+  teacherCache: Map<string, string>,
+  colorAttendance: AttendanceFromColor[][] | undefined,
+  studentCache: Map<string, string>
 ): Promise<{ ok: boolean; reason?: string }> {
   if (!rows || rows.length < 4) return { ok: false, reason: 'too_few_rows' };
 
@@ -140,14 +268,28 @@ async function syncOneCourseSheet(
   const lehrerCols = lehrerColumnIndices(headers);
   if (colIndices.folien === -1 && colIndices.inhalt === -1) return { ok: false, reason: 'no_course_columns' };
 
-  const studentStartIndex = Math.max(10, ...lehrerCols) + 1;
+  const reservedColIndices: number[] = [
+    colIndices.folien,
+    colIndices.inhalt,
+    colIndices.datum,
+    colIndices.von,
+    colIndices.bis,
+    ...lehrerCols,
+  ];
+  const lehrerHeaderIdx = headers.findIndex((h) => h && String(h).includes('Lehrer'));
+  if (lehrerHeaderIdx >= 0) reservedColIndices.push(lehrerHeaderIdx);
+  const maxReserved = Math.max(-1, ...reservedColIndices.filter((i) => i >= 0));
+  const studentStartIndex = maxReserved + 1;
   const studentNames: { index: number; name: string }[] = [];
   for (let i = studentStartIndex; i < headers.length; i++) {
     const cell = headers[i];
-    if (cell && String(cell).trim() !== '') {
-      studentNames.push({ index: i, name: String(cell).trim() });
-    }
+    const trimmed = cell ? String(cell).trim() : '';
+    if (!trimmed) continue;
+    if (isNonStudentColumnHeader(trimmed)) continue;
+    studentNames.push({ index: i, name: trimmed });
   }
+
+  const uniqueStudentCols = dedupeSheetStudentColumns(studentNames);
 
   const { data: existing } = await supabase
     .from('courses')
@@ -171,18 +313,38 @@ async function syncOneCourseSheet(
     courseId = newCourse.id;
   }
 
-  const studentRecords = studentNames.map((s) => ({ course_id: courseId, name: s.name }));
-  for (const record of studentRecords) {
-    await supabase.from('students').upsert(record, { onConflict: 'course_id,name' });
+  for (const col of uniqueStudentCols) {
+    const name = col.name;
+    let studentId = studentCache.get(name);
+    if (!studentId) {
+      const { data: row, error: studentUpsertError } = await supabase
+        .from('students')
+        .upsert({ group_id: groupId, name }, { onConflict: 'group_id,name' })
+        .select('id')
+        .single();
+      const newId = row?.id;
+      if (studentUpsertError || !newId) {
+        throw new Error(
+          `Failed to upsert student "${name}" in group: ${studentUpsertError?.message ?? 'unknown'}`
+        );
+      }
+      studentId = newId;
+      studentCache.set(name, newId);
+    }
+
+    const { error: enrollError } = await supabase
+      .from('course_students')
+      .upsert({ course_id: courseId, student_id: studentId }, { onConflict: 'course_id,student_id' });
+    if (enrollError) {
+      throw new Error(`Failed to enroll student "${name}" in course: ${enrollError.message}`);
+    }
   }
 
-  const { data: students } = await supabase.from('students').select('id, name').eq('course_id', courseId);
-  if (!students) throw new Error('Failed to retrieve students');
-
   const studentMap: Record<string, string> = {};
-  students.forEach((s) => {
-    studentMap[s.name] = s.id;
-  });
+  for (const col of uniqueStudentCols) {
+    const sid = studentCache.get(col.name);
+    if (sid) studentMap[col.name] = sid;
+  }
 
   await supabase.from('lessons').delete().eq('course_id', courseId);
 
@@ -241,18 +403,18 @@ async function syncOneCourseSheet(
       status: string;
     }[] = [];
 
-    for (const student of studentNames) {
-      const feedback = row[student.index] ? String(row[student.index]) : '';
-      if (!feedback.trim()) continue;
-      const sid = studentMap[student.name];
+    const attRow = colorAttendance?.[i];
+    for (const col of uniqueStudentCols) {
+      const sid = studentMap[col.name];
       if (!sid) continue;
-      const lower = feedback.toLowerCase();
-      const isAbsent = lower.includes('abwesend') || lower.includes('absent');
+      const status = pickFirstAttendanceStatus(attRow, col.indices);
+      if (status === null) continue;
+      const feedback = mergedFeedbackFromRow(row, col.indices);
       attendanceInserts.push({
         lesson_id: lesson.id,
         student_id: sid,
         feedback,
-        status: isAbsent ? 'Absent' : 'Present',
+        status,
       });
     }
 
@@ -338,6 +500,12 @@ export async function runGoogleSheetSync(
         .eq('id', group.id);
     }
 
+    const { data: groupStudents } = await supabase.from('students').select('id, name').eq('group_id', group.id);
+    const studentCache = new Map<string, string>();
+    for (const s of groupStudents ?? []) {
+      studentCache.set(String(s.name).trim(), s.id);
+    }
+
     const sheetList = spreadsheet.data.sheets ?? [];
     const visibleSheetCount = sheetList.filter(
       (s) => Boolean(s.properties?.title) && !s.properties?.hidden
@@ -369,12 +537,23 @@ export async function runGoogleSheetSync(
       });
 
       const range = `${escapeSheetTitleForRange(title)}!A1:Z1000`;
-      const response = await sheets.spreadsheets.values.get({
+      const gridResponse = await sheets.spreadsheets.get({
         spreadsheetId,
-        range,
+        ranges: [range],
+        includeGridData: true,
       });
-      const rows = response.data.values as SheetRow[] | undefined;
-      const result = await syncOneCourseSheet(supabase, group.id, title, rows, teacherCache);
+      const sheetWithGrid = gridResponse.data.sheets?.find((sh) => sh.properties?.title === title);
+      const rowData = sheetWithGrid?.data?.[0]?.rowData;
+      const { rows, colorAttendance } = sheetGridToRowsAndColorAttendance(rowData);
+      const result = await syncOneCourseSheet(
+        supabase,
+        group.id,
+        title,
+        rows,
+        teacherCache,
+        colorAttendance,
+        studentCache
+      );
       if (result.ok) synced++;
       else skipped++;
     }

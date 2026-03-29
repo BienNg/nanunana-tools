@@ -62,13 +62,22 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
     if (lessonsData) setLessons(lessonsData as Lesson[]);
 
     if (courseId) {
-      const { data: studentsData } = await supabase
-        .from('students')
-        .select('id, name')
-        .eq('course_id', courseId)
-        .order('name');
+      const { data: enrollments } = await supabase
+        .from('course_students')
+        .select('students ( id, name )')
+        .eq('course_id', courseId);
 
-      if (studentsData) setStudents(studentsData);
+      const rows: Student[] = [];
+      for (const row of enrollments ?? []) {
+        const s = row.students as Student | Student[] | null | undefined;
+        if (s == null) continue;
+        const list = Array.isArray(s) ? s : [s];
+        for (const st of list) {
+          if (st?.id && st?.name) rows.push(st);
+        }
+      }
+      rows.sort((a, b) => a.name.localeCompare(b.name));
+      setStudents(rows);
     }
   };
 
@@ -79,13 +88,23 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
       .channel(`schedule-${courseId || 'all'}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'lessons', filter: courseId ? `course_id=eq.${courseId}` : undefined }, fetchData)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_records' }, fetchData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'students', filter: courseId ? `course_id=eq.${courseId}` : undefined }, fetchData)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'course_students',
+          filter: courseId ? `course_id=eq.${courseId}` : undefined,
+        },
+        fetchData
+      )
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, fetchData)
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [courseId]);
 
   const getAttendance = (lesson: Lesson, studentId: string): AttendanceRecord | undefined =>
     lesson.attendance_records?.find((r) => r.student_id === studentId);
