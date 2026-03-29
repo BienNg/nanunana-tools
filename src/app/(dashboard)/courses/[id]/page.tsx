@@ -1,4 +1,9 @@
 import Link from 'next/link';
+import {
+  formatDurationHoursMinutes,
+  normalizeGroupClassType,
+  totalCourseDurationMinutes,
+} from '@/lib/courseDuration';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import ScheduleTable from '@/components/ScheduleTable';
 
@@ -16,7 +21,6 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
       id, 
       name,
       group_id,
-      groups ( name ),
       course_teachers (
         teachers ( name )
       )
@@ -36,14 +40,16 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
     );
   }
 
-  const { data: students } = await supabase
-    .from('students')
-    .select('id')
-    .eq('course_id', id);
+  const groupQuery =
+    course.group_id != null
+      ? supabase.from('groups').select('name, class_type').eq('id', course.group_id).maybeSingle()
+      : Promise.resolve({ data: null as { name: string; class_type: string | null } | null });
 
-  const { data: lessons } = await supabase
-    .from('lessons')
-    .select(`
+  const [{ data: students }, { data: lessons }, { data: groupRow }] = await Promise.all([
+    supabase.from('students').select('id').eq('course_id', id),
+    supabase
+      .from('lessons')
+      .select(`
       id,
       date,
       start_time,
@@ -52,39 +58,31 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
         status
       )
     `)
-    .eq('course_id', id)
-    .order('date', { ascending: true });
+      .eq('course_id', id)
+      .order('date', { ascending: true }),
+    groupQuery,
+  ]);
+
+  const group = groupRow ?? null;
 
   const teachers = course.course_teachers
     ?.map((ct: any) => ct.teachers?.name)
     .filter(Boolean)
     .join(', ') || 'No teachers assigned';
 
-  // Calculate analytics
-  let totalDurationMinutes = 0;
+  const classType = normalizeGroupClassType(group?.class_type);
+  const totalDurationMinutes = totalCourseDurationMinutes(lessons ?? [], classType);
+  const totalDurationStr = formatDurationHoursMinutes(totalDurationMinutes);
+
   let totalAttendance = 0;
   let presentAttendance = 0;
 
-  lessons?.forEach(lesson => {
-    if (lesson.start_time && lesson.end_time) {
-      const [startH, startM] = lesson.start_time.split(':').map(Number);
-      const [endH, endM] = lesson.end_time.split(':').map(Number);
-      const startMinutes = startH * 60 + startM;
-      const endMinutes = endH * 60 + endM;
-      if (endMinutes > startMinutes) {
-        totalDurationMinutes += (endMinutes - startMinutes);
-      }
-    }
-    
+  lessons?.forEach((lesson) => {
     lesson.attendance_records?.forEach((record: any) => {
       totalAttendance++;
       if (record.status === 'Present') presentAttendance++;
     });
   });
-
-  const totalDurationHours = Math.floor(totalDurationMinutes / 60);
-  const totalDurationRemainder = totalDurationMinutes % 60;
-  const totalDurationStr = `${totalDurationHours}h ${totalDurationRemainder}m`;
 
   const attendanceRate = totalAttendance > 0 ? Math.round((presentAttendance / totalAttendance) * 100) : 0;
 
@@ -102,7 +100,7 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
         <div className="flex gap-4 mb-6">
           <Link href={`/groups/${course.group_id}`} className="text-primary text-sm font-semibold inline-flex items-center gap-1 hover:bg-primary/5 px-3 py-1.5 -ml-3 rounded-full transition-colors">
             <span className="material-symbols-outlined text-sm">arrow_back</span>
-            Back to {course.groups?.name || 'Group'}
+            Back to {group?.name || 'Group'}
           </Link>
         </div>
         
@@ -113,7 +111,7 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
           <div>
             <div className="flex items-center gap-2 mb-1">
               <span className="text-xs font-bold uppercase tracking-wider text-primary">
-                {course.groups?.name}
+                {group?.name}
               </span>
             </div>
             <h2 className="text-4xl font-extrabold text-on-surface tracking-tight font-headline">
