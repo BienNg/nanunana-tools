@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Manrope:wght@700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "background": "#f7f9ff",
+                        "primary-fixed-dim": "#adc7ff",
+                        "primary-container": "#1a73e8",
+                        "tertiary-container": "#008939",
+                        "error-container": "#ffdad6",
+                        "on-secondary": "#ffffff",
+                        "on-primary-fixed": "#001a41",
+                        "on-surface-variant": "#414754",
+                        "secondary-fixed": "#d8e2ff",
+                        "surface-bright": "#f7f9ff",
+                        "surface-container": "#ebeef4",
+                        "on-secondary-fixed-variant": "#004494",
+                        "on-tertiary-fixed": "#002108",
+                        "on-tertiary": "#ffffff",
+                        "surface-container-highest": "#dfe3e8",
+                        "secondary-container": "#4d8efe",
+                        "on-error": "#ffffff",
+                        "surface": "#f7f9ff",
+                        "surface-container-low": "#f1f4fa",
+                        "surface-container-highest": "#dfe3e8",
+                        "surface-container-low": "#f1f4fa",
+                        "surface-container-high": "#e5e8ee",
+                        "outline-variant": "#c1c6d6",
+                        "on-primary-container": "#ffffff",
+                        "surface-dim": "#d7dae0",
+                        "primary": "#005bbf",
+                        "inverse-surface": "#2d3135",
+                        "on-background": "#181c20",
+                        "on-secondary-container": "#00285c",
+                        "error": "#ba1a1a",
+                        "tertiary-fixed": "#89fa9b",
+                        "inverse-on-surface": "#eef1f7",
+                        "surface-variant": "#dfe3e8",
+                        "outline": "#727785",
+                        "on-tertiary-container": "#ffffff",
+                        "surface-tint": "#005bc0",
+                        "on-primary-fixed-variant": "#004493",
+                        "tertiary": "#006d2c",
+                        "on-tertiary-fixed-variant": "#005320",
+                        "primary-fixed": "#d8e2ff",
+                        "on-secondary-fixed": "#001a41",
+                        "on-primary": "#ffffff",
+                        "secondary-fixed-dim": "#adc6ff",
+                        "tertiary-fixed-dim": "#6ddd81",
+                        "secondary": "#005ac1",
+                        "inverse-primary": "#adc7ff",
+                        "on-error-container": "#93000a",
+                        "on-surface": "#181c20",
+                        "surface-container-lowest": "#ffffff"
+                    },
+                    fontFamily: {
+                        "headline": ["Manrope"],
+                        "body": ["Inter"],
+                        "label": ["Inter"]
+                    },
+                    borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="bg-background font-body text-on-surface">
+<!-- SideNavBar -->
+<aside class="fixed left-0 top-0 h-full w-[280px] z-50 bg-slate-100 dark:bg-slate-950 flex flex-col p-6 space-y-2">
+<div class="mb-10 px-2 flex items-center gap-3">
+<div class="w-10 h-10 rounded-xl bg-primary flex items-center justify-center text-on-primary">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">school</span>
+</div>
+<div>
+<h1 class="font-black text-xl text-slate-900 dark:text-slate-100 tracking-tight">The Atelier</h1>
+<p class="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Academic Curator</p>
+</div>
+</div>
+<nav class="flex-1 space-y-1">
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:translate-x-1 duration-300 transition-all ease-out" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-manrope text-sm font-medium">Dashboard</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 bg-white dark:bg-slate-900 text-blue-700 dark:text-blue-400 shadow-sm rounded-xl transition-all ease-out" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">calendar_month</span>
+<span class="font-manrope text-sm font-medium">Schedule</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:translate-x-1 duration-300 transition-all ease-out" href="#">
+<span class="material-symbols-outlined">rule</span>
+<span class="font-manrope text-sm font-medium">Attendance</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:translate-x-1 duration-300 transition-all ease-out" href="#">
+<span class="material-symbols-outlined">group</span>
+<span class="font-manrope text-sm font-medium">Students</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:translate-x-1 duration-300 transition-all ease-out" href="#">
+<span class="material-symbols-outlined">grid_on</span>
+<span class="font-manrope text-sm font-medium">Integrations</span>
+</a>
+</nav>
+<div class="pt-6 mt-6 border-t border-slate-200/50 dark:border-slate-800/50 space-y-1">
+<button class="w-full flex items-center gap-3 px-4 py-3 mb-4 bg-gradient-to-br from-primary to-primary-container text-on-primary rounded-xl font-bold shadow-md hover:scale-[1.02] active:scale-95 transition-all">
+<span class="material-symbols-outlined text-sm">upload_file</span>
+<span class="text-sm">Import Sheets</span>
+</button>
+<a class="flex items-center gap-3 px-4 py-2 text-slate-500 hover:text-slate-900 dark:hover:text-white text-sm" href="#">
+<span class="material-symbols-outlined">help</span>
+<span>Support</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-2 text-error text-sm" href="#">
+<span class="material-symbols-outlined">logout</span>
+<span>Logout</span>
+</a>
+</div>
+</aside>
+<!-- Main Content Canvas -->
+<main class="ml-[280px] min-h-screen">
+<!-- TopNavBar -->
+<header class="fixed top-0 right-0 w-[calc(100%-280px)] h-16 z-40 bg-slate-50/80 dark:bg-slate-900/80 backdrop-blur-md shadow-sm flex items-center justify-between px-8">
+<div class="flex items-center gap-4">
+<div class="bg-surface-container-low px-4 py-1.5 rounded-full flex items-center gap-2 border border-outline-variant/10">
+<span class="material-symbols-outlined text-sm text-primary">sheets_apps_script</span>
+<span class="text-xs font-semibold text-on-surface-variant">Class_Schedule_Q4.xlsx</span>
+<span class="text-[10px] text-tertiary px-1.5 py-0.5 bg-tertiary-container/10 rounded-md font-bold">SYNCED</span>
+</div>
+</div>
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-2 text-slate-600 dark:text-slate-400">
+<span class="material-symbols-outlined cursor-pointer hover:bg-blue-50 p-2 rounded-full transition-colors">notifications</span>
+<span class="material-symbols-outlined cursor-pointer hover:bg-blue-50 p-2 rounded-full transition-colors">settings</span>
+</div>
+<div class="h-8 w-px bg-slate-200"></div>
+<div class="flex items-center gap-3">
+<span class="text-sm font-bold text-slate-700">Dr. Aris Thorne</span>
+<img alt="User profile avatar" class="w-10 h-10 rounded-full border-2 border-white shadow-sm" data-alt="professional headshot of a middle-aged male educator with glasses and a kind smile in a modern office" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCui41uwz7dbP5IzyCDhdVZFXFpYICbi2R-aqwhQHpl7WL6dGEfY9kDSYlvXYyzNHCYD_t18uu3ZeuTk-EpzmCv-ZYdgyVgVU-EPmxgZSmTvaFOFBJVUzQJxx88W6Y812raULI6pJAcD41lR4XiWBRef67eMzzbLsFQzw3_boEbUZRD5fCvv37t5JNS3A60ZlKVxax9ZKPZ49tFYiLX5uAtXYsd1_2F52EtL9-ROKGJFMF7IzDKLOB5qM6Ofyj4tAB34xMrgI1dbaNY"/>
+</div>
+</div>
+</header>
+<!-- Content Area -->
+<div class="pt-24 px-12 pb-16">
+<!-- Hero Header Section -->
+<div class="mb-12 flex items-end justify-between">
+<div>
+<nav class="flex items-center gap-2 text-xs font-bold text-on-surface-variant/60 uppercase tracking-tighter mb-2">
+<span>Curator</span>
+<span class="material-symbols-outlined text-[10px]">chevron_right</span>
+<span>Schedule Analysis</span>
+</nav>
+<h2 class="text-4xl font-black font-headline tracking-tighter text-on-surface leading-none">Schedule Intel</h2>
+<p class="mt-3 text-on-surface-variant max-w-lg leading-relaxed">Curated view of your Google Sheets import. We've parsed the curriculum flow and synchronized current attendance markers.</p>
+</div>
+<div class="flex gap-4">
+<button class="bg-surface-container-high px-6 py-3 rounded-full text-primary font-bold text-sm hover:bg-surface-container-highest transition-colors">
+                        Download Report
+                    </button>
+<button class="bg-gradient-to-br from-primary to-primary-container text-on-primary px-6 py-3 rounded-full font-bold text-sm shadow-lg shadow-primary/20 hover:scale-105 transition-transform">
+                        Update Spreadsheet
+                    </button>
+</div>
+</div>
+<!-- Bento Grid Section: Main Schedule -->
+<section class="mb-12">
+<div class="bg-surface-container-lowest rounded-full p-1 shadow-sm border border-outline-variant/5 overflow-hidden">
+<div class="overflow-x-auto no-scrollbar">
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="bg-surface-container-low/50">
+<th class="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">FolienInhalt</th>
+<th class="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">Notizen</th>
+<th class="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70 text-center">Folien gecheckt</th>
+<th class="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70 text-center">gemacht</th>
+<th class="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">Datum</th>
+<th class="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">Zeit (von - bis)</th>
+<th class="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">Lehrer</th>
+<th class="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">Nachrichten von/für</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant/10">
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-6">
+<div class="flex items-center gap-3">
+<div class="w-2 h-8 bg-primary rounded-full group-hover:h-10 transition-all"></div>
+<span class="font-bold text-sm">Intro to Art History</span>
+</div>
+</td>
+<td class="px-6 py-6 text-sm text-on-surface-variant">Focus on Renaissance lighting</td>
+<td class="px-6 py-6 text-center">
+<span class="material-symbols-outlined text-tertiary" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+</td>
+<td class="px-6 py-6 text-center">
+<span class="material-symbols-outlined text-tertiary">task_alt</span>
+</td>
+<td class="px-6 py-6 text-sm font-medium">Oct 24, 2023</td>
+<td class="px-6 py-6 text-sm">
+<span class="text-on-surface font-bold">09:00</span>
+<span class="text-outline mx-1">-</span>
+<span class="text-on-surface font-bold">10:30</span>
+</td>
+<td class="px-6 py-6">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center text-[10px] font-bold text-blue-700">MV</div>
+<span class="text-sm font-semibold">M. Valis</span>
+</div>
+</td>
+<td class="px-6 py-6">
+<span class="text-xs bg-surface-container-high px-3 py-1 rounded-full text-on-surface-variant">Check projector</span>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-6">
+<div class="flex items-center gap-3">
+<div class="w-2 h-8 bg-secondary-container rounded-full group-hover:h-10 transition-all"></div>
+<span class="font-bold text-sm">Color Theory Workshop</span>
+</div>
+</td>
+<td class="px-6 py-6 text-sm text-on-surface-variant">Bring acrylic sets</td>
+<td class="px-6 py-6 text-center">
+<span class="material-symbols-outlined text-outline">radio_button_unchecked</span>
+</td>
+<td class="px-6 py-6 text-center">
+<span class="material-symbols-outlined text-outline">pending</span>
+</td>
+<td class="px-6 py-6 text-sm font-medium">Oct 25, 2023</td>
+<td class="px-6 py-6 text-sm">
+<span class="text-on-surface font-bold">11:00</span>
+<span class="text-outline mx-1">-</span>
+<span class="text-on-surface font-bold">13:00</span>
+</td>
+<td class="px-6 py-6">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded-full bg-purple-100 flex items-center justify-center text-[10px] font-bold text-purple-700">LR</div>
+<span class="text-sm font-semibold">L. Russo</span>
+</div>
+</td>
+<td class="px-6 py-6">
+<span class="text-xs bg-surface-container-high px-3 py-1 rounded-full text-on-surface-variant">Update student list</span>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</section>
+<!-- Student Attendance & Performance Section -->
+<div class="grid grid-cols-12 gap-8 items-start">
+<!-- Attendance List -->
+<div class="col-span-12 lg:col-span-8 bg-surface-container-low rounded-full p-8">
+<div class="flex items-center justify-between mb-8">
+<div>
+<h3 class="text-2xl font-black font-headline tracking-tight text-on-surface">Student Roll Call</h3>
+<p class="text-sm text-on-surface-variant">Live tracking for current session</p>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2">
+<span class="w-3 h-3 rounded-full bg-tertiary"></span>
+<span class="text-xs font-bold text-on-surface-variant">Present</span>
+</div>
+<div class="flex items-center gap-2">
+<span class="w-3 h-3 rounded-full bg-error"></span>
+<span class="text-xs font-bold text-on-surface-variant">Absent</span>
+</div>
+</div>
+</div>
+<div class="space-y-4">
+<!-- Student Item -->
+<div class="bg-surface-container-lowest rounded-xl p-4 flex items-center justify-between hover:shadow-md transition-shadow">
+<div class="flex items-center gap-4">
+<img alt="Student image" class="w-12 h-12 rounded-full object-cover" data-alt="portrait of a young college student with a backpack outdoors in natural sunlight" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBSD9Kx8IaXmDcVqMU6C63fv_F-pzqTyDIVugCeIyLknhjkcSphsNWj0I5XPe2OAwfgjBwuh3zrfiR7qBOHKlWwdPEpWijYMRKo1NEZimbYAYP6ODQWGH15vXbChaO7hT8WF1XrlVwPdRQsj3cCqAKcNGH4fWc03Q9vsU3oqGFebzXV_2nlhzYCk33AobkqskwYo0Y6zcq0flhmQ2o_Z03D5Py3WTtu1nKjTzd-q3W53gDRoFhn-jeNSj7PvUjHpZmKPUhi0G5BK4YE"/>
+<div>
+<h4 class="font-bold text-on-surface">Julianne Beckett</h4>
+<p class="text-xs text-on-surface-variant font-medium">BFA Program • Year 2</p>
+</div>
+</div>
+<div class="flex items-center gap-12">
+<div class="text-right">
+<p class="text-[10px] font-bold text-on-surface-variant/50 uppercase tracking-widest">Performance</p>
+<div class="flex items-center gap-2 mt-1">
+<div class="w-24 h-2 bg-surface-container rounded-full overflow-hidden">
+<div class="h-full bg-tertiary w-[92%]"></div>
+</div>
+<span class="text-xs font-black text-tertiary">92%</span>
+</div>
+</div>
+<span class="px-4 py-1.5 rounded-full bg-tertiary-container text-on-tertiary-fixed text-xs font-bold">Present</span>
+<button class="material-symbols-outlined text-outline hover:text-primary transition-colors">more_vert</button>
+</div>
+</div>
+<!-- Student Item -->
+<div class="bg-surface-container-lowest rounded-xl p-4 flex items-center justify-between hover:shadow-md transition-shadow">
+<div class="flex items-center gap-4">
+<img alt="Student image" class="w-12 h-12 rounded-full object-cover" data-alt="headshot of a young male student wearing a denim jacket with a city background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCKxpg7D11d8lxvrojamRgQGwn4mw-x4vvHdtp4GZSYMUEJIXhMnW7-FTgq_68BRj-vfBkBL-ErVpeQviT3VygNhnq5DWjxRgmkSMOvEzXv7_Ck0T0YN-KM5zrxpBxrMvrEjevLhRZMKAFbx7DxH1-OAv2zaSMLjpmCnt3XGkIYsINiCULPMXrdU2dMqS1N0pCj2MqYqYDj_XujN8FJz4Dsz8JC9TQIwgaJqN5Rc74ErZcMjoMf9hN6ZQfWH0UPJcqb8Ti67zSg8IVi"/>
+<div>
+<h4 class="font-bold text-on-surface">Marcus Holloway</h4>
+<p class="text-xs text-on-surface-variant font-medium">BFA Program • Year 1</p>
+</div>
+</div>
+<div class="flex items-center gap-12">
+<div class="text-right">
+<p class="text-[10px] font-bold text-on-surface-variant/50 uppercase tracking-widest">Performance</p>
+<div class="flex items-center gap-2 mt-1">
+<div class="w-24 h-2 bg-surface-container rounded-full overflow-hidden">
+<div class="h-full bg-error w-[45%]"></div>
+</div>
+<span class="text-xs font-black text-error">45%</span>
+</div>
+</div>
+<span class="px-4 py-1.5 rounded-full bg-error-container text-on-error-container text-xs font-bold">Absent</span>
+<button class="material-symbols-outlined text-outline hover:text-primary transition-colors">more_vert</button>
+</div>
+</div>
+<!-- Student Item -->
+<div class="bg-surface-container-lowest rounded-xl p-4 flex items-center justify-between hover:shadow-md transition-shadow">
+<div class="flex items-center gap-4">
+<div class="w-12 h-12 rounded-full bg-surface-container-high flex items-center justify-center text-primary font-bold">SM</div>
+<div>
+<h4 class="font-bold text-on-surface">Sarah Miller</h4>
+<p class="text-xs text-on-surface-variant font-medium">Design Program • Year 3</p>
+</div>
+</div>
+<div class="flex items-center gap-12">
+<div class="text-right">
+<p class="text-[10px] font-bold text-on-surface-variant/50 uppercase tracking-widest">Performance</p>
+<div class="flex items-center gap-2 mt-1">
+<div class="w-24 h-2 bg-surface-container rounded-full overflow-hidden">
+<div class="h-full bg-tertiary w-[88%]"></div>
+</div>
+<span class="text-xs font-black text-tertiary">88%</span>
+</div>
+</div>
+<span class="px-4 py-1.5 rounded-full bg-tertiary-container text-on-tertiary-fixed text-xs font-bold">Present</span>
+<button class="material-symbols-outlined text-outline hover:text-primary transition-colors">more_vert</button>
+</div>
+</div>
+</div>
+</div>
+<!-- Stats Sidebar -->
+<div class="col-span-12 lg:col-span-4 space-y-8">
+<!-- Attendance Rate Card -->
+<div class="bg-gradient-to-br from-primary to-primary-container rounded-full p-8 text-on-primary shadow-xl shadow-primary/30 relative overflow-hidden">
+<div class="relative z-10">
+<p class="text-[10px] font-bold uppercase tracking-widest opacity-80 mb-2">Overall Rate</p>
+<h4 class="text-5xl font-black font-headline tracking-tighter">84.2%</h4>
+<p class="mt-4 text-sm font-medium opacity-90 leading-tight">+2.4% from last week's import session</p>
+</div>
+<!-- Abstract curve visual -->
+<div class="absolute bottom-0 right-0 opacity-20 pointer-events-none">
+<svg fill="none" height="120" viewbox="0 0 180 120" width="180">
+<path d="M0 100C30 80 60 120 90 60C120 0 150 40 180 20V120H0V100Z" fill="white"></path>
+</svg>
+</div>
+</div>
+<!-- Quick Insights -->
+<div class="bg-surface-container rounded-full p-8 border border-outline-variant/10">
+<h4 class="font-black font-headline text-lg mb-6">Insights</h4>
+<div class="space-y-6">
+<div class="flex gap-4">
+<div class="w-10 h-10 rounded-full bg-tertiary/10 flex items-center justify-center text-tertiary">
+<span class="material-symbols-outlined">trending_up</span>
+</div>
+<div>
+<p class="text-xs font-bold text-on-surface">Peak Attendance</p>
+<p class="text-[10px] text-on-surface-variant font-medium">Tuesday Morning lectures see 98% engagement.</p>
+</div>
+</div>
+<div class="flex gap-4">
+<div class="w-10 h-10 rounded-full bg-error/10 flex items-center justify-center text-error">
+<span class="material-symbols-outlined">warning</span>
+</div>
+<div>
+<p class="text-xs font-bold text-on-surface">Critical Gaps</p>
+<p class="text-[10px] text-on-surface-variant font-medium">3 students have missed 2+ consecutive 'Color Theory' modules.</p>
+</div>
+</div>
+</div>
+<button class="w-full mt-8 py-3 rounded-full border border-primary/20 text-primary font-bold text-sm hover:bg-primary/5 transition-colors">
+                            View Full History
+                        </button>
+</div>
+</div>
+</div>
+</div>
+</main>
+</body></html>
