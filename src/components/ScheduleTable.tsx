@@ -3,6 +3,13 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 
+type AttendanceRecord = {
+  id: string;
+  student_id: string;
+  status: string;
+  feedback: string | null;
+};
+
 type Lesson = {
   id: string;
   slide_id: string;
@@ -15,12 +22,19 @@ type Lesson = {
     name: string;
     groups: { name: string } | null;
   } | null;
+  attendance_records: AttendanceRecord[];
+};
+
+type Student = {
+  id: string;
+  name: string;
 };
 
 export default function ScheduleTable({ courseId }: { courseId?: string } = {}) {
   const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
 
-  const fetchLessons = async () => {
+  const fetchData = async () => {
     let query = supabase
       .from('lessons')
       .select(
@@ -28,6 +42,12 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
         courses (
           name,
           groups ( name )
+        ),
+        attendance_records (
+          id,
+          student_id,
+          status,
+          feedback
         )`
       );
 
@@ -35,21 +55,31 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
       query = query.eq('course_id', courseId);
     }
 
-    const { data } = await query
+    const { data: lessonsData } = await query
       .order('date', { ascending: true })
       .order('start_time', { ascending: true });
-    
-    if (data) setLessons(data);
+
+    if (lessonsData) setLessons(lessonsData as Lesson[]);
+
+    if (courseId) {
+      const { data: studentsData } = await supabase
+        .from('students')
+        .select('id, name')
+        .eq('course_id', courseId)
+        .order('name');
+
+      if (studentsData) setStudents(studentsData);
+    }
   };
 
   useEffect(() => {
-    fetchLessons();
+    fetchData();
 
     const channel = supabase
-      .channel(`schema-db-changes-lessons-${courseId || 'all'}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'lessons', filter: courseId ? `course_id=eq.${courseId}` : undefined }, () => {
-        fetchLessons();
-      })
+      .channel(`schedule-${courseId || 'all'}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'lessons', filter: courseId ? `course_id=eq.${courseId}` : undefined }, fetchData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_records' }, fetchData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students', filter: courseId ? `course_id=eq.${courseId}` : undefined }, fetchData)
       .subscribe();
 
     return () => {
@@ -57,23 +87,42 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
     };
   }, []);
 
+  const getAttendance = (lesson: Lesson, studentId: string): AttendanceRecord | undefined =>
+    lesson.attendance_records?.find((r) => r.student_id === studentId);
+
+  const totalCols = 3 + students.length;
+
   return (
     <div className="bg-surface-container-lowest rounded-[1rem] p-1 shadow-sm border border-outline-variant/5 overflow-hidden">
       <div className="overflow-x-auto no-scrollbar">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-surface-container-low/50">
-              <th className="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">Kurs / Folien & Inhalt</th>
-              <th className="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">Datum & Zeit</th>
-              <th className="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">Lehrer</th>
+              <th className="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70 sticky left-0 bg-surface-container-low/50 z-10">
+                Kurs / Folien &amp; Inhalt
+              </th>
+              <th className="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70 whitespace-nowrap">
+                Datum &amp; Zeit
+              </th>
+              <th className="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70">
+                Lehrer
+              </th>
+              {students.map((student) => (
+                <th
+                  key={student.id}
+                  className="px-4 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70 text-center min-w-[130px] whitespace-nowrap"
+                >
+                  {student.name}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/10">
             {lessons.map((lesson) => (
               <tr key={lesson.id} className="hover:bg-surface-container-low transition-colors group">
-                <td className="px-6 py-6">
+                <td className="px-6 py-6 sticky left-0 bg-surface-container-lowest group-hover:bg-surface-container-low transition-colors z-10">
                   <div className="flex items-center gap-3">
-                    <div className="w-2 h-8 rounded-full group-hover:h-10 transition-all bg-secondary-container"></div>
+                    <div className="w-2 h-8 rounded-full group-hover:h-10 transition-all bg-secondary-container shrink-0"></div>
                     <div>
                       {(lesson.courses?.groups?.name || lesson.courses?.name) && (
                         <span className="text-[10px] font-bold uppercase tracking-wider text-primary block mb-0.5">
@@ -85,7 +134,7 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
                     </div>
                   </div>
                 </td>
-                <td className="px-6 py-6 text-sm">
+                <td className="px-6 py-6 text-sm whitespace-nowrap">
                   <div className="font-medium">{lesson.date ? new Date(lesson.date).toLocaleDateString() : 'TBA'}</div>
                   {lesson.start_time && (
                     <div className="text-xs text-on-surface-variant">
@@ -95,19 +144,55 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
                     </div>
                   )}
                 </td>
-                <td className="px-6 py-6">
+                <td className="px-6 py-6 whitespace-nowrap">
                   <div className="flex items-center gap-2">
-                    <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center text-[10px] font-bold text-blue-700">
+                    <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center text-[10px] font-bold text-blue-700 shrink-0">
                       {lesson.teacher?.substring(0, 2).toUpperCase() || 'TBA'}
                     </div>
                     <span className="text-sm font-semibold">{lesson.teacher || 'TBA'}</span>
                   </div>
                 </td>
+                {students.map((student) => {
+                  const record = getAttendance(lesson, student.id);
+                  const isPresent = record?.status === 'Present';
+                  const isAbsent = record?.status === 'Absent';
+
+                  return (
+                    <td key={student.id} className="px-4 py-6 text-center align-top">
+                      {record ? (
+                        <div className="flex flex-col items-center gap-1.5">
+                          <span
+                            className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-sm font-bold shrink-0 ${
+                              isPresent
+                                ? 'bg-green-100 text-green-700'
+                                : isAbsent
+                                ? 'bg-red-100 text-red-600'
+                                : 'bg-surface-container text-on-surface-variant'
+                            }`}
+                            title={record.status}
+                          >
+                            {isPresent ? '✓' : isAbsent ? '✗' : '?'}
+                          </span>
+                          {record.feedback && (
+                            <p
+                              className="text-[10px] text-on-surface-variant leading-tight max-w-[110px] text-center line-clamp-3"
+                              title={record.feedback}
+                            >
+                              {record.feedback}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-outline/30 text-base leading-none">—</span>
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
             {lessons.length === 0 && (
               <tr>
-                <td colSpan={3} className="px-6 py-12 text-center text-on-surface-variant">
+                <td colSpan={totalCols} className="px-6 py-12 text-center text-on-surface-variant">
                   No schedule data available. Import a Google Sheet to begin.
                 </td>
               </tr>
