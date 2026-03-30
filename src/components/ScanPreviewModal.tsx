@@ -2,7 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ScanGoogleSheetResult, ScannedSampleRow, ScannedSheet } from '@/lib/sync/googleSheetSync';
+import type {
+  ScanGoogleSheetResult,
+  ScannedSampleRow,
+  ScannedSheet,
+} from '@/lib/sync/googleSheetSync';
 
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
 
@@ -144,6 +148,45 @@ function validationIssuesTooltip(count: number): string {
   return `${count} validation ${count === 1 ? 'issue' : 'issues'} on this sheet (empty core cells, session date not strictly between neighbors (must be after previous and before next day), or student attendance missing after their first recorded session)`;
 }
 
+/**
+ * "Current course" for preview: among sheets whose first session date is on or before today,
+ * the one whose latest row with both date and teacher filled has the greatest session date.
+ * Ties use the earlier tab order. Returns null if no sheet qualifies.
+ */
+function findCurrentCourseSheetIndex(sheets: ScannedSheet[], now: Date): number | null {
+  const todayTs = localDayTimestamp(now.getFullYear(), now.getMonth(), now.getDate());
+  if (todayTs === null) return null;
+
+  let bestIdx: number | null = null;
+  let bestLatestTs = -Infinity;
+
+  sheets.forEach((sheet, idx) => {
+    const rows = sheet.sampleRows;
+    if (rows.length === 0) return;
+
+    const firstTs = parseSheetDatum(rows[0].values['Datum'] ?? '');
+    if (firstTs === null || firstTs > todayTs) return;
+
+    let latestTs: number | null = null;
+    for (const row of rows) {
+      const dt = parseSheetDatum(row.values['Datum'] ?? '');
+      if (dt === null || isEmptyCellValue(row.values['Lehrer'])) continue;
+      if (latestTs === null || dt > latestTs) latestTs = dt;
+    }
+    if (latestTs === null) return;
+
+    if (latestTs > bestLatestTs || (latestTs === bestLatestTs && bestIdx !== null && idx < bestIdx)) {
+      bestLatestTs = latestTs;
+      bestIdx = idx;
+    }
+  });
+
+  return bestIdx;
+}
+
+const CURRENT_COURSE_TAB_TITLE =
+  'Current course: latest session with date and teacher filled, and first session date is not in the future';
+
 function studentAttendanceCellClass(
   text: string,
   colorStatus: 'Present' | 'Absent' | null | undefined
@@ -201,6 +244,11 @@ export default function ScanPreviewModal({
     return scanResult.sheets.map((s) => countSheetValidationIssues(s));
   }, [isOpen, scanResult, mounted]);
 
+  const currentCourseSheetIndex = useMemo(() => {
+    if (!isOpen || !scanResult || !mounted) return null;
+    return findCurrentCourseSheetIndex(scanResult.sheets, new Date());
+  }, [isOpen, scanResult, mounted]);
+
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
   const hasAnySheetIssues = sheetIssueCounts.some((c) => c > 0);
   const busy = isImporting || isResyncing;
@@ -255,6 +303,12 @@ export default function ScanPreviewModal({
         >
           {sheets.map((sheet, idx) => {
             const tabIssues = sheetIssueCounts[idx] ?? 0;
+            const isCurrentCourse = currentCourseSheetIndex === idx;
+            const tabLabelBase =
+              tabIssues > 0
+                ? `${sheet.title}, ${tabIssues} validation ${tabIssues === 1 ? 'issue' : 'issues'}`
+                : sheet.title;
+            const tabLabel = isCurrentCourse ? `${tabLabelBase}, current course` : tabLabelBase;
             return (
               <button
                 key={idx}
@@ -263,11 +317,7 @@ export default function ScanPreviewModal({
                 aria-selected={activeTab === idx}
                 disabled={isResyncing}
                 onClick={() => setActiveTab(idx)}
-                aria-label={
-                  tabIssues > 0
-                    ? `${sheet.title}, ${tabIssues} validation ${tabIssues === 1 ? 'issue' : 'issues'}`
-                    : sheet.title
-                }
+                aria-label={tabLabel}
                 className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60 ${
                   activeTab === idx
                     ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
@@ -275,6 +325,17 @@ export default function ScanPreviewModal({
                 }`}
               >
                 <span className="truncate max-w-[min(40vw,20rem)]">{sheet.title}</span>
+                {isCurrentCourse ? (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-emerald-900 ring-1 ring-emerald-400/70"
+                    title={CURRENT_COURSE_TAB_TITLE}
+                  >
+                    <span className="material-symbols-outlined text-[1rem] leading-none" aria-hidden>
+                      flag
+                    </span>
+                    <span>Current</span>
+                  </span>
+                ) : null}
                 {tabIssues > 0 && (
                   <span
                     className="inline-flex shrink-0 items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-1 text-sm font-medium text-yellow-950 ring-1 ring-yellow-300/80"
