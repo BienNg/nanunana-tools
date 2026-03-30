@@ -4,6 +4,23 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ScanGoogleSheetResult } from '@/lib/sync/googleSheetSync';
 
+function studentAttendanceCellClass(
+  text: string,
+  colorStatus: 'Present' | 'Absent' | null | undefined
+): string {
+  const t = String(text).trim();
+  const absentByText = /\babwesend\b/i.test(t) || /\babsent\b/i.test(t);
+  const presentByText = t.length > 0 && !absentByText;
+
+  if (colorStatus === 'Absent' || absentByText) {
+    return 'bg-red-100/90 text-red-950 border-r border-red-200/80';
+  }
+  if (colorStatus === 'Present' || presentByText) {
+    return 'bg-emerald-50/95 text-emerald-950 border-r border-emerald-200/70';
+  }
+  return 'border-r border-gray-200';
+}
+
 type ScanPreviewModalProps = {
   isOpen: boolean;
   scanResult: Extract<ScanGoogleSheetResult, { success: true }> | null;
@@ -42,7 +59,7 @@ export default function ScanPreviewModal({
       aria-modal="true"
       aria-labelledby="scan-preview-title"
     >
-      <div className="bg-white rounded-lg shadow-2xl w-11/12 max-w-6xl max-h-[90vh] flex flex-col font-sans overflow-hidden">
+      <div className="bg-white rounded-lg shadow-2xl w-[min(96vw,1920px)] max-h-[92vh] flex flex-col font-sans overflow-hidden">
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center bg-gray-50">
           <h2 id="scan-preview-title" className="text-xl font-semibold text-gray-800">
@@ -58,22 +75,29 @@ export default function ScanPreviewModal({
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-gray-200 px-6 pt-4 bg-gray-50 overflow-x-auto no-scrollbar">
+        <div
+          className="flex min-h-[3.25rem] items-end gap-1 border-b border-gray-200 bg-gray-50 px-6 pb-0 pt-2 overflow-x-auto no-scrollbar"
+          role="tablist"
+          aria-label="Workbook sheets"
+        >
           {sheets.map((sheet, idx) => (
             <button
               key={idx}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === idx}
               onClick={() => setActiveTab(idx)}
-              className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+              className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors ${
                 activeTab === idx
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
+                  : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-100/80 hover:text-gray-900'
               }`}
             >
               {sheet.title}
             </button>
           ))}
           {sheets.length === 0 && (
-            <div className="px-4 py-2 text-sm text-gray-500">No sheets found</div>
+            <div className="flex min-h-[3.25rem] items-center px-4 py-3 text-sm text-gray-500">No sheets found</div>
           )}
         </div>
 
@@ -110,16 +134,20 @@ export default function ScanPreviewModal({
                   {activeSheet.sampleRows.length > 0 ? (
                     activeSheet.sampleRows.map((row, rIdx) => (
                       <tr key={rIdx} className="hover:bg-gray-50">
-                        <td className="px-4 py-2 border-r border-gray-200">{row['Folien'] || ''}</td>
-                        <td className="px-4 py-2 border-r border-gray-200">{row['Datum'] || ''}</td>
-                        <td className="px-4 py-2 border-r border-gray-200">{row['von'] || ''}</td>
-                        <td className="px-4 py-2 border-r border-gray-200">{row['bis'] || ''}</td>
-                        <td className="px-4 py-2 border-r border-gray-200">{row['Lehrer'] || ''}</td>
-                        {activeSheet.headers.students.map((student, cIdx) => (
-                          <td key={cIdx} className="px-4 py-2 border-r border-gray-200">
-                            {row[student.name] || ''}
-                          </td>
-                        ))}
+                        <td className="px-4 py-2 border-r border-gray-200">{row.values['Folien'] || ''}</td>
+                        <td className="px-4 py-2 border-r border-gray-200">{row.values['Datum'] || ''}</td>
+                        <td className="px-4 py-2 border-r border-gray-200">{row.values['von'] || ''}</td>
+                        <td className="px-4 py-2 border-r border-gray-200">{row.values['bis'] || ''}</td>
+                        <td className="px-4 py-2 border-r border-gray-200">{row.values['Lehrer'] || ''}</td>
+                        {activeSheet.headers.students.map((student, cIdx) => {
+                          const cellText = row.values[student.name] || '';
+                          const tone = studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
+                          return (
+                            <td key={cIdx} className={`px-4 py-2 ${tone}`}>
+                              {cellText}
+                            </td>
+                          );
+                        })}
                       </tr>
                     ))
                   ) : (

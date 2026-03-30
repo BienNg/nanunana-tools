@@ -447,6 +447,12 @@ export function columnIndexToA1Letter(index: number): string {
 
 export type ScannedStudent = { name: string; letters: string[] };
 
+/** One preview row: core columns in `values`, per-student cell color attendance (matches DB import). */
+export type ScannedSampleRow = {
+  values: Record<string, string>;
+  studentAttendance: Record<string, 'Present' | 'Absent' | null>;
+};
+
 export type ScannedSheet = {
   title: string;
   headers: {
@@ -457,7 +463,7 @@ export type ScannedSheet = {
     lehrer: string[];
     students: ScannedStudent[];
   };
-  sampleRows: Record<string, string>[];
+  sampleRows: ScannedSampleRow[];
 };
 
 export type ScanGoogleSheetResult =
@@ -516,7 +522,7 @@ export async function scanGoogleSheet(
         total: visibleSheetCount,
       });
 
-      const range = `${escapeSheetTitleForRange(title)}!A1:Z100`;
+      const range = `${escapeSheetTitleForRange(title)}!A1:Z1000`;
       const gridResponse = await sheetsApi.spreadsheets.get({
         spreadsheetId,
         ranges: [range],
@@ -524,7 +530,7 @@ export async function scanGoogleSheet(
       });
       const sheetWithGrid = gridResponse.data.sheets?.find((sh) => sh.properties?.title === title);
       const rowData = sheetWithGrid?.data?.[0]?.rowData;
-      const { rows } = sheetGridToRowsAndColorAttendance(rowData);
+      const { rows, colorAttendance } = sheetGridToRowsAndColorAttendance(rowData);
 
       if (!rows || rows.length < 4) continue;
 
@@ -536,16 +542,17 @@ export async function scanGoogleSheet(
 
       const colIndices = {
         folien: headers.findIndex((h) => h && String(h).includes('Folien') && !String(h).includes('gecheckt')),
+        inhalt: headers.findIndex((h) => h && String(h).includes('Inhalt')),
         datum: headers.findIndex((h) => h && String(h).includes('Datum')),
         von: headers.findIndex((h) => h && String(h).includes('von')),
         bis: headers.findIndex((h) => h && String(h).includes('bis')),
       };
       const lehrerCols = lehrerColumnIndices(headers);
-      if (colIndices.folien === -1 && headers.findIndex((h) => h && String(h).includes('Inhalt')) === -1) continue;
+      if (colIndices.folien === -1 && colIndices.inhalt === -1) continue;
 
       const reservedColIndices: number[] = [
         colIndices.folien,
-        headers.findIndex((h) => h && String(h).includes('Inhalt')),
+        colIndices.inhalt,
         colIndices.datum,
         colIndices.von,
         colIndices.bis,
@@ -572,21 +579,23 @@ export async function scanGoogleSheet(
         letters: col.indices.map(columnIndexToA1Letter)
       }));
 
-      // Extract sample rows
-      const sampleRows: Record<string, string>[] = [];
-      for (let i = headerRowIndex + 1; i < Math.min(headerRowIndex + 6, rows.length); i++) {
+      // All lesson rows after header (same inclusion rule as import: Folien or Inhalt)
+      const sampleRows: ScannedSampleRow[] = [];
+      for (let i = headerRowIndex + 1; i < rows.length; i++) {
         const row = rows[i];
         if (!row) continue;
-        
-        const folien = colIndices.folien !== -1 ? row[colIndices.folien] : '';
-        const datum = colIndices.datum !== -1 ? row[colIndices.datum] : '';
-        if (!folien && !datum) continue;
 
-        const rowDataMap: Record<string, string> = {};
-        if (colIndices.folien !== -1) rowDataMap['Folien'] = String(row[colIndices.folien] || '');
-        if (colIndices.datum !== -1) rowDataMap['Datum'] = String(row[colIndices.datum] || '');
-        if (colIndices.von !== -1) rowDataMap['von'] = String(row[colIndices.von] || '');
-        if (colIndices.bis !== -1) rowDataMap['bis'] = String(row[colIndices.bis] || '');
+        const folienRaw = colIndices.folien !== -1 ? row[colIndices.folien] : '';
+        const inhaltRaw = colIndices.inhalt !== -1 ? row[colIndices.inhalt] : '';
+        const folien = folienRaw != null ? String(folienRaw).trim() : '';
+        const inhalt = inhaltRaw != null ? String(inhaltRaw).trim() : '';
+        if (!folien && !inhalt) continue;
+
+        const rowValues: Record<string, string> = {};
+        if (colIndices.folien !== -1) rowValues['Folien'] = String(row[colIndices.folien] || '');
+        if (colIndices.datum !== -1) rowValues['Datum'] = String(row[colIndices.datum] || '');
+        if (colIndices.von !== -1) rowValues['von'] = String(row[colIndices.von] || '');
+        if (colIndices.bis !== -1) rowValues['bis'] = String(row[colIndices.bis] || '');
 
         const lehrerParts: string[] = [];
         const teacherColIndices = lehrerCols.length > 0 ? lehrerCols : [lehrerHeaderIdx].filter((idx) => idx >= 0);
@@ -594,11 +603,12 @@ export async function scanGoogleSheet(
           lehrerParts.push(...parseTeacherNames(row[idx]));
         }
         if (teacherColIndices.length > 0) {
-          rowDataMap['Lehrer'] = lehrerParts.join(', ');
+          rowValues['Lehrer'] = lehrerParts.join(', ');
         }
 
-        uniqueStudentCols.forEach(col => {
-          // just taking the first non-empty text from the student columns as sample
+        const studentAttendance: Record<string, 'Present' | 'Absent' | null> = {};
+        const attRow = colorAttendance[i];
+        for (const col of uniqueStudentCols) {
           let text = '';
           for (const idx of col.indices) {
             if (row[idx]) {
@@ -606,10 +616,14 @@ export async function scanGoogleSheet(
               break;
             }
           }
-          rowDataMap[col.name] = text;
-        });
+          rowValues[col.name] = text;
+          studentAttendance[col.name] = pickFirstAttendanceStatus(attRow, col.indices);
+        }
 
-        sampleRows.push(rowDataMap);
+        const rowHasAnyContent = Object.values(rowValues).some((v) => String(v).trim() !== '');
+        if (!rowHasAnyContent) continue;
+
+        sampleRows.push({ values: rowValues, studentAttendance });
       }
 
       scannedSheets.push({
