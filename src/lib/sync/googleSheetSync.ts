@@ -310,6 +310,10 @@ function mergedFeedbackFromRow(row: SheetRow, indices: number[]): string {
   return parts.join(' ').trim();
 }
 
+function normalizeFolienKey(value: string | undefined | null): string {
+  return String(value ?? '').trim().toLowerCase();
+}
+
 export type SyncProgressEvent =
   | { type: 'status'; message: string }
   | { type: 'sheet'; title: string; current: number; total: number }
@@ -378,6 +382,7 @@ async function syncOneCourseSheet(
   colorAttendance: AttendanceFromColor[][] | undefined,
   studentCache: Map<string, string>,
   skippedPreviewRows: ReadonlySet<number>,
+  options?: { dedupeFolienRows?: boolean },
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ): Promise<{ ok: boolean; reason?: string }> {
   const sheetLabel = `[${sheetTitle}]`;
@@ -503,6 +508,7 @@ async function syncOneCourseSheet(
 
   let lessonSeq = 0;
   let previewRowIndex = -1;
+  const seenFolien = new Set<string>();
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
@@ -510,6 +516,13 @@ async function syncOneCourseSheet(
     const folien = colIndices.folien !== -1 ? row[colIndices.folien] : '';
     const inhalt = colIndices.inhalt !== -1 ? row[colIndices.inhalt] : '';
     if (!folien && !inhalt) continue;
+    if (options?.dedupeFolienRows) {
+      const folienKey = normalizeFolienKey(folien);
+      if (folienKey) {
+        if (seenFolien.has(folienKey)) continue;
+        seenFolien.add(folienKey);
+      }
+    }
     previewRowIndex += 1;
     if (skippedPreviewRows.has(previewRowIndex)) continue;
 
@@ -643,7 +656,8 @@ export type ScannedSheet = {
 function processVisibleSheetGrid(
   title: string,
   rows: SheetRow[] | undefined | null,
-  colorAttendance: AttendanceFromColor[][] | undefined | null
+  colorAttendance: AttendanceFromColor[][] | undefined | null,
+  options?: { dedupeFolienRows?: boolean }
 ): { sampleRows: ScannedSampleRow[]; scanned: Omit<ScannedSheet, 'visibleOrderIndex'> | null } {
   const empty: { sampleRows: ScannedSampleRow[]; scanned: null } = { sampleRows: [], scanned: null };
   if (!rows || rows.length < 4) return empty;
@@ -695,6 +709,7 @@ function processVisibleSheetGrid(
 
   const color = colorAttendance ?? [];
   const sampleRows: ScannedSampleRow[] = [];
+  const seenFolien = new Set<string>();
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
@@ -704,6 +719,13 @@ function processVisibleSheetGrid(
     const folien = folienRaw != null ? String(folienRaw).trim() : '';
     const inhalt = inhaltRaw != null ? String(inhaltRaw).trim() : '';
     if (!folien && !inhalt) continue;
+    if (options?.dedupeFolienRows) {
+      const folienKey = normalizeFolienKey(folien);
+      if (folienKey) {
+        if (seenFolien.has(folienKey)) continue;
+        seenFolien.add(folienKey);
+      }
+    }
 
     const rowValues: Record<string, string> = {};
     if (colIndices.folien !== -1) rowValues['Folien'] = String(row[colIndices.folien] || '');
@@ -931,12 +953,15 @@ export async function scanGoogleSheet(
     let visibleSlotIndex = 0;
     const scannedSheets: ScannedSheet[] = [];
     const visibleSlots: { sampleRows: ScannedSampleRow[] }[] = [];
+    const dedupeFolienRows = loaded.sourceKey.startsWith('xlsx:');
 
     for (const sheet of loaded.visibleSheets) {
       const title = sheet.title;
       const rows = sheet.rows;
       const colorAttendance = sheet.colorAttendance;
-      const { sampleRows, scanned } = processVisibleSheetGrid(title, rows, colorAttendance);
+      const { sampleRows, scanned } = processVisibleSheetGrid(title, rows, colorAttendance, {
+        dedupeFolienRows,
+      });
       visibleSlots.push({ sampleRows });
       if (scanned) {
         scannedSheets.push({ ...scanned, visibleOrderIndex: visibleSlotIndex });
@@ -1027,6 +1052,7 @@ export async function runGoogleSheetSync(
     }
 
     const visibleSheetCount = loaded.visibleSheets.length;
+    const dedupeFolienRows = loaded.sourceKey.startsWith('xlsx:');
 
     await onProgress?.({
       type: 'status',
@@ -1058,7 +1084,9 @@ export async function runGoogleSheetSync(
 
       const rows = sheet.rows;
       const colorAttendance = sheet.colorAttendance;
-      const { sampleRows } = processVisibleSheetGrid(title, rows, colorAttendance);
+      const { sampleRows } = processVisibleSheetGrid(title, rows, colorAttendance, {
+        dedupeFolienRows,
+      });
       visibleSlots.push({ sampleRows });
       queued.push({
         slotIndex: visibleSlotIndex,
@@ -1086,6 +1114,7 @@ export async function runGoogleSheetSync(
         item.colorAttendance,
         studentCache,
         new Set(skippedRowsBySheet[`${item.slotIndex}:${item.title}`] ?? []),
+        { dedupeFolienRows },
         onProgress
       );
       if (result.ok) synced++;
