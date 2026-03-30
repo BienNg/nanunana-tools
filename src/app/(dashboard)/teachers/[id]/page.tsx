@@ -11,6 +11,19 @@ function yearMonthFromLessonDate(dateStr: unknown): string | null {
   return m ? m[1] : null;
 }
 
+function extractClassType(value: unknown): string | null {
+  if (!value) return null;
+  if (Array.isArray(value)) {
+    const first = value[0] as { class_type?: unknown } | undefined;
+    return typeof first?.class_type === 'string' ? first.class_type : null;
+  }
+  if (typeof value === 'object') {
+    const maybeObj = value as { class_type?: unknown };
+    return typeof maybeObj.class_type === 'string' ? maybeObj.class_type : null;
+  }
+  return null;
+}
+
 export default async function TeacherDetailsPage({ 
   params,
   searchParams
@@ -150,6 +163,11 @@ export default async function TeacherDetailsPage({
 
   // Metrics Calculation
   const coursesTaught = courses.length;
+  const classTypeByCourseId = new Map<string, ReturnType<typeof normalizeGroupClassType>>();
+  courses.forEach((course: any) => {
+    const rawClassType = extractClassType(course?.groups);
+    classTypeByCourseId.set(course.id, normalizeGroupClassType(rawClassType));
+  });
 
   let totalMinutes = 0;
   const lessonsByCourseId: Record<string, any[]> = {};
@@ -168,14 +186,19 @@ export default async function TeacherDetailsPage({
     });
     
     courseLessons.forEach((lesson, index) => {
-      const classType = normalizeGroupClassType(lesson.courses?.groups?.class_type);
+      const lessonLevelClassType = normalizeGroupClassType(extractClassType(lesson.courses?.groups));
+      const classType = lessonLevelClassType ?? classTypeByCourseId.get(lesson.course_id) ?? null;
       const duration = lessonDurationMinutes(lesson, index, classType);
       lesson.calculatedDurationMinutes = duration;
       totalMinutes += duration;
     });
   });
 
-  const totalHoursDisplay = Math.floor(totalMinutes / 60);
+  const totalHoursDisplay = (() => {
+    const exactHours = totalMinutes / 60;
+    const truncatedTo2dp = Math.trunc(exactHours * 100) / 100;
+    return truncatedTo2dp.toString();
+  })();
 
   let totalAttendanceRecords = 0;
   let presentRecords = 0;
