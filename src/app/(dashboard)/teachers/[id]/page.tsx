@@ -170,8 +170,9 @@ export default async function TeacherDetailsPage({
     };
   });
 
+  const allTeacherLessons = allLessons;
   if (courseIds.length > 0 && filter === 'monthly') {
-    allLessons = allLessons.filter(
+    allLessons = allTeacherLessons.filter(
       (lesson) =>
         typeof lesson.date === 'string' && lesson.date.startsWith(selectedYearMonth),
     );
@@ -198,30 +199,33 @@ export default async function TeacherDetailsPage({
     classTypeByCourseId.set(course.id, normalizeGroupClassType(rawClassType));
   });
 
-  let totalMinutes = 0;
   const lessonsByCourseId: Record<string, any[]> = {};
-  allLessons.forEach(lesson => {
+  allTeacherLessons.forEach((lesson) => {
     if (!lessonsByCourseId[lesson.course_id]) {
       lessonsByCourseId[lesson.course_id] = [];
     }
     lessonsByCourseId[lesson.course_id].push(lesson);
   });
 
-  Object.values(lessonsByCourseId).forEach(courseLessons => {
+  Object.values(lessonsByCourseId).forEach((courseLessons) => {
     courseLessons.sort((a, b) => {
       const dateA = a.date ? new Date(a.date).getTime() : 0;
       const dateB = b.date ? new Date(b.date).getTime() : 0;
       return dateA - dateB;
     });
-    
+
     courseLessons.forEach((lesson, index) => {
       const lessonLevelClassType = normalizeGroupClassType(extractClassType(lesson.courses?.groups));
       const classType = lessonLevelClassType ?? classTypeByCourseId.get(lesson.course_id) ?? null;
       const duration = lessonDurationMinutes(lesson, index, classType);
       lesson.calculatedDurationMinutes = duration;
-      totalMinutes += duration;
     });
   });
+
+  const totalMinutes = allLessons.reduce(
+    (sum, lesson) => sum + (lesson.calculatedDurationMinutes || 0),
+    0,
+  );
 
   const totalHoursDisplay = hoursDisplayFromMinutes(totalMinutes);
 
@@ -236,27 +240,34 @@ export default async function TeacherDetailsPage({
     ? Math.round((presentRecords / totalAttendanceRecords) * 100) 
     : 0;
 
-  // Monthly Trend
-  const monthlyStats: Record<string, { sessions: number, minutes: number }> = {};
-  allLessons.forEach(lesson => {
-    if (lesson.date) {
-      const dateObj = new Date(lesson.date);
-      const monthStr = dateObj.toLocaleString('en-US', { month: 'short' }).toUpperCase();
-      if (!monthlyStats[monthStr]) {
-        monthlyStats[monthStr] = { sessions: 0, minutes: 0 };
-      }
-      monthlyStats[monthStr].sessions += 1;
-      monthlyStats[monthStr].minutes += (lesson.calculatedDurationMinutes || 0);
-    }
-  });
+  // Hours trend: always last 6 calendar months (UTC), independent of month filter
+  const hoursByYearMonth: Record<string, number> = {};
+  for (const lesson of allTeacherLessons) {
+    const ym = yearMonthFromLessonDate(lesson.date);
+    if (!ym) continue;
+    hoursByYearMonth[ym] =
+      (hoursByYearMonth[ym] ?? 0) + (lesson.calculatedDurationMinutes || 0) / 60;
+  }
 
-  const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-  const trendData = Object.entries(monthlyStats)
-    .sort((a, b) => monthNames.indexOf(a[0]) - monthNames.indexOf(b[0]))
-    .slice(-6);
+  const trendMonthBuckets: { ym: string; label: string }[] = [];
+  for (let i = 5; i >= 0; i -= 1) {
+    const d = new Date(Date.UTC(currentYear, currentMonth - 1 - i, 1));
+    const y = d.getUTCFullYear();
+    const mo = d.getUTCMonth() + 1;
+    const ym = `${y}-${String(mo).padStart(2, '0')}`;
+    const label = d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }).toUpperCase();
+    trendMonthBuckets.push({ ym, label });
+  }
 
-  const maxSessions = Math.max(...trendData.map(d => d[1].sessions), 1);
-  const maxHours = Math.max(...trendData.map(d => d[1].minutes / 60), 1);
+  const trendData = trendMonthBuckets.map(({ ym, label }) => ({
+    ym,
+    label,
+    hours: hoursByYearMonth[ym] ?? 0,
+  }));
+
+  const peakHours = Math.max(0, ...trendData.map((d) => d.hours));
+  const yAxisMax = Math.max(1, Math.ceil(peakHours));
+  const yMid = yAxisMax / 2;
 
   const totalLessons = allLessons.length;
 
@@ -403,47 +414,69 @@ export default async function TeacherDetailsPage({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mb-8">
           {/* Main Trend Visualization */}
           <div className="lg:col-span-8 bg-surface-container-low rounded-3xl p-8 min-h-[400px] flex flex-col border border-outline-variant/10">
-            <div className="flex justify-between items-center mb-10">
-              <h3 className="text-xl font-bold font-headline">Classes & Hours Trend</h3>
-              <div className="flex gap-4">
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-full bg-primary"></span>
-                  <span className="text-xs font-bold text-on-surface-variant uppercase">Sessions</span>
+            <div className="mb-6">
+              <h3 className="text-xl font-bold font-headline">Teaching hours</h3>
+              <p className="text-sm text-on-surface-variant font-medium mt-1">
+                Last 6 months · hours taught per month
+              </p>
+            </div>
+
+            <div className="flex-1 flex gap-3 min-h-[280px] items-end">
+              <div className="flex flex-col justify-between h-[200px] shrink-0 mb-10 text-[11px] font-semibold text-on-surface-variant tabular-nums text-right pr-2 w-11 border-r border-outline-variant/15">
+                <span>{yAxisMax}h</span>
+                <span>{yMid % 1 === 0 ? yMid : yMid.toFixed(1)}h</span>
+                <span>0</span>
+              </div>
+              <div className="flex-1 relative min-h-[260px] min-w-0 pb-1">
+                <div className="absolute inset-x-0 top-0 h-[200px] flex flex-col justify-between pointer-events-none">
+                  <div className="h-px bg-outline-variant/15" />
+                  <div className="h-px bg-outline-variant/15" />
+                  <div className="h-px bg-outline-variant/20" />
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-full bg-secondary-container"></span>
-                  <span className="text-xs font-bold text-on-surface-variant uppercase">Hours</span>
+                <div className="relative h-full flex items-end justify-around gap-2 sm:gap-3 px-0 sm:px-1 pt-2">
+                  {trendData.map(({ ym, label, hours }) => {
+                    const barTrackPx = 200;
+                    const rawBarPx = yAxisMax > 0 ? (hours / yAxisMax) * barTrackPx : 0;
+                    const barPx = hours > 0 ? Math.max(rawBarPx, 10) : 0;
+                    const hoursLabel =
+                      hours >= 10 ? Math.round(hours).toString() : (Math.round(hours * 10) / 10).toString();
+
+                    return (
+                      <div
+                        key={ym}
+                        className="flex flex-col items-center flex-1 min-w-0 justify-end gap-2"
+                      >
+                        <div
+                          className="w-full max-w-[52px] mx-auto flex flex-col items-center justify-end"
+                          style={{ height: barTrackPx }}
+                        >
+                          {hours > 0 ? (
+                            <span
+                              className="text-[11px] font-bold tabular-nums text-on-surface mb-1.5 leading-none"
+                              title={`${hoursLabel} hours`}
+                            >
+                              {hoursLabel}
+                              <span className="text-on-surface-variant font-semibold">h</span>
+                            </span>
+                          ) : (
+                            <span className="text-[11px] font-semibold tabular-nums text-on-surface-variant/70 mb-1.5">
+                              —
+                            </span>
+                          )}
+                          <div
+                            className="w-full rounded-t-xl bg-primary mt-auto transition-[height] duration-300 shadow-sm shadow-primary/25"
+                            style={{ height: barPx }}
+                            title={`${hoursLabel} hours`}
+                          />
+                        </div>
+                        <span className="text-[11px] font-bold text-on-surface-variant shrink-0 tracking-wide">
+                          {label}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
-            </div>
-            
-            <div className="flex-1 flex items-end justify-around gap-4 px-4 pb-4">
-              {trendData.length > 0 ? trendData.map(([month, data]) => {
-                const sessionHeight = maxSessions > 0 ? `${(data.sessions / maxSessions) * 100}%` : '0%';
-                const hoursHeight = maxHours > 0 ? `${((data.minutes / 60) / maxHours) * 100}%` : '0%';
-                
-                return (
-                  <div key={month} className="flex flex-col items-center gap-4 flex-1 h-full justify-end">
-                    <div className="w-full flex justify-center gap-1 h-[200px] items-end">
-                      <div 
-                        className="w-3 bg-primary rounded-t-full min-h-[4px]" 
-                        style={{ height: sessionHeight }}
-                        title={`${data.sessions} sessions`}
-                      ></div>
-                      <div 
-                        className="w-3 bg-secondary-container rounded-t-full opacity-60 min-h-[4px]" 
-                        style={{ height: hoursHeight }}
-                        title={`${Math.round(data.minutes / 60)} hours`}
-                      ></div>
-                    </div>
-                    <span className="text-[10px] font-bold text-on-surface-variant">{month}</span>
-                  </div>
-                );
-              }) : (
-                <div className="w-full flex justify-center items-center h-[200px] text-on-surface-variant">
-                  No data available to display trends.
-                </div>
-              )}
             </div>
           </div>
 
