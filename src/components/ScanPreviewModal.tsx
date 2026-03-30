@@ -335,6 +335,7 @@ export default function ScanPreviewModal({
   if (!isOpen || !scanResult || !mounted) return null;
 
   const sheets = scanResult.sheets;
+  const detectedNewTeachers = scanResult.detectedNewTeachers ?? [];
   const activeSheet = sheets[activeTab];
   const activeIsFutureCourse =
     activeSheet != null &&
@@ -457,6 +458,24 @@ export default function ScanPreviewModal({
 
         {/* Body */}
         <div className="flex-1 overflow-auto p-6 bg-white">
+          {detectedNewTeachers.length > 0 ? (
+            <section className="mb-4 rounded-md border border-emerald-200 bg-emerald-50/70 px-4 py-3">
+              <h3 className="text-sm font-semibold text-emerald-900">New teachers detected</h3>
+              <p className="mt-1 text-xs text-emerald-800">
+                These names were found in this workbook and will be created during import.
+              </p>
+              <ul className="mt-2 flex flex-wrap gap-2" aria-label="Detected new teachers">
+                {detectedNewTeachers.map((teacherName) => (
+                  <li
+                    key={teacherName}
+                    className="rounded-full border border-emerald-300/80 bg-white px-2.5 py-1 text-xs font-medium text-emerald-950"
+                  >
+                    {teacherName}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
           {isResyncing ? (
             <div
               className="mb-4 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-950"

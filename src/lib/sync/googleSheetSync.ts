@@ -253,6 +253,16 @@ function parseTeacherNames(raw: string | undefined | null): string[] {
     .filter(Boolean);
 }
 
+/** Normalize human names for case/diacritic-insensitive matching. */
+function normalizePersonNameKey(raw: string | undefined | null): string {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
 function normalizeTimeForDb(value: string | undefined | null): string | null {
   if (value == null || value === '') return null;
   const s = String(value).trim();
@@ -291,12 +301,89 @@ function detectClassType(title: string): ClassType | null {
 }
 
 function findHeaderRowIndex(rows: SheetRow[]): number {
+  const normalizeHeaderCell = (value: string): string => {
+    const base = value
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s*\([^)]*\)\s*$/g, '')
+      .trim();
+    return base;
+  };
+
+  const classifyHeader = (normalized: string): 'folien' | 'inhalt' | 'datum' | 'von' | 'bis' | 'lehrer' | null => {
+    if (!normalized) return null;
+    if (normalized === 'folien' || normalized === 'folie' || normalized === 'canva') return 'folien';
+    if (normalized === 'inhalt' || normalized === 'ubersicht') return 'inhalt';
+    if (normalized === 'datum' || normalized === 'unterrichtstag') return 'datum';
+    if (normalized === 'von') return 'von';
+    if (normalized === 'bis') return 'bis';
+    if (normalized === 'lehrer') return 'lehrer';
+    return null;
+  };
+
+  let bestIndex = -1;
+  let bestScore = -1;
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
-    if (String(row[0] ?? '').trim() === 'Folien') return i;
+    const normalized = row.map((cell) => normalizeHeaderCell(String(cell ?? '')));
+    const kinds = normalized.map(classifyHeader).filter((k): k is NonNullable<typeof k> => k !== null);
+    const kindSet = new Set(kinds);
+    const hasFolienLike = kindSet.has('folien') || kindSet.has('inhalt');
+    const hasDatumLike = kindSet.has('datum');
+    const hasTimeLike = kindSet.has('von') || kindSet.has('bis');
+    const hasTeacherLike = kindSet.has('lehrer');
+    if (!hasFolienLike) continue;
+    if (!(hasDatumLike && (hasTeacherLike || hasTimeLike))) continue;
+    const score = kindSet.size * 10 + kinds.length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
   }
-  return -1;
+  return bestIndex;
+}
+
+function findCoreColumnIndices(headers: SheetRow): {
+  folien: number;
+  inhalt: number;
+  datum: number;
+  von: number;
+  bis: number;
+} {
+  const normalizeHeaderCell = (value: string): string =>
+    value
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s*\([^)]*\)\s*$/g, '')
+      .trim();
+
+  let folien = -1;
+  let inhalt = -1;
+  let datum = -1;
+  let von = -1;
+  let bis = -1;
+
+  for (let i = 0; i < headers.length; i++) {
+    const raw = headers[i];
+    const text = String(raw ?? '').trim();
+    if (!text) continue;
+    const normalized = normalizeHeaderCell(text);
+    if (folien === -1 && (normalized === 'folien' || normalized === 'folie' || normalized === 'canva')) folien = i;
+    if (inhalt === -1 && (normalized === 'inhalt' || normalized === 'ubersicht')) inhalt = i;
+    if (datum === -1 && (normalized === 'datum' || normalized === 'unterrichtstag')) datum = i;
+    if (von === -1 && normalized === 'von') von = i;
+    if (bis === -1 && normalized === 'bis') bis = i;
+  }
+
+  return { folien, inhalt, datum, von, bis };
 }
 
 function lehrerColumnIndices(headers: SheetRow): number[] {
@@ -304,8 +391,8 @@ function lehrerColumnIndices(headers: SheetRow): number[] {
   for (let i = 0; i < headers.length; i++) {
     const h = headers[i];
     if (!h) continue;
-    const t = String(h).toLowerCase();
-    if (t.includes('lehrer')) out.push(i);
+    const t = String(h).trim();
+    if (/\blehrer\b/i.test(t)) out.push(i);
   }
   return out;
 }
@@ -373,7 +460,7 @@ export type SyncProgressEvent =
 /**
  * Sync teachers for one course using an in-memory cache to avoid per-row DB calls.
  *
- * @param teacherCache  name → id for every teacher already in the DB (mutated in place when new teachers are inserted)
+ * @param teacherCache  normalized-name key → id for every teacher already in the DB (mutated in place when new teachers are inserted)
  */
 async function syncCourseTeachers(
   supabase: ReturnType<typeof getSupabaseAdmin>,
@@ -388,11 +475,17 @@ async function syncCourseTeachers(
     message: `${sheetLabel} course_teachers — delete existing links for course`,
   });
   await supabase.from('course_teachers').delete().eq('course_id', courseId);
-  const names = [...teacherNames];
+  const namesByKey = new Map<string, string>();
+  for (const name of teacherNames) {
+    const key = normalizePersonNameKey(name);
+    if (!key || namesByKey.has(key)) continue;
+    namesByKey.set(key, name);
+  }
+  const names = [...namesByKey.values()];
   if (names.length === 0) return;
 
-  // Check in memory first — only names truly missing from the cache need a DB insert.
-  const newNames = names.filter((n) => !teacherCache.has(n));
+  // Check in memory first — only names truly missing from the normalized cache need a DB insert.
+  const newNames = names.filter((n) => !teacherCache.has(normalizePersonNameKey(n)));
 
   if (newNames.length > 0) {
     await onProgress?.({
@@ -406,12 +499,14 @@ async function syncCourseTeachers(
 
     // Update the cache so subsequent courses don't re-insert the same teachers.
     (inserted ?? []).forEach((t: { id: string; name: string }) => {
-      teacherCache.set(t.name, t.id);
+      const key = normalizePersonNameKey(t.name);
+      if (!key) return;
+      teacherCache.set(key, t.id);
     });
   }
 
   const links = names
-    .map((n) => ({ course_id: courseId, teacher_id: teacherCache.get(n) }))
+    .map((n) => ({ course_id: courseId, teacher_id: teacherCache.get(normalizePersonNameKey(n)) }))
     .filter((l): l is { course_id: string; teacher_id: string } => Boolean(l.teacher_id));
 
   if (links.length > 0) {
@@ -444,13 +539,7 @@ async function syncOneCourseSheet(
   const headers = rows[headerRowIndex];
   if (!headers) return { ok: false, reason: 'no_header' };
 
-  const colIndices = {
-    folien: headers.findIndex((h) => h && String(h).includes('Folien') && !String(h).includes('gecheckt')),
-    inhalt: headers.findIndex((h) => h && String(h).includes('Inhalt')),
-    datum: headers.findIndex((h) => h && String(h).includes('Datum')),
-    von: headers.findIndex((h) => h && String(h).includes('von')),
-    bis: headers.findIndex((h) => h && String(h).includes('bis')),
-  };
+  const colIndices = findCoreColumnIndices(headers);
   const lehrerCols = lehrerColumnIndices(headers);
   if (colIndices.folien === -1 && colIndices.inhalt === -1) return { ok: false, reason: 'no_course_columns' };
 
@@ -462,7 +551,7 @@ async function syncOneCourseSheet(
     colIndices.bis,
     ...lehrerCols,
   ];
-  const lehrerHeaderIdx = headers.findIndex((h) => h && String(h).includes('Lehrer'));
+  const lehrerHeaderIdx = headers.findIndex((h) => h && /\blehrer\b/i.test(String(h).trim()));
   if (lehrerHeaderIdx >= 0) reservedColIndices.push(lehrerHeaderIdx);
   const maxReserved = Math.max(-1, ...reservedColIndices.filter((i) => i >= 0));
   const studentStartIndex = maxReserved + 1;
@@ -586,7 +675,7 @@ async function syncOneCourseSheet(
     const teacherColIndices =
       lehrerCols.length > 0
         ? lehrerCols
-        : [headers.findIndex((h) => h && String(h).includes('Lehrer'))].filter((i) => i >= 0);
+        : [headers.findIndex((h) => h && /\blehrer\b/i.test(String(h).trim()))].filter((i) => i >= 0);
     for (const idx of teacherColIndices) {
       teacherParts.push(...parseTeacherNames(row[idx]));
     }
@@ -699,6 +788,20 @@ export type ScannedSheet = {
   sampleRows: ScannedSampleRow[];
 };
 
+function collectTeacherNamesFromScannedSheets(sheets: ScannedSheet[]): string[] {
+  const namesByKey = new Map<string, string>();
+  for (const sheet of sheets) {
+    for (const row of sheet.sampleRows) {
+      for (const teacherName of parseTeacherNames(row.values['Lehrer'])) {
+        const key = normalizePersonNameKey(teacherName);
+        if (!key || namesByKey.has(key)) continue;
+        namesByKey.set(key, teacherName);
+      }
+    }
+  }
+  return [...namesByKey.values()].sort((a, b) => a.localeCompare(b));
+}
+
 /**
  * Parse grid into preview rows + optional full scanned sheet (null when the tab is not a course layout).
  * Used by scan and sync so current-course detection matches import.
@@ -718,13 +821,7 @@ function processVisibleSheetGrid(
   const headers = rows[headerRowIndex];
   if (!headers) return empty;
 
-  const colIndices = {
-    folien: headers.findIndex((h) => h && String(h).includes('Folien') && !String(h).includes('gecheckt')),
-    inhalt: headers.findIndex((h) => h && String(h).includes('Inhalt')),
-    datum: headers.findIndex((h) => h && String(h).includes('Datum')),
-    von: headers.findIndex((h) => h && String(h).includes('von')),
-    bis: headers.findIndex((h) => h && String(h).includes('bis')),
-  };
+  const colIndices = findCoreColumnIndices(headers);
   const lehrerCols = lehrerColumnIndices(headers);
   if (colIndices.folien === -1 && colIndices.inhalt === -1) return empty;
 
@@ -736,7 +833,7 @@ function processVisibleSheetGrid(
     colIndices.bis,
     ...lehrerCols,
   ];
-  const lehrerHeaderIdx = headers.findIndex((h) => h && String(h).includes('Lehrer'));
+  const lehrerHeaderIdx = headers.findIndex((h) => h && /\blehrer\b/i.test(String(h).trim()));
   if (lehrerHeaderIdx >= 0) reservedColIndices.push(lehrerHeaderIdx);
   const maxReserved = Math.max(-1, ...reservedColIndices.filter((i) => i >= 0));
   const studentStartIndex = maxReserved + 1;
@@ -841,6 +938,8 @@ export type ScanGoogleSheetResult =
       sheets: ScannedSheet[];
       /** Visible-tab index of the current course, or null if none qualifies. Sheets after this are not imported. */
       currentCourseVisibleIndex: number | null;
+      /** Teacher names found in workbook rows but not present in the teachers table. */
+      detectedNewTeachers: string[];
     }
   | { success: false; error: string };
 
@@ -1020,6 +1119,7 @@ export async function scanGoogleSheet(
   options?: { onProgress?: (event: SyncProgressEvent) => void | Promise<void> }
 ): Promise<ScanGoogleSheetResult> {
   const onProgress = options?.onProgress;
+  const supabase = getSupabaseAdmin();
   try {
     await onProgress?.({ type: 'status', message: 'Scanning workbook…' });
     const loaded = await loadWorkbookFromSource(source, onProgress);
@@ -1048,6 +1148,15 @@ export async function scanGoogleSheet(
     }
 
     const currentCourseVisibleIndex = findCurrentCourseVisibleIndex(visibleSlots, new Date());
+    await onProgress?.({ type: 'db', message: 'teachers — select all names (scan preview)' });
+    const { data: allTeachers, error: teachersError } = await supabase.from('teachers').select('name');
+    if (teachersError) throw new Error(teachersError.message);
+    const existingTeacherNameKeys = new Set(
+      (allTeachers ?? []).map((teacher: { name: string | null }) => normalizePersonNameKey(teacher.name)).filter(Boolean)
+    );
+    const detectedNewTeachers = collectTeacherNamesFromScannedSheets(scannedSheets).filter(
+      (teacherName) => !existingTeacherNameKeys.has(normalizePersonNameKey(teacherName))
+    );
 
     await onProgress?.({ type: 'status', message: 'Scan complete' });
 
@@ -1056,6 +1165,7 @@ export async function scanGoogleSheet(
       workbookTitle,
       sheets: scannedSheets,
       currentCourseVisibleIndex,
+      detectedNewTeachers,
     };
   } catch (error: unknown) {
     console.error('Scan error:', error);
@@ -1088,7 +1198,9 @@ export async function runGoogleSheetSync(
     await onProgress?.({ type: 'db', message: 'teachers — select all (cache)' });
     const { data: allTeachers } = await supabase.from('teachers').select('id, name');
     const teacherCache = new Map<string, string>(
-      (allTeachers ?? []).map((t: { id: string; name: string }) => [t.name, t.id])
+      (allTeachers ?? [])
+        .map((t: { id: string; name: string }) => [normalizePersonNameKey(t.name), t.id] as const)
+        .filter(([key]) => Boolean(key))
     );
 
     const classType = detectClassType(workbookTitle);
