@@ -42,6 +42,11 @@ function lessonIncludesTeacher(lessonTeacher: unknown, selectedTeacherKey: strin
   return names.some((n) => normalizePersonNameKey(n) === selectedTeacherKey);
 }
 
+function hoursDisplayFromMinutes(minutes: number): string {
+  const exactHours = minutes / 60;
+  return (Math.trunc(exactHours * 100) / 100).toString();
+}
+
 export default async function TeacherDetailsPage({ 
   params,
   searchParams
@@ -218,11 +223,7 @@ export default async function TeacherDetailsPage({
     });
   });
 
-  const totalHoursDisplay = (() => {
-    const exactHours = totalMinutes / 60;
-    const truncatedTo2dp = Math.trunc(exactHours * 100) / 100;
-    return truncatedTo2dp.toString();
-  })();
+  const totalHoursDisplay = hoursDisplayFromMinutes(totalMinutes);
 
   let totalAttendanceRecords = 0;
   let presentRecords = 0;
@@ -260,16 +261,21 @@ export default async function TeacherDetailsPage({
   const totalLessons = allLessons.length;
 
   const courseMetaById = new Map(courses.map((course: any) => [course.id, course]));
-  const groupsInPeriodMap = new Map<string, { groupId: string; name: string; lessonsCount: number }>();
+  const groupsInPeriodMap = new Map<
+    string,
+    { groupId: string; name: string; lessonsCount: number; minutesTaught: number }
+  >();
   allLessons.forEach((lesson) => {
     const courseMeta = courseMetaById.get(lesson.course_id);
     const courseGroup = Array.isArray(courseMeta?.groups) ? courseMeta.groups[0] : courseMeta?.groups;
     const groupId = courseGroup?.id;
     if (!groupId) return;
 
+    const mins = typeof lesson.calculatedDurationMinutes === 'number' ? lesson.calculatedDurationMinutes : 0;
     const existing = groupsInPeriodMap.get(groupId);
     if (existing) {
       existing.lessonsCount += 1;
+      existing.minutesTaught += mins;
       return;
     }
 
@@ -277,6 +283,7 @@ export default async function TeacherDetailsPage({
       groupId,
       name: courseGroup?.name ?? 'Unknown group',
       lessonsCount: 1,
+      minutesTaught: mins,
     });
   });
 
@@ -463,6 +470,9 @@ export default async function TeacherDetailsPage({
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
                             <span className="text-xs font-semibold text-on-surface-variant">
                               {row.lessonsCount} lesson{row.lessonsCount === 1 ? '' : 's'}
+                            </span>
+                            <span className="text-xs font-semibold text-on-surface-variant">
+                              · {hoursDisplayFromMinutes(row.minutesTaught)} hrs
                             </span>
                           </div>
                         </div>
