@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ScanGoogleSheetResult, ScannedSheet } from '@/lib/sync/googleSheetSync';
+import type { ScanGoogleSheetResult, ScannedSampleRow, ScannedSheet } from '@/lib/sync/googleSheetSync';
 
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
 
@@ -10,16 +10,36 @@ function isEmptyCellValue(v: unknown): boolean {
   return String(v ?? '').trim().length === 0;
 }
 
+/** Row index of first non-empty cell for this student, or -1 if they never appear. */
+function studentFirstAttendanceRowIndex(rows: ScannedSampleRow[], studentName: string): number {
+  for (let r = 0; r < rows.length; r++) {
+    if (!isEmptyCellValue(rows[r].values[studentName])) return r;
+  }
+  return -1;
+}
+
+/** Empty student cells before first attendance are allowed (not joined yet). */
+function isStudentEmptyViolation(
+  rows: ScannedSampleRow[],
+  rowIndex: number,
+  studentName: string
+): boolean {
+  const first = studentFirstAttendanceRowIndex(rows, studentName);
+  if (first < 0) return false;
+  return rowIndex > first && isEmptyCellValue(rows[rowIndex].values[studentName]);
+}
+
 function countEmptyCellsInSheet(sheet: ScannedSheet): number {
+  const { sampleRows } = sheet;
   let n = 0;
-  for (const row of sheet.sampleRows) {
+  sampleRows.forEach((row, rIdx) => {
     for (const key of DATA_COLUMN_KEYS) {
       if (isEmptyCellValue(row.values[key])) n++;
     }
     for (const s of sheet.headers.students) {
-      if (isEmptyCellValue(row.values[s.name])) n++;
+      if (isStudentEmptyViolation(sampleRows, rIdx, s.name)) n++;
     }
-  }
+  });
   return n;
 }
 
@@ -94,7 +114,7 @@ export default function ScanPreviewModal({
             {emptyCellCount > 0 && (
               <span
                 className="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-1 text-sm font-medium text-yellow-950 ring-1 ring-yellow-300/80"
-                title={`${emptyCellCount} empty ${emptyCellCount === 1 ? 'cell' : 'cells'} on this sheet`}
+                title={`${emptyCellCount} validation ${emptyCellCount === 1 ? 'issue' : 'issues'} on this sheet (core columns empty, or student attendance missing after their first recorded session)`}
               >
                 <span className="material-symbols-outlined text-[1.125rem] leading-none" aria-hidden>
                   error
@@ -221,8 +241,12 @@ export default function ScanPreviewModal({
                         </td>
                         {activeSheet.headers.students.map((student, cIdx) => {
                           const cellText = row.values[student.name] || '';
-                          const empty = isEmptyCellValue(cellText);
-                          const tone = empty
+                          const warnEmpty = isStudentEmptyViolation(
+                            activeSheet.sampleRows,
+                            rIdx,
+                            student.name
+                          );
+                          const tone = warnEmpty
                             ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
                             : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
                           return (
