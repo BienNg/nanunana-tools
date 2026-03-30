@@ -210,17 +210,22 @@ export default async function TeacherDetailsPage({
   const maxSessions = Math.max(...trendData.map(d => d[1].sessions), 1);
   const maxHours = Math.max(...trendData.map(d => d[1].minutes / 60), 1);
 
-  // Engagement Metrics
-  let slidesCheckedCount = 0;
-  let completedCount = 0;
-  const now = new Date();
-  allLessons.forEach(lesson => {
-    if (lesson.slide_id) slidesCheckedCount++;
-    if (lesson.date && new Date(lesson.date) < now) completedCount++;
-  });
   const totalLessons = allLessons.length;
-  const slidesCheckedRate = totalLessons > 0 ? Math.round((slidesCheckedCount / totalLessons) * 100) : 0;
-  const courseCompletionRate = totalLessons > 0 ? Math.round((completedCount / totalLessons) * 100) : 0;
+
+  const coursesInPeriod = [...new Set(allLessons.map((l) => l.course_id))]
+    .filter(Boolean)
+    .map((courseId) => {
+      const meta = courses.find((c: any) => c.id === courseId);
+      const sampleLesson = allLessons.find((l) => l.course_id === courseId);
+      const name = meta?.name ?? sampleLesson?.courses?.name ?? 'Unknown course';
+      const groupName = meta?.groups?.name ?? null;
+      const lessonsCount = lessonsByCourseId[courseId]?.length ?? 0;
+      return { courseId, name, groupName, lessonsCount };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const periodCoursesSubtitle =
+    filter === 'monthly' ? selectedMonthLabel : 'All time';
 
   // Recent Sessions
   const recentSessions = [...allLessons]
@@ -375,55 +380,47 @@ export default async function TeacherDetailsPage({
             </div>
           </div>
 
-          {/* Engagement Metrics */}
+          {/* Courses taught in selected period */}
           <div className="lg:col-span-4 flex flex-col gap-6">
-            <div className="bg-surface-container-lowest rounded-3xl p-8 border border-outline-variant/10 flex-1">
-              <h3 className="text-lg font-bold font-headline mb-6">Engagement & Progress</h3>
-              <div className="space-y-6">
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm font-semibold">Avg. Attendance</span>
-                    <span className="text-sm font-bold text-tertiary">{avgAttendance}%</span>
-                  </div>
-                  <div className="w-full h-2 bg-surface-container-high rounded-full overflow-hidden">
-                    <div className="h-full bg-tertiary rounded-full" style={{ width: `${avgAttendance}%` }}></div>
-                  </div>
-                </div>
-                
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm font-semibold">Course Completion</span>
-                    <span className="text-sm font-bold text-primary">{courseCompletionRate}%</span>
-                  </div>
-                  <div className="w-full h-2 bg-surface-container-high rounded-full overflow-hidden">
-                    <div className="h-full bg-primary rounded-full" style={{ width: `${courseCompletionRate}%` }}></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm font-semibold">Slides Checked</span>
-                    <span className="text-sm font-bold text-secondary-container">{slidesCheckedRate}%</span>
-                  </div>
-                  <div className="w-full h-2 bg-surface-container-high rounded-full overflow-hidden">
-                    <div className="h-full bg-secondary-container rounded-full" style={{ width: `${slidesCheckedRate}%` }}></div>
-                  </div>
-                </div>
+            <div className="bg-surface-container-lowest rounded-3xl p-8 border border-outline-variant/10 flex-1 flex flex-col min-h-0">
+              <div className="mb-6">
+                <h3 className="text-lg font-bold font-headline">Courses taught</h3>
+                <p className="text-sm text-on-surface-variant font-medium mt-1">{periodCoursesSubtitle}</p>
               </div>
-
-              <div className="mt-8 pt-6 border-t border-outline-variant/10">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-full bg-tertiary/10 flex items-center justify-center">
-                    <span className="material-symbols-outlined text-tertiary">workspace_premium</span>
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-on-surface-variant uppercase tracking-tighter">Status</p>
-                    <p className="text-sm font-bold">
-                      {avgAttendance > 90 ? 'High Performing Faculty' : 'Active Faculty'}
-                    </p>
-                  </div>
-                </div>
-              </div>
+              {coursesInPeriod.length > 0 ? (
+                <ul className="space-y-2 overflow-y-auto flex-1 -mr-2 pr-2 max-h-[280px]">
+                  {coursesInPeriod.map((row) => (
+                    <li key={row.courseId}>
+                      <Link
+                        href={`/courses/${row.courseId}`}
+                        className="flex items-center gap-3 rounded-2xl border border-outline-variant/10 bg-surface-container-low/40 hover:bg-surface-container-low transition-colors px-4 py-3 group"
+                      >
+                        <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                          <span className="material-symbols-outlined text-xl">menu_book</span>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="font-bold text-on-surface truncate">{row.name}</p>
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
+                            {row.groupName ? (
+                              <span className="text-xs text-on-surface-variant truncate">{row.groupName}</span>
+                            ) : null}
+                            <span className="text-xs font-semibold text-on-surface-variant">
+                              {row.lessonsCount} lesson{row.lessonsCount === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="material-symbols-outlined text-outline group-hover:text-primary transition-colors shrink-0 text-lg">
+                          chevron_right
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-on-surface-variant font-medium flex-1">
+                  No lessons in this period.
+                </p>
+              )}
             </div>
           </div>
         </div>
