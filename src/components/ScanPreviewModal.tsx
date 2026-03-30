@@ -54,10 +54,17 @@ function isDatumChronologyOutlier(rows: ScannedSampleRow[], rowIndex: number): b
   return false;
 }
 
-/** Row index of first non-empty cell for this student, or -1 if they never appear. */
+/** Text or sheet background color (Present / Absent) counts as attendance data for this cell. */
+function studentCellHasAttendanceData(row: ScannedSampleRow, studentName: string): boolean {
+  if (!isEmptyCellValue(row.values[studentName])) return true;
+  const a = row.studentAttendance[studentName];
+  return a === 'Present' || a === 'Absent';
+}
+
+/** Row index of first cell with text or color attendance, or -1 if they never appear. */
 function studentFirstAttendanceRowIndex(rows: ScannedSampleRow[], studentName: string): number {
   for (let r = 0; r < rows.length; r++) {
-    if (!isEmptyCellValue(rows[r].values[studentName])) return r;
+    if (studentCellHasAttendanceData(rows[r], studentName)) return r;
   }
   return -1;
 }
@@ -70,7 +77,7 @@ function isStudentEmptyViolation(
 ): boolean {
   const first = studentFirstAttendanceRowIndex(rows, studentName);
   if (first < 0) return false;
-  return rowIndex > first && isEmptyCellValue(rows[rowIndex].values[studentName]);
+  return rowIndex > first && !studentCellHasAttendanceData(rows[rowIndex], studentName);
 }
 
 function countSheetValidationIssues(sheet: ScannedSheet): number {
