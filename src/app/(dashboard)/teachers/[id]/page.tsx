@@ -1,8 +1,15 @@
 import Link from 'next/link';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { lessonDurationMinutes, normalizeGroupClassType } from '@/lib/courseDuration';
+import TeacherMonthDropdown from './TeacherMonthDropdown';
 
 export const dynamic = 'force-dynamic';
+
+function yearMonthFromLessonDate(dateStr: unknown): string | null {
+  if (typeof dateStr !== 'string') return null;
+  const m = dateStr.match(/^(\d{4}-\d{2})/);
+  return m ? m[1] : null;
+}
 
 export default async function TeacherDetailsPage({ 
   params,
@@ -14,7 +21,7 @@ export default async function TeacherDetailsPage({
   const resolvedParams = await params;
   const id = resolvedParams.id;
   const resolvedSearchParams = await searchParams;
-  const filter = resolvedSearchParams.filter === 'monthly' ? 'monthly' : 'all';
+  const filter = resolvedSearchParams.filter === 'all' ? 'all' : 'monthly';
   const supabase = getSupabaseAdmin();
   
   // 1. Fetch teacher details
@@ -72,7 +79,6 @@ export default async function TeacherDetailsPage({
   const currentMonth = _now.getUTCMonth() + 1; // 1-based
   const currentYearMonth = `${currentYear}-${String(currentMonth).padStart(2, '0')}`; // "2026-03"
   const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-  const currentMonthLabel = `${MONTH_NAMES[currentMonth - 1]} ${currentYear}`; // "March 2026"
 
   if (courseIds.length > 0) {
     const { data: lessonsData } = await supabase
@@ -98,12 +104,48 @@ export default async function TeacherDetailsPage({
       .in('course_id', courseIds);
       
     allLessons = lessonsData || [];
+  }
 
-    if (filter === 'monthly') {
-      allLessons = allLessons.filter(lesson =>
-        typeof lesson.date === 'string' && lesson.date.startsWith(currentYearMonth)
-      );
+  const availableYearMonths = (() => {
+    const set = new Set<string>();
+    for (const lesson of allLessons) {
+      const ym = yearMonthFromLessonDate(lesson.date);
+      if (ym) set.add(ym);
     }
+    return Array.from(set).sort((a, b) => b.localeCompare(a));
+  })();
+
+  const rawMonth = resolvedSearchParams.month;
+  const monthParamStr =
+    typeof rawMonth === 'string'
+      ? rawMonth
+      : Array.isArray(rawMonth) && rawMonth[0]
+        ? rawMonth[0]
+        : undefined;
+  const monthParamValid =
+    monthParamStr && /^\d{4}-\d{2}$/.test(monthParamStr) ? monthParamStr : undefined;
+
+  let selectedYearMonth = currentYearMonth;
+  if (filter === 'monthly' && monthParamValid) {
+    selectedYearMonth = monthParamValid;
+  }
+
+  const selectedMonthParts = selectedYearMonth.split('-');
+  const selectedMonthLabel = `${MONTH_NAMES[Number(selectedMonthParts[1]) - 1]} ${selectedMonthParts[0]}`;
+
+  const monthOptions = availableYearMonths.map((ym) => {
+    const [y, mo] = ym.split('-');
+    return {
+      value: ym,
+      label: `${MONTH_NAMES[Number(mo) - 1]} ${y}`,
+    };
+  });
+
+  if (courseIds.length > 0 && filter === 'monthly') {
+    allLessons = allLessons.filter(
+      (lesson) =>
+        typeof lesson.date === 'string' && lesson.date.startsWith(selectedYearMonth),
+    );
   }
 
   // Metrics Calculation
@@ -226,7 +268,7 @@ export default async function TeacherDetailsPage({
                 All Time
               </Link>
               <Link 
-                href={`/teachers/${id}?filter=monthly`}
+                href={`/teachers/${id}`}
                 className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${filter === 'monthly' ? 'bg-primary text-on-primary' : 'text-on-surface-variant hover:bg-surface-container-low'}`}
               >
                 Monthly
@@ -234,10 +276,12 @@ export default async function TeacherDetailsPage({
               {filter === 'monthly' && (
                 <>
                   <div className="h-6 w-px bg-outline-variant/30 mx-2"></div>
-                  <div className="flex items-center gap-2 px-3 py-2 text-sm font-semibold text-primary">
-                    <span className="material-symbols-outlined text-base">calendar_today</span>
-                    {currentMonthLabel}
-                  </div>
+                  <TeacherMonthDropdown
+                    teacherId={id}
+                    months={monthOptions}
+                    selectedValue={selectedYearMonth}
+                    selectedLabel={selectedMonthLabel}
+                  />
                 </>
               )}
             </div>
