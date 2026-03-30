@@ -10,7 +10,7 @@ type NdjsonLine =
   | { kind: 'progress-status'; message: string }
   | { kind: 'progress-sheet'; title: string; current: number; total: number }
   | { kind: 'progress-db'; message: string }
-  | { kind: 'done'; result: unknown }
+  | { kind: 'done'; result: ScanGoogleSheetResult }
   | null;
 
 function parseSyncNdjsonLine(line: string): NdjsonLine {
@@ -45,7 +45,7 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
     return { kind: 'progress-db', message: msg.message };
   }
   if (msg.event === 'done' && msg.result) {
-    return { kind: 'done', result: msg.result };
+    return { kind: 'done', result: msg.result as ScanGoogleSheetResult };
   }
   return null;
 }

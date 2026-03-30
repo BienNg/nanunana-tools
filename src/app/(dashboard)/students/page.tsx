@@ -11,7 +11,10 @@ type CourseRow = {
   groups: GroupRow | GroupRow[] | null;
   course_teachers: CourseTeacherRow[] | null;
 } | null;
-type CourseStudentRow = { courses: CourseRow } | null;
+/** Supabase nested select returns `courses` as an array for the course_students → courses relation. */
+type CourseStudentRow = {
+  courses: NonNullable<CourseRow> | NonNullable<CourseRow>[] | null;
+} | null;
 type StudentRow = {
   id: string;
   name: string;
@@ -68,17 +71,18 @@ export default async function StudentsPage() {
     });
 
     asArray(student.course_students).forEach((courseStudent) => {
-      const course = courseStudent?.courses;
-      if (!course) return;
+      asArray(courseStudent?.courses).forEach((course) => {
+        if (!course) return;
 
-      if (course.name) courses.add(course.name);
-      asArray(course.groups).forEach((group) => {
-        if (group?.name) groups.add(group.name);
-      });
+        if (course.name) courses.add(course.name);
+        asArray(course.groups).forEach((group) => {
+          if (group?.name) groups.add(group.name);
+        });
 
-      asArray(course.course_teachers).forEach((courseTeacher) => {
-        asArray(courseTeacher?.teachers).forEach((teacher) => {
-          if (teacher?.name) teachers.add(teacher.name);
+        asArray(course.course_teachers).forEach((courseTeacher) => {
+          asArray(courseTeacher?.teachers).forEach((teacher) => {
+            if (teacher?.name) teachers.add(teacher.name);
+          });
         });
       });
     });
