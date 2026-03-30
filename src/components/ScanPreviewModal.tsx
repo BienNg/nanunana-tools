@@ -46,14 +46,23 @@ function datumCellHoverTitle(
 }
 
 function isEmptyCellValue(v: unknown): boolean {
-  return String(v ?? '').trim().length === 0;
+  return normalizeDisplayCellText(v).length === 0;
+}
+
+function normalizeDisplayCellText(v: unknown): string {
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  if (lower === 'null' || lower === 'undefined') return '';
+  if (s === '[object Object]') return '';
+  return s;
 }
 
 function formatDatumForDisplay(raw: string): string {
-  const s = String(raw ?? '').trim();
+  const s = normalizeDisplayCellText(raw);
   if (!s) return '';
   const ts = parseSheetDatum(s);
-  if (ts === null) return raw;
+  if (ts === null) return s;
   const dt = new Date(ts);
   const day = String(dt.getDate()).padStart(2, '0');
   const month = String(dt.getMonth() + 1).padStart(2, '0');
@@ -601,7 +610,7 @@ export default function ScanPreviewModal({
                               : undefined
                           )}
                         >
-                          {row.values['Folien'] || ''}
+                          {normalizeDisplayCellText(row.values['Folien'])}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
@@ -619,7 +628,7 @@ export default function ScanPreviewModal({
                             !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['von']) ? HINT_EMPTY_VON : undefined
                           )}
                         >
-                          {row.values['von'] || ''}
+                          {normalizeDisplayCellText(row.values['von'])}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
@@ -629,7 +638,7 @@ export default function ScanPreviewModal({
                             !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['bis']) ? HINT_EMPTY_BIS : undefined
                           )}
                         >
-                          {row.values['bis'] || ''}
+                          {normalizeDisplayCellText(row.values['bis'])}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
@@ -641,10 +650,10 @@ export default function ScanPreviewModal({
                               : undefined
                           )}
                         >
-                          {row.values['Lehrer'] || ''}
+                          {normalizeDisplayCellText(row.values['Lehrer'])}
                         </td>
                         {activeSheet.headers.students.map((student, cIdx) => {
-                          const cellText = row.values[student.name] || '';
+                          const cellText = normalizeDisplayCellText(row.values[student.name]);
                           const warnEmpty = isStudentEmptyViolation(
                             rows,
                             rIdx,

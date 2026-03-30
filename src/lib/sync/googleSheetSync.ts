@@ -137,29 +137,79 @@ function attendanceStatusFromExcelCell(cell: ExcelJS.Cell): AttendanceFromColor 
   return attendanceStatusFromRgb(rgb.r, rgb.g, rgb.b);
 }
 
+function sanitizeSheetCellText(value: string): string {
+  const s = value.trim();
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  if (lower === 'null' || lower === 'undefined') return '';
+  if (s === '[object Object]') return '';
+  return s;
+}
+
+function looksLikeVerboseJsDateString(value: string): boolean {
+  return /\bGMT[+-]\d{4}\b/i.test(value) && /\b\d{4}\b/.test(value);
+}
+
+function formatDateValueForSheet(raw: Date): string {
+  if (Number.isNaN(raw.getTime())) return '';
+  // Use UTC to avoid locale-specific historical offsets leaking into time-only cells.
+  const y = raw.getUTCFullYear();
+  const m = raw.getUTCMonth() + 1;
+  const d = raw.getUTCDate();
+  const hh = raw.getUTCHours();
+  const mm = raw.getUTCMinutes();
+  const ss = raw.getUTCSeconds();
+  const hasDatePart = !(y === 1899 && m === 12 && d === 30);
+  const hasTimePart = hh !== 0 || mm !== 0 || ss !== 0;
+  if (!hasDatePart && hasTimePart) return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  if (hasDatePart && !hasTimePart) {
+    return `${String(d).padStart(2, '0')}.${String(m).padStart(2, '0')}.${String(y)}`;
+  }
+  if (hasDatePart && hasTimePart) {
+    return `${String(d).padStart(2, '0')}.${String(m).padStart(2, '0')}.${String(y)} ${String(hh).padStart(
+      2,
+      '0'
+    )}:${String(mm).padStart(2, '0')}`;
+  }
+  return '';
+}
+
 function cellStringFromExcelCell(cell: ExcelJS.Cell): string {
   const raw = cell.value;
   if (raw == null) return '';
-  if (typeof raw === 'string') return raw.trim();
-  if (typeof raw === 'number' || typeof raw === 'boolean' || raw instanceof Date) {
-    return String(raw).trim();
+
+  let rendered = '';
+  try {
+    rendered = typeof cell.text === 'string' ? sanitizeSheetCellText(cell.text) : '';
+  } catch {
+    rendered = '';
+  }
+  if (rendered && !looksLikeVerboseJsDateString(rendered)) return rendered;
+
+  if (typeof raw === 'string') return sanitizeSheetCellText(raw);
+  if (raw instanceof Date) {
+    return formatDateValueForSheet(raw);
+  }
+  if (typeof raw === 'number' || typeof raw === 'boolean') {
+    return sanitizeSheetCellText(String(raw));
   }
   if (typeof raw === 'object') {
     if ('richText' in raw && Array.isArray(raw.richText)) {
-      return raw.richText.map((part) => part?.text ?? '').join('').trim();
+      return sanitizeSheetCellText(raw.richText.map((part) => part?.text ?? '').join(''));
     }
     if ('text' in raw && typeof raw.text === 'string') {
-      return raw.text.trim();
+      return sanitizeSheetCellText(raw.text);
     }
     if ('result' in raw && raw.result != null) {
-      return String(raw.result).trim();
+      if (raw.result instanceof Date) return formatDateValueForSheet(raw.result);
+      return sanitizeSheetCellText(String(raw.result));
     }
     if ('hyperlink' in raw && typeof raw.hyperlink === 'string') {
-      return raw.hyperlink.trim();
+      return sanitizeSheetCellText(raw.hyperlink);
     }
   }
   try {
-    return String(raw).trim();
+    return sanitizeSheetCellText(String(raw));
   } catch {
     return '';
   }
