@@ -43,6 +43,10 @@ function countEmptyCellsInSheet(sheet: ScannedSheet): number {
   return n;
 }
 
+function validationIssuesTooltip(count: number): string {
+  return `${count} validation ${count === 1 ? 'issue' : 'issues'} on this sheet (core columns empty, or student attendance missing after their first recorded session)`;
+}
+
 function studentAttendanceCellClass(
   text: string,
   colorStatus: 'Present' | 'Absent' | null | undefined
@@ -86,11 +90,13 @@ export default function ScanPreviewModal({
     if (isOpen) setActiveTab(0);
   }, [isOpen, scanResult]);
 
-  const emptyCellCount = useMemo(() => {
-    if (!isOpen || !scanResult || !mounted) return 0;
-    const sheet = scanResult.sheets[activeTab];
-    return sheet ? countEmptyCellsInSheet(sheet) : 0;
-  }, [isOpen, scanResult, activeTab, mounted]);
+  const sheetIssueCounts = useMemo(() => {
+    if (!isOpen || !scanResult || !mounted) return [];
+    return scanResult.sheets.map((s) => countEmptyCellsInSheet(s));
+  }, [isOpen, scanResult, mounted]);
+
+  const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
+  const hasAnySheetIssues = sheetIssueCounts.some((c) => c > 0);
 
   if (!isOpen || !scanResult || !mounted) return null;
 
@@ -114,7 +120,7 @@ export default function ScanPreviewModal({
             {emptyCellCount > 0 && (
               <span
                 className="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-1 text-sm font-medium text-yellow-950 ring-1 ring-yellow-300/80"
-                title={`${emptyCellCount} validation ${emptyCellCount === 1 ? 'issue' : 'issues'} on this sheet (core columns empty, or student attendance missing after their first recorded session)`}
+                title={validationIssuesTooltip(emptyCellCount)}
               >
                 <span className="material-symbols-outlined text-[1.125rem] leading-none" aria-hidden>
                   error
@@ -140,22 +146,41 @@ export default function ScanPreviewModal({
           role="tablist"
           aria-label="Workbook sheets"
         >
-          {sheets.map((sheet, idx) => (
-            <button
-              key={idx}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === idx}
-              onClick={() => setActiveTab(idx)}
-              className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors ${
-                activeTab === idx
-                  ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
-                  : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-100/80 hover:text-gray-900'
-              }`}
-            >
-              {sheet.title}
-            </button>
-          ))}
+          {sheets.map((sheet, idx) => {
+            const tabIssues = sheetIssueCounts[idx] ?? 0;
+            return (
+              <button
+                key={idx}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === idx}
+                onClick={() => setActiveTab(idx)}
+                aria-label={
+                  tabIssues > 0
+                    ? `${sheet.title}, ${tabIssues} validation ${tabIssues === 1 ? 'issue' : 'issues'}`
+                    : sheet.title
+                }
+                className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 ${
+                  activeTab === idx
+                    ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
+                    : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-100/80 hover:text-gray-900'
+                }`}
+              >
+                <span className="truncate max-w-[min(40vw,20rem)]">{sheet.title}</span>
+                {tabIssues > 0 && (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-1 text-sm font-medium text-yellow-950 ring-1 ring-yellow-300/80"
+                    title={validationIssuesTooltip(tabIssues)}
+                  >
+                    <span className="material-symbols-outlined text-[1.125rem] leading-none" aria-hidden>
+                      error
+                    </span>
+                    <span>{tabIssues}</span>
+                  </span>
+                )}
+              </button>
+            );
+          })}
           {sheets.length === 0 && (
             <div className="flex min-h-[3.25rem] items-center px-4 py-3 text-sm text-gray-500">No sheets found</div>
           )}
@@ -285,9 +310,15 @@ export default function ScanPreviewModal({
             Cancel
           </button>
           <button
+            type="button"
             onClick={onConfirm}
-            disabled={isImporting}
-            className="px-6 py-2 text-sm font-medium text-white bg-[#ff7a59] rounded hover:bg-[#ff8f73] focus:ring-2 focus:ring-offset-2 focus:ring-[#ff7a59] disabled:opacity-50 transition-colors flex items-center gap-2 shadow-sm"
+            disabled={isImporting || hasAnySheetIssues}
+            title={
+              hasAnySheetIssues && !isImporting
+                ? 'Resolve validation issues on every sheet before importing (see yellow indicators on tabs and in the table)'
+                : undefined
+            }
+            className="px-6 py-2 text-sm font-medium text-white bg-[#ff7a59] rounded hover:bg-[#ff8f73] focus:ring-2 focus:ring-offset-2 focus:ring-[#ff7a59] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
           >
             {isImporting ? (
               <>
