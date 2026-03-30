@@ -1,8 +1,27 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ScanGoogleSheetResult } from '@/lib/sync/googleSheetSync';
+import type { ScanGoogleSheetResult, ScannedSheet } from '@/lib/sync/googleSheetSync';
+
+const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
+
+function isEmptyCellValue(v: unknown): boolean {
+  return String(v ?? '').trim().length === 0;
+}
+
+function countEmptyCellsInSheet(sheet: ScannedSheet): number {
+  let n = 0;
+  for (const row of sheet.sampleRows) {
+    for (const key of DATA_COLUMN_KEYS) {
+      if (isEmptyCellValue(row.values[key])) n++;
+    }
+    for (const s of sheet.headers.students) {
+      if (isEmptyCellValue(row.values[s.name])) n++;
+    }
+  }
+  return n;
+}
 
 function studentAttendanceCellClass(
   text: string,
@@ -47,6 +66,12 @@ export default function ScanPreviewModal({
     if (isOpen) setActiveTab(0);
   }, [isOpen, scanResult]);
 
+  const emptyCellCount = useMemo(() => {
+    if (!isOpen || !scanResult || !mounted) return 0;
+    const sheet = scanResult.sheets[activeTab];
+    return sheet ? countEmptyCellsInSheet(sheet) : 0;
+  }, [isOpen, scanResult, activeTab, mounted]);
+
   if (!isOpen || !scanResult || !mounted) return null;
 
   const sheets = scanResult.sheets;
@@ -61,17 +86,32 @@ export default function ScanPreviewModal({
     >
       <div className="bg-white rounded-lg shadow-2xl w-[min(96vw,1920px)] max-h-[92vh] flex flex-col font-sans overflow-hidden">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center bg-gray-50">
-          <h2 id="scan-preview-title" className="text-xl font-semibold text-gray-800">
+        <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center gap-4 bg-gray-50">
+          <h2 id="scan-preview-title" className="text-xl font-semibold text-gray-800 min-w-0 truncate">
             Review Import: {scanResult.workbookTitle}
           </h2>
-          <button
-            onClick={onClose}
-            disabled={isImporting}
-            className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
-          >
-            <span className="material-symbols-outlined">close</span>
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {emptyCellCount > 0 && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-1 text-sm font-medium text-yellow-950 ring-1 ring-yellow-300/80"
+                title={`${emptyCellCount} empty ${emptyCellCount === 1 ? 'cell' : 'cells'} on this sheet`}
+              >
+                <span className="material-symbols-outlined text-[1.125rem] leading-none" aria-hidden>
+                  error
+                </span>
+                <span aria-live="polite">{emptyCellCount}</span>
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isImporting}
+              className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
+              aria-label="Close preview"
+            >
+              <span className="material-symbols-outlined">close</span>
+            </button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -134,14 +174,57 @@ export default function ScanPreviewModal({
                   {activeSheet.sampleRows.length > 0 ? (
                     activeSheet.sampleRows.map((row, rIdx) => (
                       <tr key={rIdx} className="hover:bg-gray-50">
-                        <td className="px-4 py-2 border-r border-gray-200">{row.values['Folien'] || ''}</td>
-                        <td className="px-4 py-2 border-r border-gray-200">{row.values['Datum'] || ''}</td>
-                        <td className="px-4 py-2 border-r border-gray-200">{row.values['von'] || ''}</td>
-                        <td className="px-4 py-2 border-r border-gray-200">{row.values['bis'] || ''}</td>
-                        <td className="px-4 py-2 border-r border-gray-200">{row.values['Lehrer'] || ''}</td>
+                        <td
+                          className={`px-4 py-2 border-r border-gray-200 ${
+                            isEmptyCellValue(row.values['Folien'])
+                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
+                              : ''
+                          }`}
+                        >
+                          {row.values['Folien'] || ''}
+                        </td>
+                        <td
+                          className={`px-4 py-2 border-r border-gray-200 ${
+                            isEmptyCellValue(row.values['Datum'])
+                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
+                              : ''
+                          }`}
+                        >
+                          {row.values['Datum'] || ''}
+                        </td>
+                        <td
+                          className={`px-4 py-2 border-r border-gray-200 ${
+                            isEmptyCellValue(row.values['von'])
+                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
+                              : ''
+                          }`}
+                        >
+                          {row.values['von'] || ''}
+                        </td>
+                        <td
+                          className={`px-4 py-2 border-r border-gray-200 ${
+                            isEmptyCellValue(row.values['bis'])
+                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
+                              : ''
+                          }`}
+                        >
+                          {row.values['bis'] || ''}
+                        </td>
+                        <td
+                          className={`px-4 py-2 border-r border-gray-200 ${
+                            isEmptyCellValue(row.values['Lehrer'])
+                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
+                              : ''
+                          }`}
+                        >
+                          {row.values['Lehrer'] || ''}
+                        </td>
                         {activeSheet.headers.students.map((student, cIdx) => {
                           const cellText = row.values[student.name] || '';
-                          const tone = studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
+                          const empty = isEmptyCellValue(cellText);
+                          const tone = empty
+                            ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
+                            : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
                           return (
                             <td key={cIdx} className={`px-4 py-2 ${tone}`}>
                               {cellText}
