@@ -8,7 +8,11 @@ import type {
   ScannedSheet,
   SkippedRowsBySheet,
 } from '@/lib/sync/googleSheetSync';
-import { findLastTaughtSessionRowIndex, parseSheetDatum } from '@/lib/sync/currentCourseSheet';
+import {
+  findLastTaughtSessionRowIndex,
+  isSheetDatumStrictlyAfterToday,
+  parseSheetDatum,
+} from '@/lib/sync/currentCourseSheet';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
@@ -75,16 +79,30 @@ function formatDatumForDisplay(raw: string): string {
  * Session rows are in teaching order; each date must be strictly after the previous row’s date
  * and strictly before the next row’s date (no duplicate session dates vs neighbors).
  * Unparseable dates are skipped (no chronology warning).
+ * Future session rows (Datum after local today) are excluded like skipped rows.
  */
+function rowOutsideValidationScope(
+  rows: ScannedSampleRow[],
+  rowIndex: number,
+  skippedRows: ReadonlySet<number>,
+  maxValidationRowIndex: number | null,
+  now: Date
+): boolean {
+  if (skippedRows.has(rowIndex)) return true;
+  if (maxValidationRowIndex !== null && rowIndex > maxValidationRowIndex) return true;
+  return isSheetDatumStrictlyAfterToday(rows[rowIndex]?.values['Datum'], now);
+}
+
 function previousActiveRowIndex(
   rows: ScannedSampleRow[],
   rowIndex: number,
   skippedRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null
+  maxValidationRowIndex: number | null,
+  now: Date
 ): number {
   for (let i = rowIndex - 1; i >= 0; i--) {
-    if (maxValidationRowIndex !== null && i > maxValidationRowIndex) continue;
-    if (!skippedRows.has(i)) return i;
+    if (rowOutsideValidationScope(rows, i, skippedRows, maxValidationRowIndex, now)) continue;
+    return i;
   }
   return -1;
 }
@@ -93,11 +111,12 @@ function nextActiveRowIndex(
   rows: ScannedSampleRow[],
   rowIndex: number,
   skippedRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null
+  maxValidationRowIndex: number | null,
+  now: Date
 ): number {
   for (let i = rowIndex + 1; i < rows.length; i++) {
-    if (maxValidationRowIndex !== null && i > maxValidationRowIndex) continue;
-    if (!skippedRows.has(i)) return i;
+    if (rowOutsideValidationScope(rows, i, skippedRows, maxValidationRowIndex, now)) continue;
+    return i;
   }
   return -1;
 }
@@ -106,18 +125,18 @@ function isDatumChronologyOutlier(
   rows: ScannedSampleRow[],
   rowIndex: number,
   skippedRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null
+  maxValidationRowIndex: number | null,
+  now: Date
 ): boolean {
-  if (skippedRows.has(rowIndex)) return false;
-  if (maxValidationRowIndex !== null && rowIndex > maxValidationRowIndex) return false;
+  if (rowOutsideValidationScope(rows, rowIndex, skippedRows, maxValidationRowIndex, now)) return false;
   const n = rows.length;
   if (n < 2) return false;
 
   const cur = parseSheetDatum(rows[rowIndex].values['Datum'] ?? '');
   if (cur === null) return false;
 
-  const prevIdx = previousActiveRowIndex(rows, rowIndex, skippedRows, maxValidationRowIndex);
-  const nextIdx = nextActiveRowIndex(rows, rowIndex, skippedRows, maxValidationRowIndex);
+  const prevIdx = previousActiveRowIndex(rows, rowIndex, skippedRows, maxValidationRowIndex, now);
+  const nextIdx = nextActiveRowIndex(rows, rowIndex, skippedRows, maxValidationRowIndex, now);
   const prev = prevIdx >= 0 ? parseSheetDatum(rows[prevIdx].values['Datum'] ?? '') : null;
   const next = nextIdx >= 0 ? parseSheetDatum(rows[nextIdx].values['Datum'] ?? '') : null;
 
@@ -154,11 +173,12 @@ function studentFirstAttendanceRowIndex(
   rows: ScannedSampleRow[],
   studentName: string,
   skippedRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null
+  maxValidationRowIndex: number | null,
+  now: Date
 ): number {
   const end = maxValidationRowIndex === null ? rows.length - 1 : Math.min(rows.length - 1, maxValidationRowIndex);
   for (let r = 0; r <= end; r++) {
-    if (skippedRows.has(r)) continue;
+    if (rowOutsideValidationScope(rows, r, skippedRows, maxValidationRowIndex, now)) continue;
     if (studentCellHasAttendanceData(rows[r], studentName)) return r;
   }
   return -1;
@@ -170,11 +190,11 @@ function isStudentEmptyViolation(
   rowIndex: number,
   studentName: string,
   skippedRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null
+  maxValidationRowIndex: number | null,
+  now: Date
 ): boolean {
-  if (skippedRows.has(rowIndex)) return false;
-  if (maxValidationRowIndex !== null && rowIndex > maxValidationRowIndex) return false;
-  const first = studentFirstAttendanceRowIndex(rows, studentName, skippedRows, maxValidationRowIndex);
+  if (rowOutsideValidationScope(rows, rowIndex, skippedRows, maxValidationRowIndex, now)) return false;
+  const first = studentFirstAttendanceRowIndex(rows, studentName, skippedRows, maxValidationRowIndex, now);
   if (first < 0) return false;
   return rowIndex > first && !studentCellHasAttendanceData(rows[rowIndex], studentName);
 }
@@ -182,21 +202,21 @@ function isStudentEmptyViolation(
 function countSheetValidationIssues(
   sheet: ScannedSheet,
   skippedRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null
+  maxValidationRowIndex: number | null,
+  now: Date
 ): number {
   const { sampleRows } = sheet;
   let n = 0;
   sampleRows.forEach((row, rIdx) => {
-    if (skippedRows.has(rIdx)) return;
-    if (maxValidationRowIndex !== null && rIdx > maxValidationRowIndex) return;
+    if (rowOutsideValidationScope(sampleRows, rIdx, skippedRows, maxValidationRowIndex, now)) return;
     for (const key of DATA_COLUMN_KEYS) {
       if (isEmptyCellValue(row.values[key])) n++;
     }
-    if (!isEmptyCellValue(row.values['Datum']) && isDatumChronologyOutlier(sampleRows, rIdx, skippedRows, maxValidationRowIndex)) {
+    if (!isEmptyCellValue(row.values['Datum']) && isDatumChronologyOutlier(sampleRows, rIdx, skippedRows, maxValidationRowIndex, now)) {
       n++;
     }
     for (const s of sheet.headers.students) {
-      if (isStudentEmptyViolation(sampleRows, rIdx, s.name, skippedRows, maxValidationRowIndex)) n++;
+      if (isStudentEmptyViolation(sampleRows, rIdx, s.name, skippedRows, maxValidationRowIndex, now)) n++;
     }
   });
   return n;
@@ -312,14 +332,15 @@ export default function ScanPreviewModal({
   const sheetIssueCounts = useMemo(() => {
     if (!isOpen || !scanResult || !mounted) return [];
     const cutoff = scanResult.currentCourseVisibleIndex;
+    const now = new Date();
     return scanResult.sheets.map((s) => {
       if (cutoff !== null && s.visibleOrderIndex > cutoff) return 0;
       const skipped = new Set(skippedRowsBySheet[makeSheetKey(s)] ?? []);
       const maxValidationRowIndex =
         cutoff !== null && s.visibleOrderIndex === cutoff
-          ? findLastTaughtSessionRowIndex(s.sampleRows, new Date())
+          ? findLastTaughtSessionRowIndex(s.sampleRows, now)
           : null;
-      return countSheetValidationIssues(s, skipped, maxValidationRowIndex);
+      return countSheetValidationIssues(s, skipped, maxValidationRowIndex, now);
     });
   }, [isOpen, scanResult, mounted, skippedRowsBySheet]);
 
@@ -354,9 +375,10 @@ export default function ScanPreviewModal({
     activeSheet.visibleOrderIndex > currentCourseVisibleIndex;
 
   const activeSkippedRows = activeSheet ? new Set(skippedRowsBySheet[makeSheetKey(activeSheet)] ?? []) : new Set<number>();
+  const previewValidationNow = new Date();
   const activeMaxValidationRowIndex =
     activeSheet && currentCourseVisibleIndex !== null && activeSheet.visibleOrderIndex === currentCourseVisibleIndex
-      ? findLastTaughtSessionRowIndex(activeSheet.sampleRows, new Date())
+      ? findLastTaughtSessionRowIndex(activeSheet.sampleRows, previewValidationNow)
       : null;
 
   const toggleSkipRow = (sheet: ScannedSheet, rowIndex: number) => {
@@ -584,13 +606,19 @@ export default function ScanPreviewModal({
                     activeSheet.sampleRows.map((row, rIdx) => {
                       const rows = activeSheet.sampleRows;
                       const rowIsSkipped = activeSkippedRows.has(rIdx);
-                      const rowOutsideValidation =
-                        activeMaxValidationRowIndex !== null && rIdx > activeMaxValidationRowIndex;
+                      const rowOutsideValidation = rowOutsideValidationScope(
+                        rows,
+                        rIdx,
+                        activeSkippedRows,
+                        activeMaxValidationRowIndex,
+                        previewValidationNow
+                      );
                       const datumChrono = isDatumChronologyOutlier(
                         rows,
                         rIdx,
                         activeSkippedRows,
-                        activeMaxValidationRowIndex
+                        activeMaxValidationRowIndex,
+                        previewValidationNow
                       );
                       const datumEmpty = isEmptyCellValue(row.values['Datum']);
                       return (
@@ -689,7 +717,8 @@ export default function ScanPreviewModal({
                             rIdx,
                             student.name,
                             activeSkippedRows,
-                            activeMaxValidationRowIndex
+                            activeMaxValidationRowIndex,
+                            previewValidationNow
                           );
                           const tone = warnEmpty
                             ? CELL_WARN_CLASS

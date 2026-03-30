@@ -110,3 +110,33 @@ export function findLastTaughtSessionRowIndex(
   }
   return lastIdx;
 }
+
+/** Local calendar “today” at noon, for comparisons with {@link parseSheetDatum}. */
+export function localCalendarTodayTimestamp(now: Date): number | null {
+  return localDayTimestamp(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+/** True when Datum parses to a calendar day strictly after local today (scheduled / not yet held). */
+export function isSheetDatumStrictlyAfterToday(datumRaw: string | undefined | null, now: Date): boolean {
+  const dt = parseSheetDatum(String(datumRaw ?? ''));
+  if (dt === null) return false;
+  const todayTs = localCalendarTodayTimestamp(now);
+  if (todayTs === null) return false;
+  return dt > todayTs;
+}
+
+/**
+ * `parseSheetDate` / DB-style `YYYY-MM-DD` strictly after local today.
+ * Keeps import skips aligned with preview validation (same calendar rules).
+ */
+export function isIsoDateStrictlyAfterLocalToday(isoDate: string, now: Date): boolean {
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+  if (!iso) return false;
+  const y = parseInt(iso[1], 10);
+  const m = parseInt(iso[2], 10);
+  const d = parseInt(iso[3], 10);
+  const dayTs = localDayTimestamp(y, m - 1, d);
+  const todayTs = localCalendarTodayTimestamp(now);
+  if (dayTs === null || todayTs === null) return false;
+  return dayTs > todayTs;
+}

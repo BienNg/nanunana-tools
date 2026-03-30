@@ -2,7 +2,7 @@ import { google, sheets_v4 } from 'googleapis';
 import ExcelJS from 'exceljs';
 import { createHash } from 'node:crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
-import { findCurrentCourseVisibleIndex } from '@/lib/sync/currentCourseSheet';
+import { findCurrentCourseVisibleIndex, isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 
 type AttendanceFromColor = 'Present' | 'Absent' | null;
@@ -658,6 +658,7 @@ async function syncOneCourseSheet(
 
     const rawDate = colIndices.datum !== -1 ? row[colIndices.datum] : '';
     const parsedDate = parseSheetDate(rawDate != null ? String(rawDate) : null);
+    if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, new Date())) continue;
 
     const startTime = normalizeTimeForDb(colIndices.von !== -1 ? row[colIndices.von] : null);
     const endTime = normalizeTimeForDb(colIndices.bis !== -1 ? row[colIndices.bis] : null);
