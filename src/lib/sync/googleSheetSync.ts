@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs';
 import { createHash } from 'node:crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { findCurrentCourseVisibleIndex } from '@/lib/sync/currentCourseSheet';
+import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 
 type AttendanceFromColor = 'Present' | 'Absent' | null;
 type SheetRow = string[];
@@ -251,16 +252,6 @@ function parseTeacherNames(raw: string | undefined | null): string[] {
     .split(/[/,;\n]+|\s+und\s+/i)
     .map((t) => t.trim())
     .filter(Boolean);
-}
-
-/** Normalize human names for case/diacritic-insensitive matching. */
-function normalizePersonNameKey(raw: string | undefined | null): string {
-  return String(raw ?? '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ');
 }
 
 function normalizeTimeForDb(value: string | undefined | null): string | null {

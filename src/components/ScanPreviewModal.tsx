@@ -9,6 +9,7 @@ import type {
   SkippedRowsBySheet,
 } from '@/lib/sync/googleSheetSync';
 import { findLastTaughtSessionRowIndex, parseSheetDatum } from '@/lib/sync/currentCourseSheet';
+import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
 
@@ -332,10 +333,20 @@ export default function ScanPreviewModal({
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
   const busy = isImporting || isResyncing;
 
+  const detectedNewTeachers = useMemo(() => {
+    const raw = scanResult?.detectedNewTeachers ?? [];
+    const byKey = new Map<string, string>();
+    for (const name of raw) {
+      const key = normalizePersonNameKey(name);
+      if (!key || byKey.has(key)) continue;
+      byKey.set(key, name);
+    }
+    return [...byKey.values()].sort((a, b) => a.localeCompare(b));
+  }, [scanResult?.detectedNewTeachers]);
+
   if (!isOpen || !scanResult || !mounted) return null;
 
   const sheets = scanResult.sheets;
-  const detectedNewTeachers = scanResult.detectedNewTeachers ?? [];
   const activeSheet = sheets[activeTab];
   const activeIsFutureCourse =
     activeSheet != null &&
@@ -467,7 +478,7 @@ export default function ScanPreviewModal({
               <ul className="mt-2 flex flex-wrap gap-2" aria-label="Detected new teachers">
                 {detectedNewTeachers.map((teacherName) => (
                   <li
-                    key={teacherName}
+                    key={normalizePersonNameKey(teacherName)}
                     className="rounded-full border border-emerald-300/80 bg-white px-2.5 py-1 text-xs font-medium text-emerald-950"
                   >
                     {teacherName}
