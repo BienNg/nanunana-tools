@@ -1,5 +1,6 @@
 import { google, sheets_v4 } from 'googleapis';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import { findCurrentCourseVisibleIndex } from '@/lib/sync/currentCourseSheet';
 
 type AttendanceFromColor = 'Present' | 'Absent' | null;
 
@@ -455,6 +456,8 @@ export type ScannedSampleRow = {
 
 export type ScannedSheet = {
   title: string;
+  /** 0-based index among visible workbook tabs (API order), for current-course import cutoff. */
+  visibleOrderIndex: number;
   headers: {
     folien?: string;
     datum?: string;
@@ -466,8 +469,140 @@ export type ScannedSheet = {
   sampleRows: ScannedSampleRow[];
 };
 
+/**
+ * Parse grid into preview rows + optional full scanned sheet (null when the tab is not a course layout).
+ * Used by scan and sync so current-course detection matches import.
+ */
+function processVisibleSheetGrid(
+  title: string,
+  rows: SheetRow[] | undefined | null,
+  colorAttendance: AttendanceFromColor[][] | undefined | null
+): { sampleRows: ScannedSampleRow[]; scanned: Omit<ScannedSheet, 'visibleOrderIndex'> | null } {
+  const empty: { sampleRows: ScannedSampleRow[]; scanned: null } = { sampleRows: [], scanned: null };
+  if (!rows || rows.length < 4) return empty;
+
+  const headerRowIndex = findHeaderRowIndex(rows);
+  if (headerRowIndex === -1) return empty;
+
+  const headers = rows[headerRowIndex];
+  if (!headers) return empty;
+
+  const colIndices = {
+    folien: headers.findIndex((h) => h && String(h).includes('Folien') && !String(h).includes('gecheckt')),
+    inhalt: headers.findIndex((h) => h && String(h).includes('Inhalt')),
+    datum: headers.findIndex((h) => h && String(h).includes('Datum')),
+    von: headers.findIndex((h) => h && String(h).includes('von')),
+    bis: headers.findIndex((h) => h && String(h).includes('bis')),
+  };
+  const lehrerCols = lehrerColumnIndices(headers);
+  if (colIndices.folien === -1 && colIndices.inhalt === -1) return empty;
+
+  const reservedColIndices: number[] = [
+    colIndices.folien,
+    colIndices.inhalt,
+    colIndices.datum,
+    colIndices.von,
+    colIndices.bis,
+    ...lehrerCols,
+  ];
+  const lehrerHeaderIdx = headers.findIndex((h) => h && String(h).includes('Lehrer'));
+  if (lehrerHeaderIdx >= 0) reservedColIndices.push(lehrerHeaderIdx);
+  const maxReserved = Math.max(-1, ...reservedColIndices.filter((i) => i >= 0));
+  const studentStartIndex = maxReserved + 1;
+
+  const studentNames: { index: number; name: string }[] = [];
+  for (let i = studentStartIndex; i < headers.length; i++) {
+    const cell = headers[i];
+    const trimmed = cell ? String(cell).trim() : '';
+    if (!trimmed) continue;
+    if (isNonStudentColumnHeader(trimmed)) continue;
+    studentNames.push({ index: i, name: trimmed });
+  }
+
+  const uniqueStudentCols = dedupeSheetStudentColumns(studentNames);
+
+  const scannedStudents: ScannedStudent[] = uniqueStudentCols.map((col) => ({
+    name: col.name,
+    letters: col.indices.map(columnIndexToA1Letter),
+  }));
+
+  const color = colorAttendance ?? [];
+  const sampleRows: ScannedSampleRow[] = [];
+  for (let i = headerRowIndex + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+
+    const folienRaw = colIndices.folien !== -1 ? row[colIndices.folien] : '';
+    const inhaltRaw = colIndices.inhalt !== -1 ? row[colIndices.inhalt] : '';
+    const folien = folienRaw != null ? String(folienRaw).trim() : '';
+    const inhalt = inhaltRaw != null ? String(inhaltRaw).trim() : '';
+    if (!folien && !inhalt) continue;
+
+    const rowValues: Record<string, string> = {};
+    if (colIndices.folien !== -1) rowValues['Folien'] = String(row[colIndices.folien] || '');
+    if (colIndices.datum !== -1) rowValues['Datum'] = String(row[colIndices.datum] || '');
+    if (colIndices.von !== -1) rowValues['von'] = String(row[colIndices.von] || '');
+    if (colIndices.bis !== -1) rowValues['bis'] = String(row[colIndices.bis] || '');
+
+    const lehrerParts: string[] = [];
+    const teacherColIndices =
+      lehrerCols.length > 0 ? lehrerCols : [lehrerHeaderIdx].filter((idx) => idx >= 0);
+    for (const idx of teacherColIndices) {
+      lehrerParts.push(...parseTeacherNames(row[idx]));
+    }
+    if (teacherColIndices.length > 0) {
+      rowValues['Lehrer'] = lehrerParts.join(', ');
+    }
+
+    const studentAttendance: Record<string, 'Present' | 'Absent' | null> = {};
+    const attRow = color[i];
+    for (const col of uniqueStudentCols) {
+      let text = '';
+      for (const idx of col.indices) {
+        if (row[idx]) {
+          text = String(row[idx]).trim();
+          break;
+        }
+      }
+      rowValues[col.name] = text;
+      studentAttendance[col.name] = pickFirstAttendanceStatus(attRow, col.indices);
+    }
+
+    const rowHasAnyContent = Object.values(rowValues).some((v) => String(v).trim() !== '');
+    if (!rowHasAnyContent) continue;
+
+    sampleRows.push({ values: rowValues, studentAttendance });
+  }
+
+  const scanned: Omit<ScannedSheet, 'visibleOrderIndex'> = {
+    title,
+    headers: {
+      folien: colIndices.folien !== -1 ? columnIndexToA1Letter(colIndices.folien) : undefined,
+      datum: colIndices.datum !== -1 ? columnIndexToA1Letter(colIndices.datum) : undefined,
+      von: colIndices.von !== -1 ? columnIndexToA1Letter(colIndices.von) : undefined,
+      bis: colIndices.bis !== -1 ? columnIndexToA1Letter(colIndices.bis) : undefined,
+      lehrer:
+        lehrerCols.length > 0
+          ? lehrerCols.map(columnIndexToA1Letter)
+          : lehrerHeaderIdx >= 0
+            ? [columnIndexToA1Letter(lehrerHeaderIdx)]
+            : [],
+      students: scannedStudents,
+    },
+    sampleRows,
+  };
+
+  return { sampleRows, scanned };
+}
+
 export type ScanGoogleSheetResult =
-  | { success: true; workbookTitle: string; sheets: ScannedSheet[] }
+  | {
+      success: true;
+      workbookTitle: string;
+      sheets: ScannedSheet[];
+      /** Visible-tab index of the current course, or null if none qualifies. Sheets after this are not imported. */
+      currentCourseVisibleIndex: number | null;
+    }
   | { success: false; error: string };
 
 export async function scanGoogleSheet(
@@ -507,7 +642,9 @@ export async function scanGoogleSheet(
     ).length;
 
     let visibleIndex = 0;
+    let visibleSlotIndex = 0;
     const scannedSheets: ScannedSheet[] = [];
+    const visibleSlots: { sampleRows: ScannedSampleRow[] }[] = [];
 
     for (const s of sheetList) {
       const title = s.properties?.title;
@@ -532,113 +669,15 @@ export async function scanGoogleSheet(
       const rowData = sheetWithGrid?.data?.[0]?.rowData;
       const { rows, colorAttendance } = sheetGridToRowsAndColorAttendance(rowData);
 
-      if (!rows || rows.length < 4) continue;
-
-      const headerRowIndex = findHeaderRowIndex(rows);
-      if (headerRowIndex === -1) continue;
-
-      const headers = rows[headerRowIndex];
-      if (!headers) continue;
-
-      const colIndices = {
-        folien: headers.findIndex((h) => h && String(h).includes('Folien') && !String(h).includes('gecheckt')),
-        inhalt: headers.findIndex((h) => h && String(h).includes('Inhalt')),
-        datum: headers.findIndex((h) => h && String(h).includes('Datum')),
-        von: headers.findIndex((h) => h && String(h).includes('von')),
-        bis: headers.findIndex((h) => h && String(h).includes('bis')),
-      };
-      const lehrerCols = lehrerColumnIndices(headers);
-      if (colIndices.folien === -1 && colIndices.inhalt === -1) continue;
-
-      const reservedColIndices: number[] = [
-        colIndices.folien,
-        colIndices.inhalt,
-        colIndices.datum,
-        colIndices.von,
-        colIndices.bis,
-        ...lehrerCols,
-      ];
-      const lehrerHeaderIdx = headers.findIndex((h) => h && String(h).includes('Lehrer'));
-      if (lehrerHeaderIdx >= 0) reservedColIndices.push(lehrerHeaderIdx);
-      const maxReserved = Math.max(-1, ...reservedColIndices.filter((i) => i >= 0));
-      const studentStartIndex = maxReserved + 1;
-      
-      const studentNames: { index: number; name: string }[] = [];
-      for (let i = studentStartIndex; i < headers.length; i++) {
-        const cell = headers[i];
-        const trimmed = cell ? String(cell).trim() : '';
-        if (!trimmed) continue;
-        if (isNonStudentColumnHeader(trimmed)) continue;
-        studentNames.push({ index: i, name: trimmed });
+      const { sampleRows, scanned } = processVisibleSheetGrid(title, rows, colorAttendance);
+      visibleSlots.push({ sampleRows });
+      if (scanned) {
+        scannedSheets.push({ ...scanned, visibleOrderIndex: visibleSlotIndex });
       }
-
-      const uniqueStudentCols = dedupeSheetStudentColumns(studentNames);
-
-      const scannedStudents: ScannedStudent[] = uniqueStudentCols.map(col => ({
-        name: col.name,
-        letters: col.indices.map(columnIndexToA1Letter)
-      }));
-
-      // All lesson rows after header (same inclusion rule as import: Folien or Inhalt)
-      const sampleRows: ScannedSampleRow[] = [];
-      for (let i = headerRowIndex + 1; i < rows.length; i++) {
-        const row = rows[i];
-        if (!row) continue;
-
-        const folienRaw = colIndices.folien !== -1 ? row[colIndices.folien] : '';
-        const inhaltRaw = colIndices.inhalt !== -1 ? row[colIndices.inhalt] : '';
-        const folien = folienRaw != null ? String(folienRaw).trim() : '';
-        const inhalt = inhaltRaw != null ? String(inhaltRaw).trim() : '';
-        if (!folien && !inhalt) continue;
-
-        const rowValues: Record<string, string> = {};
-        if (colIndices.folien !== -1) rowValues['Folien'] = String(row[colIndices.folien] || '');
-        if (colIndices.datum !== -1) rowValues['Datum'] = String(row[colIndices.datum] || '');
-        if (colIndices.von !== -1) rowValues['von'] = String(row[colIndices.von] || '');
-        if (colIndices.bis !== -1) rowValues['bis'] = String(row[colIndices.bis] || '');
-
-        const lehrerParts: string[] = [];
-        const teacherColIndices = lehrerCols.length > 0 ? lehrerCols : [lehrerHeaderIdx].filter((idx) => idx >= 0);
-        for (const idx of teacherColIndices) {
-          lehrerParts.push(...parseTeacherNames(row[idx]));
-        }
-        if (teacherColIndices.length > 0) {
-          rowValues['Lehrer'] = lehrerParts.join(', ');
-        }
-
-        const studentAttendance: Record<string, 'Present' | 'Absent' | null> = {};
-        const attRow = colorAttendance[i];
-        for (const col of uniqueStudentCols) {
-          let text = '';
-          for (const idx of col.indices) {
-            if (row[idx]) {
-              text = String(row[idx]).trim();
-              break;
-            }
-          }
-          rowValues[col.name] = text;
-          studentAttendance[col.name] = pickFirstAttendanceStatus(attRow, col.indices);
-        }
-
-        const rowHasAnyContent = Object.values(rowValues).some((v) => String(v).trim() !== '');
-        if (!rowHasAnyContent) continue;
-
-        sampleRows.push({ values: rowValues, studentAttendance });
-      }
-
-      scannedSheets.push({
-        title,
-        headers: {
-          folien: colIndices.folien !== -1 ? columnIndexToA1Letter(colIndices.folien) : undefined,
-          datum: colIndices.datum !== -1 ? columnIndexToA1Letter(colIndices.datum) : undefined,
-          von: colIndices.von !== -1 ? columnIndexToA1Letter(colIndices.von) : undefined,
-          bis: colIndices.bis !== -1 ? columnIndexToA1Letter(colIndices.bis) : undefined,
-          lehrer: lehrerCols.length > 0 ? lehrerCols.map(columnIndexToA1Letter) : (lehrerHeaderIdx >= 0 ? [columnIndexToA1Letter(lehrerHeaderIdx)] : []),
-          students: scannedStudents,
-        },
-        sampleRows
-      });
+      visibleSlotIndex++;
     }
+
+    const currentCourseVisibleIndex = findCurrentCourseVisibleIndex(visibleSlots, new Date());
 
     await onProgress?.({ type: 'status', message: 'Scan complete' });
 
@@ -646,6 +685,7 @@ export async function scanGoogleSheet(
       success: true,
       workbookTitle,
       sheets: scannedSheets,
+      currentCourseVisibleIndex,
     };
   } catch (error: unknown) {
     console.error('Scan error:', error);
@@ -737,7 +777,16 @@ export async function runGoogleSheetSync(
 
     let synced = 0;
     let skipped = 0;
+    let skippedAfterCurrentCourse = 0;
     let visibleIndex = 0;
+    let visibleSlotIndex = 0;
+    const visibleSlots: { sampleRows: ScannedSampleRow[] }[] = [];
+    const queued: {
+      slotIndex: number;
+      title: string;
+      rows: SheetRow[];
+      colorAttendance: AttendanceFromColor[][];
+    }[] = [];
 
     for (const s of sheetList) {
       const title = s.properties?.title;
@@ -764,20 +813,43 @@ export async function runGoogleSheetSync(
       const sheetWithGrid = gridResponse.data.sheets?.find((sh) => sh.properties?.title === title);
       const rowData = sheetWithGrid?.data?.[0]?.rowData;
       const { rows, colorAttendance } = sheetGridToRowsAndColorAttendance(rowData);
+      const { sampleRows } = processVisibleSheetGrid(title, rows, colorAttendance);
+      visibleSlots.push({ sampleRows });
+      queued.push({
+        slotIndex: visibleSlotIndex,
+        title,
+        rows: rows ?? [],
+        colorAttendance: colorAttendance ?? [],
+      });
+      visibleSlotIndex++;
+    }
+
+    const currentCourseVisibleIndex = findCurrentCourseVisibleIndex(visibleSlots, new Date());
+
+    for (const item of queued) {
+      if (currentCourseVisibleIndex !== null && item.slotIndex > currentCourseVisibleIndex) {
+        skipped++;
+        skippedAfterCurrentCourse++;
+        continue;
+      }
       const result = await syncOneCourseSheet(
         supabase,
         group.id,
-        title,
-        rows,
+        item.title,
+        item.rows,
         teacherCache,
-        colorAttendance,
+        item.colorAttendance,
         studentCache
       );
       if (result.ok) synced++;
       else skipped++;
     }
 
-    const message = `Sync completed: group "${workbookTitle}", ${synced} course sheet(s) imported, ${skipped} skipped (empty or non-course tabs).`;
+    const skipHint =
+      skippedAfterCurrentCourse > 0
+        ? ` (${skippedAfterCurrentCourse} after the current course, not imported; other skips are empty/non-course layouts or hidden tabs)`
+        : ' (empty or non-course layouts, or hidden tabs)';
+    const message = `Sync completed: group "${workbookTitle}", ${synced} course sheet(s) imported, ${skipped} skipped${skipHint}.`;
     await onProgress?.({ type: 'status', message: 'Finishing…' });
 
     return {

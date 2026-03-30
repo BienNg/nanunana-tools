@@ -7,6 +7,7 @@ import type {
   ScannedSampleRow,
   ScannedSheet,
 } from '@/lib/sync/googleSheetSync';
+import { parseSheetDatum } from '@/lib/sync/currentCourseSheet';
 
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
 
@@ -14,61 +15,6 @@ const CELL_WARN_CLASS = 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90';
 
 function isEmptyCellValue(v: unknown): boolean {
   return String(v ?? '').trim().length === 0;
-}
-
-function normalizeTwoDigitYear(y: number): number {
-  if (y >= 100) return y;
-  return y >= 70 ? 1900 + y : 2000 + y;
-}
-
-/** Local calendar day; returns noon timestamp for stable ordering, or null if invalid. */
-function localDayTimestamp(y: number, month0: number, day: number): number | null {
-  const dt = new Date(y, month0, day);
-  if (dt.getFullYear() !== y || dt.getMonth() !== month0 || dt.getDate() !== day) return null;
-  return new Date(y, month0, day, 12, 0, 0, 0).getTime();
-}
-
-/**
- * Parse sheet "Datum" cells (German dd.MM.yyyy common; also ISO / slash DMY).
- * Returns a comparable local-day timestamp, or null if empty or not parseable.
- */
-function parseSheetDatum(raw: string): number | null {
-  const s = String(raw).trim();
-  if (!s) return null;
-
-  const head = (s.split(/\s|T/, 1)[0] ?? '').trim();
-
-  const de = /^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/.exec(head);
-  if (de) {
-    const d = parseInt(de[1], 10);
-    const m = parseInt(de[2], 10);
-    const y = normalizeTwoDigitYear(parseInt(de[3], 10));
-    return localDayTimestamp(y, m - 1, d);
-  }
-
-  const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(head);
-  if (slash) {
-    const d = parseInt(slash[1], 10);
-    const m = parseInt(slash[2], 10);
-    const y = normalizeTwoDigitYear(parseInt(slash[3], 10));
-    return localDayTimestamp(y, m - 1, d);
-  }
-
-  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(head);
-  if (iso) {
-    const y = parseInt(iso[1], 10);
-    const m = parseInt(iso[2], 10);
-    const d = parseInt(iso[3], 10);
-    return localDayTimestamp(y, m - 1, d);
-  }
-
-  const parsed = Date.parse(s);
-  if (!Number.isNaN(parsed)) {
-    const dt = new Date(parsed);
-    return localDayTimestamp(dt.getFullYear(), dt.getMonth(), dt.getDate());
-  }
-
-  return null;
 }
 
 /**
@@ -148,45 +94,6 @@ function validationIssuesTooltip(count: number): string {
   return `${count} validation ${count === 1 ? 'issue' : 'issues'} on this sheet (empty core cells, session date not strictly between neighbors (must be after previous and before next day), or student attendance missing after their first recorded session)`;
 }
 
-/**
- * "Current course" for preview: among sheets whose first session date is on or before today,
- * the one whose latest row with both date and teacher filled has the greatest session date.
- * Ties use the earlier tab order. Returns null if no sheet qualifies.
- */
-function findCurrentCourseSheetIndex(sheets: ScannedSheet[], now: Date): number | null {
-  const todayTs = localDayTimestamp(now.getFullYear(), now.getMonth(), now.getDate());
-  if (todayTs === null) return null;
-
-  let bestIdx: number | null = null;
-  let bestLatestTs = -Infinity;
-
-  sheets.forEach((sheet, idx) => {
-    const rows = sheet.sampleRows;
-    if (rows.length === 0) return;
-
-    const firstTs = parseSheetDatum(rows[0].values['Datum'] ?? '');
-    if (firstTs === null || firstTs > todayTs) return;
-
-    let latestTs: number | null = null;
-    for (const row of rows) {
-      const dt = parseSheetDatum(row.values['Datum'] ?? '');
-      if (dt === null || isEmptyCellValue(row.values['Lehrer'])) continue;
-      if (latestTs === null || dt > latestTs) latestTs = dt;
-    }
-    if (latestTs === null) return;
-
-    if (latestTs > bestLatestTs || (latestTs === bestLatestTs && bestIdx !== null && idx < bestIdx)) {
-      bestLatestTs = latestTs;
-      bestIdx = idx;
-    }
-  });
-
-  return bestIdx;
-}
-
-const CURRENT_COURSE_TAB_TITLE =
-  'Current course: latest session with date and teacher filled, and first session date is not in the future';
-
 function studentAttendanceCellClass(
   text: string,
   colorStatus: 'Present' | 'Absent' | null | undefined
@@ -236,27 +143,42 @@ export default function ScanPreviewModal({
   }, []);
 
   useEffect(() => {
-    if (isOpen) setActiveTab(0);
+    if (!isOpen || !scanResult) return;
+    const cutoff = scanResult.currentCourseVisibleIndex;
+    const list = scanResult.sheets;
+    const firstImportable = list.findIndex(
+      (s) => cutoff === null || s.visibleOrderIndex <= cutoff
+    );
+    setActiveTab(firstImportable >= 0 ? firstImportable : 0);
   }, [isOpen, scanResult]);
 
   const sheetIssueCounts = useMemo(() => {
     if (!isOpen || !scanResult || !mounted) return [];
-    return scanResult.sheets.map((s) => countSheetValidationIssues(s));
+    const cutoff = scanResult.currentCourseVisibleIndex;
+    return scanResult.sheets.map((s) => {
+      if (cutoff !== null && s.visibleOrderIndex > cutoff) return 0;
+      return countSheetValidationIssues(s);
+    });
   }, [isOpen, scanResult, mounted]);
 
-  const currentCourseSheetIndex = useMemo(() => {
-    if (!isOpen || !scanResult || !mounted) return null;
-    return findCurrentCourseSheetIndex(scanResult.sheets, new Date());
-  }, [isOpen, scanResult, mounted]);
+  const currentCourseVisibleIndex = scanResult?.currentCourseVisibleIndex ?? null;
+
+  const hasImportBlockingSheetIssues = useMemo(() => {
+    if (!isOpen || !scanResult || !mounted) return false;
+    return sheetIssueCounts.some((c) => c > 0);
+  }, [isOpen, scanResult, mounted, sheetIssueCounts]);
 
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
-  const hasAnySheetIssues = sheetIssueCounts.some((c) => c > 0);
   const busy = isImporting || isResyncing;
 
   if (!isOpen || !scanResult || !mounted) return null;
 
   const sheets = scanResult.sheets;
   const activeSheet = sheets[activeTab];
+  const activeIsFutureCourse =
+    activeSheet != null &&
+    currentCourseVisibleIndex !== null &&
+    activeSheet.visibleOrderIndex > currentCourseVisibleIndex;
 
   return createPortal(
     <div
@@ -303,39 +225,36 @@ export default function ScanPreviewModal({
         >
           {sheets.map((sheet, idx) => {
             const tabIssues = sheetIssueCounts[idx] ?? 0;
-            const isCurrentCourse = currentCourseSheetIndex === idx;
+            const isCurrentCourse = sheet.visibleOrderIndex === currentCourseVisibleIndex;
+            const isFutureCourseTab =
+              currentCourseVisibleIndex !== null && sheet.visibleOrderIndex > currentCourseVisibleIndex;
             const tabLabelBase =
               tabIssues > 0
                 ? `${sheet.title}, ${tabIssues} validation ${tabIssues === 1 ? 'issue' : 'issues'}`
                 : sheet.title;
-            const tabLabel = isCurrentCourse ? `${tabLabelBase}, current course` : tabLabelBase;
+            let tabLabel = tabLabelBase;
+            if (isCurrentCourse) tabLabel = `${tabLabelBase}, current course`;
+            else if (isFutureCourseTab) tabLabel = `${sheet.title}, not included in this import`;
             return (
               <button
                 key={idx}
                 type="button"
                 role="tab"
-                aria-selected={activeTab === idx}
-                disabled={isResyncing}
+                aria-selected={activeTab === idx && !isFutureCourseTab}
+                disabled={isResyncing || isFutureCourseTab}
                 onClick={() => setActiveTab(idx)}
                 aria-label={tabLabel}
-                className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60 ${
-                  activeTab === idx
-                    ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
-                    : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-100/80 hover:text-gray-900'
-                }`}
+                className={
+                  isFutureCourseTab
+                    ? 'shrink-0 rounded-t-lg border border-b-0 border-transparent bg-gray-100/80 px-5 py-3 text-sm font-semibold whitespace-nowrap text-gray-400 cursor-not-allowed inline-flex items-center gap-2'
+                    : `shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+                        activeTab === idx
+                          ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
+                          : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-100/80 hover:text-gray-900'
+                      }`
+                }
               >
                 <span className="truncate max-w-[min(40vw,20rem)]">{sheet.title}</span>
-                {isCurrentCourse ? (
-                  <span
-                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-emerald-900 ring-1 ring-emerald-400/70"
-                    title={CURRENT_COURSE_TAB_TITLE}
-                  >
-                    <span className="material-symbols-outlined text-[1rem] leading-none" aria-hidden>
-                      flag
-                    </span>
-                    <span>Current</span>
-                  </span>
-                ) : null}
                 {tabIssues > 0 && (
                   <span
                     className="inline-flex shrink-0 items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-1 text-sm font-medium text-yellow-950 ring-1 ring-yellow-300/80"
@@ -374,7 +293,15 @@ export default function ScanPreviewModal({
               {resyncError}
             </div>
           ) : null}
-          {activeSheet ? (
+          {activeSheet && activeIsFutureCourse ? (
+            <div
+              className="rounded-md border border-gray-200 bg-gray-50 px-6 py-10 text-center text-sm text-gray-500"
+              role="status"
+            >
+              This course comes after the current course in the workbook. It is not validated here and is not
+              included in import.
+            </div>
+          ) : activeSheet ? (
             <div className="border border-gray-200 rounded-md overflow-x-auto">
               <table className="w-full text-left text-sm text-gray-700">
                 <thead className="bg-gray-100 text-gray-600 font-semibold border-b border-gray-200">
@@ -516,10 +443,10 @@ export default function ScanPreviewModal({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={busy || hasAnySheetIssues}
+            disabled={busy || hasImportBlockingSheetIssues}
             title={
-              hasAnySheetIssues && !busy
-                ? 'Resolve validation issues on every sheet before importing (see yellow indicators on tabs and in the table)'
+              hasImportBlockingSheetIssues && !busy
+                ? 'Resolve validation issues on every sheet through the current course before importing.'
                 : undefined
             }
             className="px-6 py-2 text-sm font-medium text-white bg-[#ff7a59] rounded hover:bg-[#ff8f73] focus:ring-2 focus:ring-offset-2 focus:ring-[#ff7a59] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
