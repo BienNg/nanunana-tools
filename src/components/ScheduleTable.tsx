@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 
 type AttendanceRecord = {
@@ -29,6 +29,18 @@ type Student = {
   id: string;
   name: string;
 };
+
+function lessonCourseLabel(lesson: Lesson): string {
+  return [lesson.courses?.groups?.name, lesson.courses?.name].filter(Boolean).join(' · ');
+}
+
+function compareLessonsByCourseColumn(a: Lesson, b: Lesson): number {
+  const labelCmp = lessonCourseLabel(a).localeCompare(lessonCourseLabel(b), undefined, { sensitivity: 'base' });
+  if (labelCmp !== 0) return labelCmp;
+  const slideCmp = a.slide_id.localeCompare(b.slide_id, undefined, { numeric: true, sensitivity: 'base' });
+  if (slideCmp !== 0) return slideCmp;
+  return a.content.localeCompare(b.content, undefined, { sensitivity: 'base' });
+}
 
 export default function ScheduleTable({ courseId }: { courseId?: string } = {}) {
   const [lessons, setLessons] = useState<Lesson[]>([]);
@@ -109,6 +121,8 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
   const getAttendance = (lesson: Lesson, studentId: string): AttendanceRecord | undefined =>
     lesson.attendance_records?.find((r) => r.student_id === studentId);
 
+  const sortedLessons = useMemo(() => [...lessons].sort(compareLessonsByCourseColumn), [lessons]);
+
   const totalCols = 3 + students.length;
 
   return (
@@ -137,15 +151,17 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/10">
-            {lessons.map((lesson) => (
-              <tr key={lesson.id} className="hover:bg-surface-container-low transition-colors group">
+            {sortedLessons.map((lesson) => {
+              const courseLabel = lessonCourseLabel(lesson);
+              return (
+                <tr key={lesson.id} className="hover:bg-surface-container-low transition-colors group">
                 <td className="px-6 py-6 sticky left-0 bg-surface-container-lowest group-hover:bg-surface-container-low transition-colors z-10">
                   <div className="flex items-center gap-3">
                     <div className="w-2 h-8 rounded-full group-hover:h-10 transition-all bg-secondary-container shrink-0"></div>
                     <div>
-                      {(lesson.courses?.groups?.name || lesson.courses?.name) && (
+                      {courseLabel && (
                         <span className="text-[10px] font-bold uppercase tracking-wider text-primary block mb-0.5">
-                          {[lesson.courses?.groups?.name, lesson.courses?.name].filter(Boolean).join(' · ')}
+                          {courseLabel}
                         </span>
                       )}
                       <span className="font-bold text-sm block">{lesson.slide_id}</span>
@@ -204,8 +220,9 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
                     </td>
                   );
                 })}
-              </tr>
-            ))}
+                </tr>
+              );
+            })}
             {lessons.length === 0 && (
               <tr>
                 <td colSpan={totalCols} className="px-6 py-12 text-center text-on-surface-variant">
