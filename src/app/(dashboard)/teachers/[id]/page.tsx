@@ -24,6 +24,33 @@ function extractClassType(value: unknown): string | null {
   return null;
 }
 
+/** Split one or more teacher names from a cell (comma, slash, semicolon, newline, German "und"). Matches sheet import in `googleSheetSync`. */
+function parseTeacherNames(raw: string | undefined | null): string[] {
+  if (raw == null || raw === '') return [];
+  const s = String(raw).trim();
+  if (!s) return [];
+  return s
+    .split(/[/,;\n]+|\s+und\s+/i)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+/** Normalize human names for case/diacritic-insensitive matching. */
+function normalizePersonNameKey(raw: string | undefined | null): string {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function lessonIncludesTeacher(lessonTeacher: unknown, selectedTeacherKey: string): boolean {
+  if (!selectedTeacherKey) return false;
+  const names = parseTeacherNames(typeof lessonTeacher === 'string' ? lessonTeacher : undefined);
+  return names.some((n) => normalizePersonNameKey(n) === selectedTeacherKey);
+}
+
 export default async function TeacherDetailsPage({ 
   params,
   searchParams
@@ -72,19 +99,9 @@ export default async function TeacherDetailsPage({
   const courses = courseTeachers?.map((ct: any) => ct.courses).filter(Boolean).sort((a: any, b: any) => a.name.localeCompare(b.name)) || [];
   const courseIds = courses.map((c: any) => c.id);
 
-  // 3. Fetch unique students count
-  let totalStudents = 0;
-  if (courseIds.length > 0) {
-    const { data: courseStudents } = await supabase
-      .from('course_students')
-      .select('student_id')
-      .in('course_id', courseIds);
-      
-    const uniqueStudentIds = new Set(courseStudents?.map(cs => cs.student_id));
-    totalStudents = uniqueStudentIds.size;
-  }
+  const selectedTeacherKey = normalizePersonNameKey(teacher.name);
 
-  // 4. Fetch lessons with attendance records
+  // 3. Fetch lessons with attendance records
   let allLessons: any[] = [];
   // Current month built from UTC components — avoids all timezone/locale bugs
   const _now = new Date();
@@ -104,6 +121,7 @@ export default async function TeacherDetailsPage({
         end_time,
         content,
         slide_id,
+        teacher,
         attendance_records (
           status
         ),
@@ -116,7 +134,9 @@ export default async function TeacherDetailsPage({
       `)
       .in('course_id', courseIds);
       
-    allLessons = lessonsData || [];
+    allLessons = (lessonsData || []).filter((lesson: { teacher?: unknown }) =>
+      lessonIncludesTeacher(lesson.teacher, selectedTeacherKey),
+    );
   }
 
   const availableYearMonths = (() => {
@@ -161,8 +181,21 @@ export default async function TeacherDetailsPage({
     );
   }
 
+  // Unique students in courses that have at least one lesson in the current scope (teacher-taught + period)
+  let totalStudents = 0;
+  const courseIdsInScope = [...new Set(allLessons.map((l: { course_id: string }) => l.course_id))];
+  if (courseIdsInScope.length > 0) {
+    const { data: courseStudents } = await supabase
+      .from('course_students')
+      .select('student_id')
+      .in('course_id', courseIdsInScope);
+
+    const uniqueStudentIds = new Set(courseStudents?.map((cs) => cs.student_id));
+    totalStudents = uniqueStudentIds.size;
+  }
+
   // Metrics Calculation
-  const coursesTaught = courses.length;
+  const coursesTaught = new Set(allLessons.map((l: { course_id: string }) => l.course_id)).size;
   const classTypeByCourseId = new Map<string, ReturnType<typeof normalizeGroupClassType>>();
   courses.forEach((course: any) => {
     const rawClassType = extractClassType(course?.groups);
