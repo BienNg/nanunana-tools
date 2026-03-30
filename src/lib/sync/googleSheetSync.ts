@@ -937,13 +937,41 @@ async function loadWorkbookFromXlsxBytes(
   return loadWorkbookFromXlsx(fileName, bytes, onProgress);
 }
 
-async function fetchXlsxBytesFromUrl(url: string): Promise<Uint8Array> {
+function fileNameFromContentDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]).trim() || null;
+    } catch {
+      return utf8Match[1].trim() || null;
+    }
+  }
+  const plainMatch = header.match(/filename="?([^";]+)"?/i);
+  if (plainMatch?.[1]) return plainMatch[1].trim() || null;
+  return null;
+}
+
+function fileNameFromUrl(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const last = u.pathname.split('/').filter(Boolean).pop() ?? '';
+    if (!last) return null;
+    return decodeURIComponent(last).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchXlsxBytesFromUrl(url: string): Promise<{ bytes: Uint8Array; fileName: string | null }> {
   const response = await fetch(url, { redirect: 'follow' });
   if (!response.ok) {
     throw new Error(`Failed to download .xlsx file: HTTP ${response.status}`);
   }
   const arrayBuffer = await response.arrayBuffer();
-  return new Uint8Array(arrayBuffer);
+  const fileName =
+    fileNameFromContentDisposition(response.headers.get('content-disposition')) ?? fileNameFromUrl(response.url);
+  return { bytes: new Uint8Array(arrayBuffer), fileName };
 }
 
 async function loadWorkbookFromSource(
@@ -963,8 +991,8 @@ async function loadWorkbookFromSource(
           message: 'Sheets API failed, trying XLSX export…',
         });
         const exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=xlsx`;
-        const bytes = await fetchXlsxBytesFromUrl(exportUrl);
-        return loadWorkbookFromXlsxBytes(`${spreadsheetId}.xlsx`, bytes, onProgress);
+        const downloaded = await fetchXlsxBytesFromUrl(exportUrl);
+        return loadWorkbookFromXlsxBytes(downloaded.fileName ?? `${spreadsheetId}.xlsx`, downloaded.bytes, onProgress);
       }
     }
 
@@ -972,14 +1000,14 @@ async function loadWorkbookFromSource(
     if (driveFileId) {
       await onProgress?.({ type: 'status', message: 'Downloading Drive .xlsx file…' });
       const directDownloadUrl = `https://drive.google.com/uc?export=download&id=${driveFileId}`;
-      const bytes = await fetchXlsxBytesFromUrl(directDownloadUrl);
-      return loadWorkbookFromXlsxBytes(`${driveFileId}.xlsx`, bytes, onProgress);
+      const downloaded = await fetchXlsxBytesFromUrl(directDownloadUrl);
+      return loadWorkbookFromXlsxBytes(downloaded.fileName ?? `${driveFileId}.xlsx`, downloaded.bytes, onProgress);
     }
 
     if (/\.xlsx(?:\?|#|$)/i.test(source)) {
       await onProgress?.({ type: 'status', message: 'Downloading .xlsx file…' });
-      const bytes = await fetchXlsxBytesFromUrl(source);
-      return loadWorkbookFromXlsxBytes('downloaded.xlsx', bytes, onProgress);
+      const downloaded = await fetchXlsxBytesFromUrl(source);
+      return loadWorkbookFromXlsxBytes(downloaded.fileName ?? 'downloaded.xlsx', downloaded.bytes, onProgress);
     }
 
     throw new Error('Unsupported URL: provide a Google Sheets URL or an accessible .xlsx URL');
