@@ -49,6 +49,18 @@ function isEmptyCellValue(v: unknown): boolean {
   return String(v ?? '').trim().length === 0;
 }
 
+function formatDatumForDisplay(raw: string): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  const ts = parseSheetDatum(s);
+  if (ts === null) return raw;
+  const dt = new Date(ts);
+  const day = String(dt.getDate()).padStart(2, '0');
+  const month = String(dt.getMonth() + 1).padStart(2, '0');
+  const year = String(dt.getFullYear());
+  return `${day}.${month}.${year}`;
+}
+
 /**
  * Session rows are in teaching order; each date must be strictly after the previous row’s date
  * and strictly before the next row’s date (no duplicate session dates vs neighbors).
@@ -597,7 +609,7 @@ export default function ScanPreviewModal({
                           }`}
                           {...hintHandlers(datumCellHoverTitle(rowIsSkipped, rowOutsideValidation, datumEmpty, datumChrono))}
                         >
-                          {row.values['Datum'] || ''}
+                          {formatDatumForDisplay(row.values['Datum'] || '')}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
