@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { lessonDurationMinutes, normalizeGroupClassType } from '@/lib/courseDuration';
 import TeacherMonthDropdown from './TeacherMonthDropdown';
+import TeacherSessionsSection from './TeacherSessionsSection';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 
 export const dynamic = 'force-dynamic';
@@ -45,6 +46,17 @@ function lessonIncludesTeacher(lessonTeacher: unknown, selectedTeacherKey: strin
 function hoursDisplayFromMinutes(minutes: number): string {
   const exactHours = minutes / 60;
   return (Math.trunc(exactHours * 100) / 100).toString();
+}
+
+function sortLessonsNewestFirst(lessons: any[]) {
+  return [...lessons].sort((a, b) => {
+    const dateA = a.date ? new Date(a.date).getTime() : 0;
+    const dateB = b.date ? new Date(b.date).getTime() : 0;
+    if (dateB !== dateA) return dateB - dateA;
+    const timeA = a.start_time || '';
+    const timeB = b.start_time || '';
+    return timeB.localeCompare(timeA);
+  });
 }
 
 export default async function TeacherDetailsPage({ 
@@ -309,17 +321,25 @@ export default async function TeacherDetailsPage({
   const periodGroupsSubtitle =
     filter === 'monthly' ? selectedMonthLabel : 'All time';
 
-  // Recent Sessions
-  const recentSessions = [...allLessons]
-    .sort((a, b) => {
-      const dateA = a.date ? new Date(a.date).getTime() : 0;
-      const dateB = b.date ? new Date(b.date).getTime() : 0;
-      if (dateB !== dateA) return dateB - dateA;
-      const timeA = a.start_time || '';
-      const timeB = b.start_time || '';
-      return timeB.localeCompare(timeA);
-    })
-    .slice(0, 10);
+  const sortedPeriodLessons = sortLessonsNewestFirst(allLessons);
+  const allSessionsSorted = sortedPeriodLessons;
+
+  const courseIdsInPeriod = [...new Set(allLessons.map((l: { course_id: string }) => l.course_id))].sort(
+    (a, b) => {
+      const courseA = courseMetaById.get(a) as any;
+      const courseB = courseMetaById.get(b) as any;
+      return (courseA?.name ?? '').localeCompare(courseB?.name ?? '');
+    },
+  );
+
+  const sessionCourseTabs = courseIdsInPeriod.map((courseId) => {
+    const course = courseMetaById.get(courseId) as any;
+    return {
+      courseId,
+      name: course?.name ?? 'Course',
+      sessions: sortedPeriodLessons.filter((lesson) => lesson.course_id === courseId),
+    };
+  });
 
   return (
     <main className="min-h-screen transition-[margin] duration-300 ease-out bg-surface-bright">
@@ -529,86 +549,7 @@ export default async function TeacherDetailsPage({
           </div>
         </div>
 
-        {/* Recent Sessions Section */}
-        <div className="bg-surface-container-lowest rounded-3xl p-8 border border-outline-variant/5">
-          <div className="flex justify-between items-center mb-8">
-            <div>
-              <h3 className="text-xl font-bold font-headline">Recent Sessions</h3>
-              <p className="text-sm text-on-surface-variant font-medium">Detailed log of the last {recentSessions.length} educational interventions.</p>
-            </div>
-          </div>
-          
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="text-on-surface-variant">
-                  <th className="pb-6 font-bold uppercase tracking-widest text-[10px]">Date & Time</th>
-                  <th className="pb-6 font-bold uppercase tracking-widest text-[10px]">Session Title</th>
-                  <th className="pb-6 font-bold uppercase tracking-widest text-[10px]">Students</th>
-                  <th className="pb-6 font-bold uppercase tracking-widest text-[10px]">Duration</th>
-                  <th className="pb-6 font-bold uppercase tracking-widest text-[10px]">Status</th>
-                  <th className="pb-6 text-right"></th>
-                </tr>
-              </thead>
-              <tbody className="text-sm font-medium">
-                {recentSessions.length > 0 ? recentSessions.map((session) => {
-                  const presentCount = (session.attendance_records || []).filter((r: any) => r.status === 'Present').length;
-                  const totalCount = (session.attendance_records || []).length;
-                  
-                  const isCompleted = session.date && new Date(session.date) < new Date();
-                  const statusBg = isCompleted ? 'bg-tertiary-container' : 'bg-surface-container-high';
-                  const statusText = isCompleted ? 'text-on-tertiary-container' : 'text-on-surface-variant';
-                  const statusLabel = isCompleted ? 'Completed' : 'Pending';
-
-                  const durationHrs = session.calculatedDurationMinutes ? (session.calculatedDurationMinutes / 60).toFixed(1) : '0';
-
-                  const dateStr = session.date 
-                    ? new Date(session.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-                    : 'No Date';
-
-                  return (
-                    <tr key={session.id} className="hover:bg-surface-container-low transition-colors group">
-                      <td className="py-5 pr-4">
-                        <div className="flex flex-col">
-                          <span>{dateStr}</span>
-                          <span className="text-xs text-on-surface-variant">
-                            {session.start_time ? session.start_time.substring(0,5) : '--:--'} - {session.end_time ? session.end_time.substring(0,5) : '--:--'}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="py-5 pr-4">
-                        <p className="font-bold text-on-surface mb-0.5">{session.courses?.name}</p>
-                        <p className="text-xs text-on-surface-variant max-w-xs truncate" title={session.content || 'No content specified'}>
-                          {session.content || 'No content specified'}
-                        </p>
-                      </td>
-                      <td className="py-5 pr-4">
-                        {totalCount > 0 ? `${presentCount} / ${totalCount}` : '-'}
-                      </td>
-                      <td className="py-5 pr-4">{durationHrs} hrs</td>
-                      <td className="py-5 pr-4">
-                        <span className={`${statusBg} ${statusText} px-3 py-1 rounded-full text-xs font-bold`}>
-                          {statusLabel}
-                        </span>
-                      </td>
-                      <td className="py-5 text-right">
-                        <Link href={`/courses/${session.course_id}`}>
-                          <span className="material-symbols-outlined text-outline hover:text-primary transition-colors cursor-pointer">arrow_forward_ios</span>
-                        </Link>
-                      </td>
-                    </tr>
-                  );
-                }) : (
-                  <tr>
-                    <td colSpan={6} className="py-12 text-center text-on-surface-variant">
-                      No recent sessions found.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <TeacherSessionsSection allSessions={allSessionsSorted} courseTabs={sessionCourseTabs} />
 
       </div>
     </main>

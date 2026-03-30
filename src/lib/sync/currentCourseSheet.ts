@@ -62,40 +62,31 @@ export type CurrentCourseSlot = {
   sampleRows: { values: Record<string, string> }[];
 };
 
+/** True if the tab has at least one lesson row with a parseable Datum on or before `todayTs`. */
+function slotHasAnyNonFutureDatum(slot: CurrentCourseSlot, todayTs: number): boolean {
+  for (const row of slot.sampleRows) {
+    const dt = parseSheetDatum(row.values['Datum'] ?? '');
+    if (dt !== null && dt <= todayTs) return true;
+  }
+  return false;
+}
+
 /**
- * Among visible tabs in workbook order: sheet whose first session date is on or before `now`,
- * and whose latest row with both date and teacher filled has the greatest session date.
- * Ties use the earlier tab. Returns null if no tab qualifies.
+ * Visible tabs are courses in workbook order. Start at index 0; while the **next** tab has any
+ * session with a parseable Datum on or before `now`, advance. The current course is that index,
+ * unless no tab has such a Datum (then null). Teacher column is not required for this check.
  */
 export function findCurrentCourseVisibleIndex(slots: CurrentCourseSlot[], now: Date): number | null {
   const todayTs = localDayTimestamp(now.getFullYear(), now.getMonth(), now.getDate());
-  if (todayTs === null) return null;
+  if (todayTs === null || slots.length === 0) return null;
 
-  let bestIdx: number | null = null;
-  let bestLatestTs = -Infinity;
+  let current = 0;
+  while (current + 1 < slots.length && slotHasAnyNonFutureDatum(slots[current + 1]!, todayTs)) {
+    current++;
+  }
 
-  slots.forEach((slot, idx) => {
-    const rows = slot.sampleRows;
-    if (rows.length === 0) return;
-
-    const firstTs = parseSheetDatum(rows[0].values['Datum'] ?? '');
-    if (firstTs === null || firstTs > todayTs) return;
-
-    let latestTs: number | null = null;
-    for (const row of rows) {
-      const dt = parseSheetDatum(row.values['Datum'] ?? '');
-      if (dt === null || isEmptyCellValue(row.values['Lehrer'])) continue;
-      if (latestTs === null || dt > latestTs) latestTs = dt;
-    }
-    if (latestTs === null) return;
-
-    if (latestTs > bestLatestTs || (latestTs === bestLatestTs && bestIdx !== null && idx < bestIdx)) {
-      bestLatestTs = latestTs;
-      bestIdx = idx;
-    }
-  });
-
-  return bestIdx;
+  if (!slotHasAnyNonFutureDatum(slots[current]!, todayTs)) return null;
+  return current;
 }
 
 /**
