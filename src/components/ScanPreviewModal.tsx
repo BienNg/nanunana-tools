@@ -68,7 +68,8 @@ function parseSheetDatum(raw: string): number | null {
 }
 
 /**
- * Session rows are in teaching order; each date should sit between the previous and next session dates.
+ * Session rows are in teaching order; each date must be strictly after the previous row’s date
+ * and strictly before the next row’s date (no duplicate session dates vs neighbors).
  * Unparseable dates are skipped (no chronology warning).
  */
 function isDatumChronologyOutlier(rows: ScannedSampleRow[], rowIndex: number): boolean {
@@ -85,22 +86,20 @@ function isDatumChronologyOutlier(rows: ScannedSampleRow[], rowIndex: number): b
 
   if (rowIndex === 0) {
     if (next === null) return false;
-    return cur > next;
+    return cur >= next;
   }
 
   if (rowIndex === n - 1) {
     if (prev === null) return false;
-    return cur < prev;
+    return cur <= prev;
   }
 
   if (prev !== null && next !== null) {
-    const lo = Math.min(prev, next);
-    const hi = Math.max(prev, next);
-    return cur < lo || cur > hi;
+    return cur <= prev || cur >= next;
   }
 
-  if (prev !== null && next === null) return cur < prev;
-  if (prev === null && next !== null) return cur > next;
+  if (prev !== null && next === null) return cur <= prev;
+  if (prev === null && next !== null) return cur >= next;
 
   return false;
 }
@@ -142,7 +141,7 @@ function countSheetValidationIssues(sheet: ScannedSheet): number {
 }
 
 function validationIssuesTooltip(count: number): string {
-  return `${count} validation ${count === 1 ? 'issue' : 'issues'} on this sheet (empty core cells, session date out of order vs neighbors, or student attendance missing after their first recorded session)`;
+  return `${count} validation ${count === 1 ? 'issue' : 'issues'} on this sheet (empty core cells, session date not strictly between neighbors (must be after previous and before next day), or student attendance missing after their first recorded session)`;
 }
 
 function studentAttendanceCellClass(
@@ -168,6 +167,11 @@ type ScanPreviewModalProps = {
   onClose: () => void;
   onConfirm: () => void;
   isImporting: boolean;
+  /** Re-run scan for the same spreadsheet URL (e.g. after fixing the sheet in Google). */
+  onResync?: () => void | Promise<void>;
+  isResyncing?: boolean;
+  resyncProgressMessage?: string;
+  resyncError?: string;
 };
 
 export default function ScanPreviewModal({
@@ -176,6 +180,10 @@ export default function ScanPreviewModal({
   onClose,
   onConfirm,
   isImporting,
+  onResync,
+  isResyncing = false,
+  resyncProgressMessage = '',
+  resyncError = '',
 }: ScanPreviewModalProps) {
   const [activeTab, setActiveTab] = useState(0);
   const [mounted, setMounted] = useState(false);
@@ -195,6 +203,7 @@ export default function ScanPreviewModal({
 
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
   const hasAnySheetIssues = sheetIssueCounts.some((c) => c > 0);
+  const busy = isImporting || isResyncing;
 
   if (!isOpen || !scanResult || !mounted) return null;
 
@@ -229,7 +238,7 @@ export default function ScanPreviewModal({
             <button
               type="button"
               onClick={onClose}
-              disabled={isImporting}
+              disabled={busy}
               className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
               aria-label="Close preview"
             >
@@ -252,13 +261,14 @@ export default function ScanPreviewModal({
                 type="button"
                 role="tab"
                 aria-selected={activeTab === idx}
+                disabled={isResyncing}
                 onClick={() => setActiveTab(idx)}
                 aria-label={
                   tabIssues > 0
                     ? `${sheet.title}, ${tabIssues} validation ${tabIssues === 1 ? 'issue' : 'issues'}`
                     : sheet.title
                 }
-                className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 ${
+                className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60 ${
                   activeTab === idx
                     ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
                     : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-100/80 hover:text-gray-900'
@@ -286,6 +296,23 @@ export default function ScanPreviewModal({
 
         {/* Body */}
         <div className="flex-1 overflow-auto p-6 bg-white">
+          {isResyncing ? (
+            <div
+              className="mb-4 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-950"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="material-symbols-outlined animate-spin text-lg shrink-0" aria-hidden>
+                sync
+              </span>
+              <span className="min-w-0">{resyncProgressMessage || 'Rescanning sheet…'}</span>
+            </div>
+          ) : null}
+          {resyncError ? (
+            <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-950" role="alert">
+              {resyncError}
+            </div>
+          ) : null}
           {activeSheet ? (
             <div className="border border-gray-200 rounded-md overflow-x-auto">
               <table className="w-full text-left text-sm text-gray-700">
@@ -334,7 +361,7 @@ export default function ScanPreviewModal({
                           }`}
                           title={
                             !datumEmpty && datumChrono
-                              ? 'Date is out of sequence compared to the previous and next session (likely a typo)'
+                              ? 'Date must be strictly after the previous session and strictly before the next (same calendar day as a neighbor is not allowed; likely a typo)'
                               : undefined
                           }
                         >
@@ -395,20 +422,42 @@ export default function ScanPreviewModal({
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end gap-3">
+        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex flex-wrap justify-end gap-3">
           <button
+            type="button"
             onClick={onClose}
-            disabled={isImporting}
-            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 transition-colors"
+            disabled={busy}
+            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             Cancel
           </button>
+          {onResync ? (
+            <button
+              type="button"
+              onClick={() => void onResync()}
+              disabled={busy}
+              title="Fetch the latest data from Google Sheets using the same URL"
+              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+            >
+              {isResyncing ? (
+                <>
+                  <span className="material-symbols-outlined animate-spin text-sm">sync</span>
+                  Resyncing…
+                </>
+              ) : (
+                <>
+                  <span className="material-symbols-outlined text-lg">refresh</span>
+                  Resync
+                </>
+              )}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onConfirm}
-            disabled={isImporting || hasAnySheetIssues}
+            disabled={busy || hasAnySheetIssues}
             title={
-              hasAnySheetIssues && !isImporting
+              hasAnySheetIssues && !busy
                 ? 'Resolve validation issues on every sheet before importing (see yellow indicators on tabs and in the table)'
                 : undefined
             }

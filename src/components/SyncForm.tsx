@@ -46,6 +46,72 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
   return null;
 }
 
+async function streamSheetScan(
+  url: string,
+  onProgress: (message: string) => void,
+  options?: { startMessage?: string }
+): Promise<ScanGoogleSheetResult | null> {
+  onProgress(options?.startMessage ?? 'Scanning starting…');
+  const res = await fetch('/api/sync-sheet/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+
+  if (!res.ok) {
+    let errText = res.statusText;
+    try {
+      const j = (await res.json()) as { error?: string };
+      if (j.error) errText = j.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(errText);
+  }
+
+  if (!res.body) {
+    throw new Error('No response from server');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalResult: ScanGoogleSheetResult | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    for (;;) {
+      const nl = buffer.indexOf('\n');
+      if (nl < 0) break;
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      const parsed = parseSyncNdjsonLine(line);
+      if (!parsed) continue;
+      if (parsed.kind === 'progress-status') onProgress(parsed.message);
+      if (parsed.kind === 'progress-sheet') {
+        onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+      }
+      if (parsed.kind === 'done') finalResult = parsed.result;
+    }
+  }
+  buffer += decoder.decode();
+  const tail = buffer.trim();
+  if (tail) {
+    const parsed = parseSyncNdjsonLine(tail);
+    if (parsed) {
+      if (parsed.kind === 'progress-status') onProgress(parsed.message);
+      if (parsed.kind === 'progress-sheet') {
+        onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+      }
+      if (parsed.kind === 'done') finalResult = parsed.result;
+    }
+  }
+
+  return finalResult;
+}
+
 export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => void }) {
   const [url, setUrl] = useState('');
   const [isScanning, setIsScanning] = useState(false);
@@ -55,75 +121,15 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
 
   const [scanResult, setScanResult] = useState<Extract<ScanGoogleSheetResult, { success: true }> | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [previewScanError, setPreviewScanError] = useState('');
 
   const handleScan = async () => {
     if (!url) return;
     setIsScanning(true);
     setError('');
-    setProgressMessage('Scanning starting…');
-    let finalResult: ScanGoogleSheetResult | null = null;
-
+    setPreviewScanError('');
     try {
-      const res = await fetch('/api/sync-sheet/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      });
-
-      if (!res.ok) {
-        let errText = res.statusText;
-        try {
-          const j = (await res.json()) as { error?: string };
-          if (j.error) errText = j.error;
-        } catch {
-          /* ignore */
-        }
-        setError(errText);
-        setIsScanning(false);
-        return;
-      }
-
-      if (!res.body) {
-        setError('No response from server');
-        setIsScanning(false);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        for (;;) {
-          const nl = buffer.indexOf('\n');
-          if (nl < 0) break;
-          const line = buffer.slice(0, nl).trim();
-          buffer = buffer.slice(nl + 1);
-          const parsed = parseSyncNdjsonLine(line);
-          if (!parsed) continue;
-          if (parsed.kind === 'progress-status') setProgressMessage(parsed.message);
-          if (parsed.kind === 'progress-sheet') {
-            setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
-          }
-          if (parsed.kind === 'done') finalResult = parsed.result;
-        }
-      }
-      buffer += decoder.decode();
-      const tail = buffer.trim();
-      if (tail) {
-        const parsed = parseSyncNdjsonLine(tail);
-        if (parsed) {
-          if (parsed.kind === 'progress-status') setProgressMessage(parsed.message);
-          if (parsed.kind === 'progress-sheet') {
-            setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
-          }
-          if (parsed.kind === 'done') finalResult = parsed.result;
-        }
-      }
-
+      const finalResult = await streamSheetScan(url, setProgressMessage);
       if (finalResult?.success) {
         setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
         setIsModalOpen(true);
@@ -134,6 +140,30 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to scan');
+    } finally {
+      setIsScanning(false);
+      setProgressMessage('');
+    }
+  };
+
+  const handleResync = async () => {
+    if (!url) return;
+    setIsScanning(true);
+    setPreviewScanError('');
+    setError('');
+    try {
+      const finalResult = await streamSheetScan(url, setProgressMessage, {
+        startMessage: 'Rescanning sheet…',
+      });
+      if (finalResult?.success) {
+        setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
+      } else if (finalResult) {
+        setPreviewScanError((finalResult as { success: false; error: string }).error || 'Failed to scan');
+      } else {
+        setPreviewScanError('Scan finished without a result');
+      }
+    } catch (err: unknown) {
+      setPreviewScanError(err instanceof Error ? err.message : 'Failed to scan');
     } finally {
       setIsScanning(false);
       setProgressMessage('');
@@ -283,9 +313,16 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       <ScanPreviewModal
         isOpen={isModalOpen}
         scanResult={scanResult}
-        onClose={() => setIsModalOpen(false)}
+        onClose={() => {
+          setPreviewScanError('');
+          setIsModalOpen(false);
+        }}
         onConfirm={handleImport}
         isImporting={isImporting}
+        onResync={handleResync}
+        isResyncing={isScanning}
+        resyncProgressMessage={progressMessage}
+        resyncError={previewScanError}
       />
     </>
   );
