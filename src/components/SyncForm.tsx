@@ -1,13 +1,15 @@
 'use client';
 
 import { useState } from 'react';
+import ScanPreviewModal from './ScanPreviewModal';
+import type { ScanGoogleSheetResult } from '@/lib/sync/googleSheetSync';
 
 type SyncResult = { success: true; message: string } | { success: false; error: string };
 
 type NdjsonLine =
   | { kind: 'progress-status'; message: string }
   | { kind: 'progress-sheet'; title: string; current: number; total: number }
-  | { kind: 'done'; result: SyncResult }
+  | { kind: 'done'; result: any }
   | null;
 
 function parseSyncNdjsonLine(line: string): NdjsonLine {
@@ -19,7 +21,7 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
     title?: string;
     current?: number;
     total?: number;
-    result?: SyncResult;
+    result?: any;
   };
   try {
     msg = JSON.parse(line) as typeof msg;
@@ -46,15 +48,103 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
 
 export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => void }) {
   const [url, setUrl] = useState('');
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState('');
   const [progressMessage, setProgressMessage] = useState('');
 
-  const handleSync = async () => {
+  const [scanResult, setScanResult] = useState<Extract<ScanGoogleSheetResult, { success: true }> | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  const handleScan = async () => {
     if (!url) return;
-    setIsSyncing(true);
+    setIsScanning(true);
     setError('');
-    setProgressMessage('Starting…');
+    setProgressMessage('Scanning starting…');
+    let finalResult: ScanGoogleSheetResult | null = null;
+
+    try {
+      const res = await fetch('/api/sync-sheet/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+
+      if (!res.ok) {
+        let errText = res.statusText;
+        try {
+          const j = (await res.json()) as { error?: string };
+          if (j.error) errText = j.error;
+        } catch {
+          /* ignore */
+        }
+        setError(errText);
+        setIsScanning(false);
+        return;
+      }
+
+      if (!res.body) {
+        setError('No response from server');
+        setIsScanning(false);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        for (;;) {
+          const nl = buffer.indexOf('\n');
+          if (nl < 0) break;
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          const parsed = parseSyncNdjsonLine(line);
+          if (!parsed) continue;
+          if (parsed.kind === 'progress-status') setProgressMessage(parsed.message);
+          if (parsed.kind === 'progress-sheet') {
+            setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+          }
+          if (parsed.kind === 'done') finalResult = parsed.result;
+        }
+      }
+      buffer += decoder.decode();
+      const tail = buffer.trim();
+      if (tail) {
+        const parsed = parseSyncNdjsonLine(tail);
+        if (parsed) {
+          if (parsed.kind === 'progress-status') setProgressMessage(parsed.message);
+          if (parsed.kind === 'progress-sheet') {
+            setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+          }
+          if (parsed.kind === 'done') finalResult = parsed.result;
+        }
+      }
+
+      if (finalResult?.success) {
+        setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
+        setIsModalOpen(true);
+      } else if (finalResult) {
+        setError((finalResult as { success: false; error: string }).error || 'Failed to scan');
+      } else {
+        setError('Scan finished without a result');
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to scan');
+    } finally {
+      setIsScanning(false);
+      setProgressMessage('');
+    }
+  };
+
+  const handleImport = async () => {
+    if (!url) return;
+    setIsImporting(true);
+    setError('');
+    setProgressMessage('Importing starting…');
     let finalResult: SyncResult | null = null;
 
     try {
@@ -73,11 +163,13 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
           /* ignore */
         }
         setError(errText);
+        setIsImporting(false);
         return;
       }
 
       if (!res.body) {
         setError('No response from server');
+        setIsImporting(false);
         return;
       }
 
@@ -119,6 +211,8 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       if (finalResult?.success) {
         onSyncComplete();
         setUrl('');
+        setIsModalOpen(false);
+        setScanResult(null);
       } else if (finalResult) {
         setError(finalResult.error || 'Failed to sync');
       } else {
@@ -127,60 +221,72 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to sync');
     } finally {
-      setIsSyncing(false);
+      setIsImporting(false);
       setProgressMessage('');
     }
   };
 
+  const isLoading = isScanning || isImporting;
+
   return (
-    <div className="flex flex-col gap-2 min-w-[420px]">
-      <div className="bg-surface-container-low p-5 rounded-2xl flex items-center space-x-4 shadow-sm relative">
-        <div className="bg-white p-3 rounded-xl shadow-sm">
-          <span className="material-symbols-outlined text-green-600">table_chart</span>
-        </div>
-        <div className="flex-1 min-w-0">
-          <label className="block text-[10px] uppercase tracking-widest font-bold text-on-surface-variant mb-1">
-            Google Sheets Source
-          </label>
-          <input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://docs.google.com/spreadsheets/d/..."
-            disabled={isSyncing}
-            className="w-full bg-transparent border-none p-0 text-sm focus:ring-0 placeholder:text-slate-400 focus:outline-none disabled:opacity-60"
-          />
-        </div>
-        <button
-          type="button"
-          onClick={handleSync}
-          disabled={isSyncing || !url}
-          className="shrink-0 bg-primary text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary-container transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {isSyncing ? (
-            <>
-              <span className="material-symbols-outlined animate-spin text-sm">sync</span>
-              Syncing…
-            </>
-          ) : (
-            'Sync'
-          )}
-        </button>
-        {error && (
-          <div className="absolute -bottom-6 left-0 text-xs font-bold text-error">
-            {error}
+    <>
+      <div className="flex flex-col gap-2 min-w-[420px]">
+        <div className="bg-surface-container-low p-5 rounded-2xl flex items-center space-x-4 shadow-sm relative">
+          <div className="bg-white p-3 rounded-xl shadow-sm">
+            <span className="material-symbols-outlined text-green-600">table_chart</span>
           </div>
+          <div className="flex-1 min-w-0">
+            <label className="block text-[10px] uppercase tracking-widest font-bold text-on-surface-variant mb-1">
+              Google Sheets Source
+            </label>
+            <input
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://docs.google.com/spreadsheets/d/..."
+              disabled={isLoading}
+              className="w-full bg-transparent border-none p-0 text-sm focus:ring-0 placeholder:text-slate-400 focus:outline-none disabled:opacity-60"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleScan}
+            disabled={isLoading || !url}
+            className="shrink-0 bg-primary text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary-container transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            {isScanning ? (
+              <>
+                <span className="material-symbols-outlined animate-spin text-sm">sync</span>
+                Scanning…
+              </>
+            ) : (
+              'Sync'
+            )}
+          </button>
+          {error && (
+            <div className="absolute -bottom-6 left-0 text-xs font-bold text-error">
+              {error}
+            </div>
+          )}
+        </div>
+        {isLoading && progressMessage && (
+          <p
+            className="text-xs text-on-surface-variant font-medium truncate px-1"
+            role="status"
+            aria-live="polite"
+          >
+            {progressMessage}
+          </p>
         )}
       </div>
-      {isSyncing && progressMessage && (
-        <p
-          className="text-xs text-on-surface-variant font-medium truncate px-1"
-          role="status"
-          aria-live="polite"
-        >
-          {progressMessage}
-        </p>
-      )}
-    </div>
+
+      <ScanPreviewModal
+        isOpen={isModalOpen}
+        scanResult={scanResult}
+        onClose={() => setIsModalOpen(false)}
+        onConfirm={handleImport}
+        isImporting={isImporting}
+      />
+    </>
   );
 }

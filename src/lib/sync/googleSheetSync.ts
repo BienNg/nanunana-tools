@@ -435,6 +435,211 @@ export type SyncGoogleSheetResult =
   | { success: true; message: string }
   | { success: false; error: string };
 
+export function columnIndexToA1Letter(index: number): string {
+  let letter = '';
+  let temp = index;
+  while (temp >= 0) {
+    letter = String.fromCharCode((temp % 26) + 65) + letter;
+    temp = Math.floor(temp / 26) - 1;
+  }
+  return letter;
+}
+
+export type ScannedStudent = { name: string; letters: string[] };
+
+export type ScannedSheet = {
+  title: string;
+  headers: {
+    folien?: string;
+    datum?: string;
+    von?: string;
+    bis?: string;
+    lehrer: string[];
+    students: ScannedStudent[];
+  };
+  sampleRows: Record<string, string>[];
+};
+
+export type ScanGoogleSheetResult =
+  | { success: true; workbookTitle: string; sheets: ScannedSheet[] }
+  | { success: false; error: string };
+
+export async function scanGoogleSheet(
+  url: string,
+  options?: { onProgress?: (event: SyncProgressEvent) => void | Promise<void> }
+): Promise<ScanGoogleSheetResult> {
+  const onProgress = options?.onProgress;
+  try {
+    const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
+    if (!match) throw new Error('Invalid Google Sheets URL');
+
+    const spreadsheetId = match[1];
+
+    if (!process.env.GOOGLE_API_KEY) {
+      throw new Error('GOOGLE_API_KEY is not configured in the environment');
+    }
+
+    await onProgress?.({ type: 'status', message: 'Scanning spreadsheet…' });
+
+    const sheetsApi = google.sheets({
+      version: 'v4',
+      auth: process.env.GOOGLE_API_KEY,
+    });
+
+    const spreadsheet = await sheetsApi.spreadsheets.get({ spreadsheetId });
+    const props = spreadsheet.data.properties;
+    const workbookTitle = props?.title?.trim() || 'Imported workbook';
+
+    await onProgress?.({
+      type: 'status',
+      message: `Scanning Workbook: ${workbookTitle}`,
+    });
+
+    const sheetList = spreadsheet.data.sheets ?? [];
+    const visibleSheetCount = sheetList.filter(
+      (s) => Boolean(s.properties?.title) && !s.properties?.hidden
+    ).length;
+
+    let visibleIndex = 0;
+    const scannedSheets: ScannedSheet[] = [];
+
+    for (const s of sheetList) {
+      const title = s.properties?.title;
+      if (!title) continue;
+      if (s.properties?.hidden) continue;
+
+      visibleIndex++;
+      await onProgress?.({
+        type: 'sheet',
+        title,
+        current: visibleIndex,
+        total: visibleSheetCount,
+      });
+
+      const range = `${escapeSheetTitleForRange(title)}!A1:Z100`;
+      const gridResponse = await sheetsApi.spreadsheets.get({
+        spreadsheetId,
+        ranges: [range],
+        includeGridData: true,
+      });
+      const sheetWithGrid = gridResponse.data.sheets?.find((sh) => sh.properties?.title === title);
+      const rowData = sheetWithGrid?.data?.[0]?.rowData;
+      const { rows } = sheetGridToRowsAndColorAttendance(rowData);
+
+      if (!rows || rows.length < 4) continue;
+
+      const headerRowIndex = findHeaderRowIndex(rows);
+      if (headerRowIndex === -1) continue;
+
+      const headers = rows[headerRowIndex];
+      if (!headers) continue;
+
+      const colIndices = {
+        folien: headers.findIndex((h) => h && String(h).includes('Folien') && !String(h).includes('gecheckt')),
+        datum: headers.findIndex((h) => h && String(h).includes('Datum')),
+        von: headers.findIndex((h) => h && String(h).includes('von')),
+        bis: headers.findIndex((h) => h && String(h).includes('bis')),
+      };
+      const lehrerCols = lehrerColumnIndices(headers);
+      if (colIndices.folien === -1 && headers.findIndex((h) => h && String(h).includes('Inhalt')) === -1) continue;
+
+      const reservedColIndices: number[] = [
+        colIndices.folien,
+        headers.findIndex((h) => h && String(h).includes('Inhalt')),
+        colIndices.datum,
+        colIndices.von,
+        colIndices.bis,
+        ...lehrerCols,
+      ];
+      const lehrerHeaderIdx = headers.findIndex((h) => h && String(h).includes('Lehrer'));
+      if (lehrerHeaderIdx >= 0) reservedColIndices.push(lehrerHeaderIdx);
+      const maxReserved = Math.max(-1, ...reservedColIndices.filter((i) => i >= 0));
+      const studentStartIndex = maxReserved + 1;
+      
+      const studentNames: { index: number; name: string }[] = [];
+      for (let i = studentStartIndex; i < headers.length; i++) {
+        const cell = headers[i];
+        const trimmed = cell ? String(cell).trim() : '';
+        if (!trimmed) continue;
+        if (isNonStudentColumnHeader(trimmed)) continue;
+        studentNames.push({ index: i, name: trimmed });
+      }
+
+      const uniqueStudentCols = dedupeSheetStudentColumns(studentNames);
+
+      const scannedStudents: ScannedStudent[] = uniqueStudentCols.map(col => ({
+        name: col.name,
+        letters: col.indices.map(columnIndexToA1Letter)
+      }));
+
+      // Extract sample rows
+      const sampleRows: Record<string, string>[] = [];
+      for (let i = headerRowIndex + 1; i < Math.min(headerRowIndex + 6, rows.length); i++) {
+        const row = rows[i];
+        if (!row) continue;
+        
+        const folien = colIndices.folien !== -1 ? row[colIndices.folien] : '';
+        const datum = colIndices.datum !== -1 ? row[colIndices.datum] : '';
+        if (!folien && !datum) continue;
+
+        const rowDataMap: Record<string, string> = {};
+        if (colIndices.folien !== -1) rowDataMap['Folien'] = String(row[colIndices.folien] || '');
+        if (colIndices.datum !== -1) rowDataMap['Datum'] = String(row[colIndices.datum] || '');
+        if (colIndices.von !== -1) rowDataMap['von'] = String(row[colIndices.von] || '');
+        if (colIndices.bis !== -1) rowDataMap['bis'] = String(row[colIndices.bis] || '');
+
+        const lehrerParts: string[] = [];
+        const teacherColIndices = lehrerCols.length > 0 ? lehrerCols : [lehrerHeaderIdx].filter((idx) => idx >= 0);
+        for (const idx of teacherColIndices) {
+          lehrerParts.push(...parseTeacherNames(row[idx]));
+        }
+        if (teacherColIndices.length > 0) {
+          rowDataMap['Lehrer'] = lehrerParts.join(', ');
+        }
+
+        uniqueStudentCols.forEach(col => {
+          // just taking the first non-empty text from the student columns as sample
+          let text = '';
+          for (const idx of col.indices) {
+            if (row[idx]) {
+              text = String(row[idx]).trim();
+              break;
+            }
+          }
+          rowDataMap[col.name] = text;
+        });
+
+        sampleRows.push(rowDataMap);
+      }
+
+      scannedSheets.push({
+        title,
+        headers: {
+          folien: colIndices.folien !== -1 ? columnIndexToA1Letter(colIndices.folien) : undefined,
+          datum: colIndices.datum !== -1 ? columnIndexToA1Letter(colIndices.datum) : undefined,
+          von: colIndices.von !== -1 ? columnIndexToA1Letter(colIndices.von) : undefined,
+          bis: colIndices.bis !== -1 ? columnIndexToA1Letter(colIndices.bis) : undefined,
+          lehrer: lehrerCols.length > 0 ? lehrerCols.map(columnIndexToA1Letter) : (lehrerHeaderIdx >= 0 ? [columnIndexToA1Letter(lehrerHeaderIdx)] : []),
+          students: scannedStudents,
+        },
+        sampleRows
+      });
+    }
+
+    await onProgress?.({ type: 'status', message: 'Scan complete' });
+
+    return {
+      success: true,
+      workbookTitle,
+      sheets: scannedSheets,
+    };
+  } catch (error: unknown) {
+    console.error('Scan error:', error);
+    const errMsg = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, error: errMsg };
+  }
+}
+
 export async function runGoogleSheetSync(
   url: string,
   options?: { onProgress?: (event: SyncProgressEvent) => void | Promise<void> }
