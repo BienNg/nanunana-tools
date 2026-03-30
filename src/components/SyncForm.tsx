@@ -9,6 +9,7 @@ type SyncResult = { success: true; message: string } | { success: false; error: 
 type NdjsonLine =
   | { kind: 'progress-status'; message: string }
   | { kind: 'progress-sheet'; title: string; current: number; total: number }
+  | { kind: 'progress-db'; message: string }
   | { kind: 'done'; result: any }
   | null;
 
@@ -21,7 +22,7 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
     title?: string;
     current?: number;
     total?: number;
-    result?: any;
+    result?: unknown;
   };
   try {
     msg = JSON.parse(line) as typeof msg;
@@ -39,6 +40,9 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
     msg.total != null
   ) {
     return { kind: 'progress-sheet', title: msg.title, current: msg.current, total: msg.total };
+  }
+  if (msg.event === 'progress' && msg.type === 'db' && msg.message) {
+    return { kind: 'progress-db', message: msg.message };
   }
   if (msg.event === 'done' && msg.result) {
     return { kind: 'done', result: msg.result };
@@ -122,6 +126,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   const [scanResult, setScanResult] = useState<Extract<ScanGoogleSheetResult, { success: true }> | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [previewScanError, setPreviewScanError] = useState('');
+  const [importDbLog, setImportDbLog] = useState<string[]>([]);
 
   const handleScan = async () => {
     if (!url) return;
@@ -174,6 +179,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     if (!url) return;
     setIsImporting(true);
     setError('');
+    setImportDbLog([]);
     setProgressMessage('Importing starting…');
     let finalResult: SyncResult | null = null;
 
@@ -222,7 +228,10 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
           if (parsed.kind === 'progress-sheet') {
             setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
           }
-          if (parsed.kind === 'done') finalResult = parsed.result;
+          if (parsed.kind === 'progress-db') {
+            setImportDbLog((prev) => [...prev, parsed.message]);
+          }
+          if (parsed.kind === 'done') finalResult = parsed.result as SyncResult;
         }
       }
       buffer += decoder.decode();
@@ -234,7 +243,10 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
           if (parsed.kind === 'progress-sheet') {
             setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
           }
-          if (parsed.kind === 'done') finalResult = parsed.result;
+          if (parsed.kind === 'progress-db') {
+            setImportDbLog((prev) => [...prev, parsed.message]);
+          }
+          if (parsed.kind === 'done') finalResult = parsed.result as SyncResult;
         }
       }
 
@@ -319,6 +331,8 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
         }}
         onConfirm={handleImport}
         isImporting={isImporting}
+        importProgressMessage={isImporting ? progressMessage : ''}
+        importDbLog={importDbLog}
         onResync={handleResync}
         isResyncing={isScanning}
         resyncProgressMessage={progressMessage}

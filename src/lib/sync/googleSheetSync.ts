@@ -203,6 +203,12 @@ function mergedFeedbackFromRow(row: SheetRow, indices: number[]): string {
   return parts.join(' ').trim();
 }
 
+export type SyncProgressEvent =
+  | { type: 'status'; message: string }
+  | { type: 'sheet'; title: string; current: number; total: number }
+  /** One completed Supabase round-trip (or explicit batch) during import */
+  | { type: 'db'; message: string };
+
 /**
  * Sync teachers for one course using an in-memory cache to avoid per-row DB calls.
  *
@@ -212,8 +218,14 @@ async function syncCourseTeachers(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   courseId: string,
   teacherNames: Set<string>,
-  teacherCache: Map<string, string>
+  teacherCache: Map<string, string>,
+  sheetLabel: string,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ) {
+  await onProgress?.({
+    type: 'db',
+    message: `${sheetLabel} course_teachers — delete existing links for course`,
+  });
   await supabase.from('course_teachers').delete().eq('course_id', courseId);
   const names = [...teacherNames];
   if (names.length === 0) return;
@@ -222,6 +234,10 @@ async function syncCourseTeachers(
   const newNames = names.filter((n) => !teacherCache.has(n));
 
   if (newNames.length > 0) {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} teachers — insert ${newNames.length} new row(s)`,
+    });
     const { data: inserted } = await supabase
       .from('teachers')
       .insert(newNames.map((name) => ({ name })))
@@ -238,6 +254,10 @@ async function syncCourseTeachers(
     .filter((l): l is { course_id: string; teacher_id: string } => Boolean(l.teacher_id));
 
   if (links.length > 0) {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} course_teachers — insert ${links.length} link(s)`,
+    });
     await supabase.from('course_teachers').insert(links);
   }
 }
@@ -249,8 +269,10 @@ async function syncOneCourseSheet(
   rows: SheetRow[] | undefined,
   teacherCache: Map<string, string>,
   colorAttendance: AttendanceFromColor[][] | undefined,
-  studentCache: Map<string, string>
+  studentCache: Map<string, string>,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ): Promise<{ ok: boolean; reason?: string }> {
+  const sheetLabel = `[${sheetTitle}]`;
   if (!rows || rows.length < 4) return { ok: false, reason: 'too_few_rows' };
 
   const headerRowIndex = findHeaderRowIndex(rows);
@@ -292,6 +314,10 @@ async function syncOneCourseSheet(
 
   const uniqueStudentCols = dedupeSheetStudentColumns(studentNames);
 
+  await onProgress?.({
+    type: 'db',
+    message: `${sheetLabel} courses — select by group + name`,
+  });
   const { data: existing } = await supabase
     .from('courses')
     .select('id')
@@ -303,6 +329,10 @@ async function syncOneCourseSheet(
   if (existing?.id) {
     courseId = existing.id;
   } else {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} courses — insert`,
+    });
     const { data: newCourse, error: createError } = await supabase
       .from('courses')
       .insert({ name: sheetTitle, group_id: groupId })
@@ -318,6 +348,10 @@ async function syncOneCourseSheet(
     const name = col.name;
     let studentId = studentCache.get(name);
     if (!studentId) {
+      await onProgress?.({
+        type: 'db',
+        message: `${sheetLabel} students — upsert "${name}"`,
+      });
       const { data: row, error: studentUpsertError } = await supabase
         .from('students')
         .upsert({ group_id: groupId, name }, { onConflict: 'group_id,name' })
@@ -333,6 +367,10 @@ async function syncOneCourseSheet(
       studentCache.set(name, newId);
     }
 
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} course_students — upsert enroll "${name}"`,
+    });
     const { error: enrollError } = await supabase
       .from('course_students')
       .upsert({ course_id: courseId, student_id: studentId }, { onConflict: 'course_id,student_id' });
@@ -347,10 +385,15 @@ async function syncOneCourseSheet(
     if (sid) studentMap[col.name] = sid;
   }
 
+  await onProgress?.({
+    type: 'db',
+    message: `${sheetLabel} lessons — delete existing for course`,
+  });
   await supabase.from('lessons').delete().eq('course_id', courseId);
 
   const teachersForCourse = new Set<string>();
 
+  let lessonSeq = 0;
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
@@ -378,6 +421,16 @@ async function syncOneCourseSheet(
 
     if (colIndices.datum !== -1 && !parsedDate) continue;
 
+    lessonSeq += 1;
+    const lessonHint = parsedDate
+      ? `date ${parsedDate}`
+      : folien
+        ? `slide ${String(folien).slice(0, 40)}`
+        : `row #${lessonSeq}`;
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} lessons — insert (${lessonHint})`,
+    });
     const { data: lesson, error: lessonError } = await supabase
       .from('lessons')
       .insert({
@@ -420,17 +473,17 @@ async function syncOneCourseSheet(
     }
 
     if (attendanceInserts.length > 0) {
+      await onProgress?.({
+        type: 'db',
+        message: `${sheetLabel} attendance_records — insert ${attendanceInserts.length} row(s) for ${lessonHint}`,
+      });
       await supabase.from('attendance_records').insert(attendanceInserts);
     }
   }
 
-  await syncCourseTeachers(supabase, courseId, teachersForCourse, teacherCache);
+  await syncCourseTeachers(supabase, courseId, teachersForCourse, teacherCache, sheetLabel, onProgress);
   return { ok: true };
 }
-
-export type SyncProgressEvent =
-  | { type: 'status'; message: string }
-  | { type: 'sheet'; title: string; current: number; total: number };
 
 export type SyncGoogleSheetResult =
   | { success: true; message: string }
@@ -727,6 +780,7 @@ export async function runGoogleSheetSync(
     });
 
     // Load the full teachers table once so every per-course check is purely in-memory.
+    await onProgress?.({ type: 'db', message: 'teachers — select all (cache)' });
     const { data: allTeachers } = await supabase.from('teachers').select('id, name');
     const teacherCache = new Map<string, string>(
       (allTeachers ?? []).map((t: { id: string; name: string }) => [t.name, t.id])
@@ -734,6 +788,7 @@ export async function runGoogleSheetSync(
 
     const classType = detectClassType(workbookTitle);
 
+    await onProgress?.({ type: 'db', message: 'groups — select by spreadsheet_id' });
     let { data: group, error: groupSelectError } = await supabase
       .from('groups')
       .select('id')
@@ -743,6 +798,7 @@ export async function runGoogleSheetSync(
     if (groupSelectError) throw new Error(groupSelectError.message);
 
     if (!group) {
+      await onProgress?.({ type: 'db', message: 'groups — insert' });
       const { data: inserted, error: insertErr } = await supabase
         .from('groups')
         .insert({ name: workbookTitle, spreadsheet_id: spreadsheetId, class_type: classType })
@@ -753,12 +809,14 @@ export async function runGoogleSheetSync(
       }
       group = inserted;
     } else {
+      await onProgress?.({ type: 'db', message: 'groups — update name and class_type' });
       await supabase
         .from('groups')
         .update({ name: workbookTitle, class_type: classType })
         .eq('id', group.id);
     }
 
+    await onProgress?.({ type: 'db', message: 'students — select by group_id (cache)' });
     const { data: groupStudents } = await supabase.from('students').select('id, name').eq('group_id', group.id);
     const studentCache = new Map<string, string>();
     for (const s of groupStudents ?? []) {
@@ -839,7 +897,8 @@ export async function runGoogleSheetSync(
         item.rows,
         teacherCache,
         item.colorAttendance,
-        studentCache
+        studentCache,
+        onProgress
       );
       if (result.ok) synced++;
       else skipped++;
