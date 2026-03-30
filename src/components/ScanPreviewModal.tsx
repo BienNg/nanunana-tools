@@ -54,11 +54,12 @@ function isDatumChronologyOutlier(rows: ScannedSampleRow[], rowIndex: number): b
   return false;
 }
 
-/** Text or sheet background color (Present / Absent) counts as attendance data for this cell. */
+/** Sheet background color (Present / Absent) or explicit absent wording counts as attendance data — not plain feedback text alone (matches import: status comes from fill color). */
 function studentCellHasAttendanceData(row: ScannedSampleRow, studentName: string): boolean {
-  if (!isEmptyCellValue(row.values[studentName])) return true;
   const a = row.studentAttendance[studentName];
-  return a === 'Present' || a === 'Absent';
+  if (a === 'Present' || a === 'Absent') return true;
+  const t = String(row.values[studentName] ?? '').trim();
+  return /\babwesend\b/i.test(t) || /\babsent\b/i.test(t);
 }
 
 /** Row index of first cell with text or color attendance, or -1 if they never appear. */
@@ -107,12 +108,11 @@ function studentAttendanceCellClass(
 ): string {
   const t = String(text).trim();
   const absentByText = /\babwesend\b/i.test(t) || /\babsent\b/i.test(t);
-  const presentByText = t.length > 0 && !absentByText;
 
   if (colorStatus === 'Absent' || absentByText) {
     return 'bg-red-100/90 text-red-950 border-r border-red-200/80';
   }
-  if (colorStatus === 'Present' || presentByText) {
+  if (colorStatus === 'Present') {
     return 'bg-emerald-50/95 text-emerald-950 border-r border-emerald-200/70';
   }
   return 'border-r border-gray-200';
