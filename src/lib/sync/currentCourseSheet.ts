@@ -97,3 +97,25 @@ export function findCurrentCourseVisibleIndex(slots: CurrentCourseSlot[], now: D
 
   return bestIdx;
 }
+
+/**
+ * In one course tab, returns the last row index that appears to be already taught:
+ * row has parseable date on/before today and non-empty teacher cell.
+ * Returns null when no row qualifies (e.g. all sessions are in the future).
+ */
+export function findLastTaughtSessionRowIndex(
+  rows: { values: Record<string, string> }[],
+  now: Date
+): number | null {
+  const todayTs = localDayTimestamp(now.getFullYear(), now.getMonth(), now.getDate());
+  if (todayTs === null) return null;
+
+  let lastIdx: number | null = null;
+  for (let i = 0; i < rows.length; i++) {
+    const dt = parseSheetDatum(rows[i].values['Datum'] ?? '');
+    if (dt === null || dt > todayTs) continue;
+    if (isEmptyCellValue(rows[i].values['Lehrer'])) continue;
+    lastIdx = i;
+  }
+  return lastIdx;
+}
