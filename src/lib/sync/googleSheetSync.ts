@@ -1,8 +1,23 @@
 import { google, sheets_v4 } from 'googleapis';
+import ExcelJS from 'exceljs';
+import { createHash } from 'node:crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { findCurrentCourseVisibleIndex } from '@/lib/sync/currentCourseSheet';
 
 type AttendanceFromColor = 'Present' | 'Absent' | null;
+type SheetRow = string[];
+
+type LoadedVisibleSheet = {
+  title: string;
+  rows: SheetRow[];
+  colorAttendance: AttendanceFromColor[][];
+};
+
+type LoadedWorkbook = {
+  sourceKey: string;
+  workbookTitle: string;
+  visibleSheets: LoadedVisibleSheet[];
+};
 
 function rgbFromCellFormat(fmt: sheets_v4.Schema$CellFormat | null | undefined): { r: number; g: number; b: number } | null {
   if (!fmt) return null;
@@ -83,6 +98,100 @@ function escapeSheetTitleForRange(title: string): string {
   return `'${title.replace(/'/g, "''")}'`;
 }
 
+function parseSpreadsheetIdFromUrl(url: string): string | null {
+  const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
+  return match?.[1] ?? null;
+}
+
+function parseGoogleDriveFileIdFromUrl(url: string): string | null {
+  const direct = url.match(/\/file\/d\/([a-zA-Z0-9-_]+)/);
+  if (direct?.[1]) return direct[1];
+  try {
+    const u = new URL(url);
+    const id = u.searchParams.get('id');
+    return id && /^[a-zA-Z0-9-_]+$/.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+function rgbFromArgbHex(argb: string | undefined): { r: number; g: number; b: number } | null {
+  if (!argb) return null;
+  const hex = argb.trim();
+  if (!/^[0-9a-fA-F]{8}$/.test(hex)) return null;
+  const a = parseInt(hex.slice(0, 2), 16) / 255;
+  if (a < 0.08) return null;
+  const r = parseInt(hex.slice(2, 4), 16) / 255;
+  const g = parseInt(hex.slice(4, 6), 16) / 255;
+  const b = parseInt(hex.slice(6, 8), 16) / 255;
+  return { r, g, b };
+}
+
+function attendanceStatusFromExcelCell(cell: ExcelJS.Cell): AttendanceFromColor {
+  const fill = cell.style?.fill;
+  if (!fill || fill.type !== 'pattern') return null;
+  const fg = 'fgColor' in fill ? fill.fgColor : undefined;
+  const bg = 'bgColor' in fill ? fill.bgColor : undefined;
+  const rgb = rgbFromArgbHex(fg?.argb) ?? rgbFromArgbHex(bg?.argb);
+  if (!rgb) return null;
+  return attendanceStatusFromRgb(rgb.r, rgb.g, rgb.b);
+}
+
+function cellStringFromExcelCell(cell: ExcelJS.Cell): string {
+  const raw = cell.value;
+  if (raw == null) return '';
+  if (typeof raw === 'string') return raw.trim();
+  if (typeof raw === 'number' || typeof raw === 'boolean' || raw instanceof Date) {
+    return String(raw).trim();
+  }
+  if (typeof raw === 'object') {
+    if ('richText' in raw && Array.isArray(raw.richText)) {
+      return raw.richText.map((part) => part?.text ?? '').join('').trim();
+    }
+    if ('text' in raw && typeof raw.text === 'string') {
+      return raw.text.trim();
+    }
+    if ('result' in raw && raw.result != null) {
+      return String(raw.result).trim();
+    }
+    if ('hyperlink' in raw && typeof raw.hyperlink === 'string') {
+      return raw.hyperlink.trim();
+    }
+  }
+  try {
+    return String(raw).trim();
+  } catch {
+    return '';
+  }
+}
+
+function sheetGridFromExcelWorksheet(worksheet: ExcelJS.Worksheet): {
+  rows: SheetRow[];
+  colorAttendance: AttendanceFromColor[][];
+} {
+  const maxRows = 1000;
+  const maxCols = 26;
+  const rows: SheetRow[] = [];
+  const colorAttendance: AttendanceFromColor[][] = [];
+  const rowLimit = Math.min(Math.max(worksheet.rowCount, 0), maxRows);
+
+  for (let rowIdx = 1; rowIdx <= rowLimit; rowIdx++) {
+    const row = worksheet.getRow(rowIdx);
+    const values: string[] = [];
+    const attendance: AttendanceFromColor[] = [];
+    for (let colIdx = 1; colIdx <= maxCols; colIdx++) {
+      const cell = row.getCell(colIdx);
+      const text = cellStringFromExcelCell(cell);
+      values.push(text);
+      attendance.push(attendanceStatusFromExcelCell(cell));
+    }
+    rows.push(values);
+    colorAttendance.push(attendance);
+  }
+
+  return { rows, colorAttendance };
+}
+
 /** Split one or more teacher names from a cell (comma, slash, semicolon, newline, German "und"). */
 function parseTeacherNames(raw: string | undefined | null): string[] {
   if (raw == null || raw === '') return [];
@@ -130,8 +239,6 @@ function detectClassType(title: string): ClassType | null {
   if (title.includes('Offline')) return 'Offline';
   return null;
 }
-
-type SheetRow = string[];
 
 function findHeaderRowIndex(rows: SheetRow[]): number {
   for (let i = 0; i < rows.length; i++) {
@@ -665,70 +772,170 @@ export type ScanGoogleSheetResult =
     }
   | { success: false; error: string };
 
-export async function scanGoogleSheet(
+export type SheetSyncSource = string | { fileName: string; bytes: Uint8Array };
+
+async function loadWorkbookFromGoogleSheets(
   url: string,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+): Promise<LoadedWorkbook> {
+  const spreadsheetId = parseSpreadsheetIdFromUrl(url);
+  if (!spreadsheetId) throw new Error('Invalid Google Sheets URL');
+
+  if (!process.env.GOOGLE_API_KEY) {
+    throw new Error('GOOGLE_API_KEY is not configured in the environment');
+  }
+
+  await onProgress?.({ type: 'status', message: 'Loading spreadsheet…' });
+  const sheetsApi = google.sheets({
+    version: 'v4',
+    auth: process.env.GOOGLE_API_KEY,
+  });
+
+  const spreadsheet = await sheetsApi.spreadsheets.get({ spreadsheetId });
+  const workbookTitle = spreadsheet.data.properties?.title?.trim() || 'Imported workbook';
+  const sheetList = spreadsheet.data.sheets ?? [];
+  const visibleSheetCount = sheetList.filter(
+    (s) => Boolean(s.properties?.title) && !s.properties?.hidden
+  ).length;
+
+  const visibleSheets: LoadedVisibleSheet[] = [];
+  let visibleIndex = 0;
+  for (const s of sheetList) {
+    const title = s.properties?.title;
+    if (!title || s.properties?.hidden) continue;
+
+    visibleIndex++;
+    await onProgress?.({ type: 'sheet', title, current: visibleIndex, total: visibleSheetCount });
+    const range = `${escapeSheetTitleForRange(title)}!A1:Z1000`;
+    const gridResponse = await sheetsApi.spreadsheets.get({
+      spreadsheetId,
+      ranges: [range],
+      includeGridData: true,
+    });
+    const sheetWithGrid = gridResponse.data.sheets?.find((sh) => sh.properties?.title === title);
+    const rowData = sheetWithGrid?.data?.[0]?.rowData;
+    const { rows, colorAttendance } = sheetGridToRowsAndColorAttendance(rowData);
+    visibleSheets.push({ title, rows, colorAttendance });
+  }
+
+  return {
+    sourceKey: spreadsheetId,
+    workbookTitle,
+    visibleSheets,
+  };
+}
+
+async function loadWorkbookFromXlsx(
+  fileName: string,
+  bytes: Uint8Array,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+): Promise<LoadedWorkbook> {
+  await onProgress?.({ type: 'status', message: 'Loading .xlsx workbook…' });
+  const workbook = new ExcelJS.Workbook();
+  const xlsxInput = Buffer.from(bytes) as unknown as Parameters<typeof workbook.xlsx.load>[0];
+  await workbook.xlsx.load(xlsxInput);
+  const workbookTitle = fileName.replace(/\.xlsx$/i, '').trim() || 'Imported workbook';
+  const sourceHash = createHash('sha256').update(bytes).digest('hex');
+  const sourceKey = `xlsx:${sourceHash}`;
+
+  const visibleWorksheets = workbook.worksheets.filter(
+    (ws) => ws.state !== 'hidden' && ws.state !== 'veryHidden'
+  );
+  const visibleSheets: LoadedVisibleSheet[] = [];
+  for (let i = 0; i < visibleWorksheets.length; i++) {
+    const ws = visibleWorksheets[i];
+    await onProgress?.({
+      type: 'sheet',
+      title: ws.name,
+      current: i + 1,
+      total: visibleWorksheets.length,
+    });
+    const { rows, colorAttendance } = sheetGridFromExcelWorksheet(ws);
+    visibleSheets.push({ title: ws.name, rows, colorAttendance });
+  }
+
+  return { sourceKey, workbookTitle, visibleSheets };
+}
+
+async function loadWorkbookFromXlsxBytes(
+  fileName: string,
+  bytes: Uint8Array,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+): Promise<LoadedWorkbook> {
+  return loadWorkbookFromXlsx(fileName, bytes, onProgress);
+}
+
+async function fetchXlsxBytesFromUrl(url: string): Promise<Uint8Array> {
+  const response = await fetch(url, { redirect: 'follow' });
+  if (!response.ok) {
+    throw new Error(`Failed to download .xlsx file: HTTP ${response.status}`);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  return new Uint8Array(arrayBuffer);
+}
+
+async function loadWorkbookFromSource(
+  source: SheetSyncSource,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+): Promise<LoadedWorkbook> {
+  if (typeof source === 'string') {
+    const spreadsheetId = parseSpreadsheetIdFromUrl(source);
+    if (spreadsheetId) {
+      try {
+        return await loadWorkbookFromGoogleSheets(source, onProgress);
+      } catch {
+        // Some Drive-hosted Office files can be opened in Sheets URLs but are not API-readable.
+        // Fallback: try exporting/downloading as XLSX and parse locally.
+        await onProgress?.({
+          type: 'status',
+          message: 'Sheets API failed, trying XLSX export…',
+        });
+        const exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=xlsx`;
+        const bytes = await fetchXlsxBytesFromUrl(exportUrl);
+        return loadWorkbookFromXlsxBytes(`${spreadsheetId}.xlsx`, bytes, onProgress);
+      }
+    }
+
+    const driveFileId = parseGoogleDriveFileIdFromUrl(source);
+    if (driveFileId) {
+      await onProgress?.({ type: 'status', message: 'Downloading Drive .xlsx file…' });
+      const directDownloadUrl = `https://drive.google.com/uc?export=download&id=${driveFileId}`;
+      const bytes = await fetchXlsxBytesFromUrl(directDownloadUrl);
+      return loadWorkbookFromXlsxBytes(`${driveFileId}.xlsx`, bytes, onProgress);
+    }
+
+    if (/\.xlsx(?:\?|#|$)/i.test(source)) {
+      await onProgress?.({ type: 'status', message: 'Downloading .xlsx file…' });
+      const bytes = await fetchXlsxBytesFromUrl(source);
+      return loadWorkbookFromXlsxBytes('downloaded.xlsx', bytes, onProgress);
+    }
+
+    throw new Error('Unsupported URL: provide a Google Sheets URL or an accessible .xlsx URL');
+  }
+  return loadWorkbookFromXlsx(source.fileName, source.bytes, onProgress);
+}
+
+export async function scanGoogleSheet(
+  source: SheetSyncSource,
   options?: { onProgress?: (event: SyncProgressEvent) => void | Promise<void> }
 ): Promise<ScanGoogleSheetResult> {
   const onProgress = options?.onProgress;
   try {
-    const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
-    if (!match) throw new Error('Invalid Google Sheets URL');
-
-    const spreadsheetId = match[1];
-
-    if (!process.env.GOOGLE_API_KEY) {
-      throw new Error('GOOGLE_API_KEY is not configured in the environment');
-    }
-
-    await onProgress?.({ type: 'status', message: 'Scanning spreadsheet…' });
-
-    const sheetsApi = google.sheets({
-      version: 'v4',
-      auth: process.env.GOOGLE_API_KEY,
-    });
-
-    const spreadsheet = await sheetsApi.spreadsheets.get({ spreadsheetId });
-    const props = spreadsheet.data.properties;
-    const workbookTitle = props?.title?.trim() || 'Imported workbook';
-
+    await onProgress?.({ type: 'status', message: 'Scanning workbook…' });
+    const loaded = await loadWorkbookFromSource(source, onProgress);
+    const workbookTitle = loaded.workbookTitle;
     await onProgress?.({
       type: 'status',
       message: `Scanning Workbook: ${workbookTitle}`,
     });
-
-    const sheetList = spreadsheet.data.sheets ?? [];
-    const visibleSheetCount = sheetList.filter(
-      (s) => Boolean(s.properties?.title) && !s.properties?.hidden
-    ).length;
-
-    let visibleIndex = 0;
     let visibleSlotIndex = 0;
     const scannedSheets: ScannedSheet[] = [];
     const visibleSlots: { sampleRows: ScannedSampleRow[] }[] = [];
 
-    for (const s of sheetList) {
-      const title = s.properties?.title;
-      if (!title) continue;
-      if (s.properties?.hidden) continue;
-
-      visibleIndex++;
-      await onProgress?.({
-        type: 'sheet',
-        title,
-        current: visibleIndex,
-        total: visibleSheetCount,
-      });
-
-      const range = `${escapeSheetTitleForRange(title)}!A1:Z1000`;
-      const gridResponse = await sheetsApi.spreadsheets.get({
-        spreadsheetId,
-        ranges: [range],
-        includeGridData: true,
-      });
-      const sheetWithGrid = gridResponse.data.sheets?.find((sh) => sh.properties?.title === title);
-      const rowData = sheetWithGrid?.data?.[0]?.rowData;
-      const { rows, colorAttendance } = sheetGridToRowsAndColorAttendance(rowData);
-
+    for (const sheet of loaded.visibleSheets) {
+      const title = sheet.title;
+      const rows = sheet.rows;
+      const colorAttendance = sheet.colorAttendance;
       const { sampleRows, scanned } = processVisibleSheetGrid(title, rows, colorAttendance);
       visibleSlots.push({ sampleRows });
       if (scanned) {
@@ -755,7 +962,7 @@ export async function scanGoogleSheet(
 }
 
 export async function runGoogleSheetSync(
-  url: string,
+  source: SheetSyncSource,
   options?: {
     onProgress?: (event: SyncProgressEvent) => void | Promise<void>;
     skippedRowsBySheet?: SkippedRowsBySheet;
@@ -765,25 +972,9 @@ export async function runGoogleSheetSync(
   const skippedRowsBySheet = options?.skippedRowsBySheet ?? {};
   const supabase = getSupabaseAdmin();
   try {
-    const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
-    if (!match) throw new Error('Invalid Google Sheets URL');
-
-    const spreadsheetId = match[1];
-
-    if (!process.env.GOOGLE_API_KEY) {
-      throw new Error('GOOGLE_API_KEY is not configured in the environment');
-    }
-
-    await onProgress?.({ type: 'status', message: 'Loading spreadsheet…' });
-
-    const sheets = google.sheets({
-      version: 'v4',
-      auth: process.env.GOOGLE_API_KEY,
-    });
-
-    const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId });
-    const props = spreadsheet.data.properties;
-    const workbookTitle = props?.title?.trim() || 'Imported workbook';
+    const loaded = await loadWorkbookFromSource(source, onProgress);
+    const workbookTitle = loaded.workbookTitle;
+    const sourceKey = loaded.sourceKey;
 
     await onProgress?.({
       type: 'status',
@@ -800,19 +991,20 @@ export async function runGoogleSheetSync(
     const classType = detectClassType(workbookTitle);
 
     await onProgress?.({ type: 'db', message: 'groups — select by spreadsheet_id' });
-    let { data: group, error: groupSelectError } = await supabase
+    const { data: existingGroup, error: groupSelectError } = await supabase
       .from('groups')
       .select('id')
-      .eq('spreadsheet_id', spreadsheetId)
+      .eq('spreadsheet_id', sourceKey)
       .maybeSingle();
 
     if (groupSelectError) throw new Error(groupSelectError.message);
+    let group = existingGroup;
 
     if (!group) {
       await onProgress?.({ type: 'db', message: 'groups — insert' });
       const { data: inserted, error: insertErr } = await supabase
         .from('groups')
-        .insert({ name: workbookTitle, spreadsheet_id: spreadsheetId, class_type: classType })
+        .insert({ name: workbookTitle, spreadsheet_id: sourceKey, class_type: classType })
         .select('id')
         .single();
       if (insertErr || !inserted) {
@@ -834,10 +1026,7 @@ export async function runGoogleSheetSync(
       studentCache.set(String(s.name).trim(), s.id);
     }
 
-    const sheetList = spreadsheet.data.sheets ?? [];
-    const visibleSheetCount = sheetList.filter(
-      (s) => Boolean(s.properties?.title) && !s.properties?.hidden
-    ).length;
+    const visibleSheetCount = loaded.visibleSheets.length;
 
     await onProgress?.({
       type: 'status',
@@ -857,14 +1046,8 @@ export async function runGoogleSheetSync(
       colorAttendance: AttendanceFromColor[][];
     }[] = [];
 
-    for (const s of sheetList) {
-      const title = s.properties?.title;
-      if (!title) continue;
-      if (s.properties?.hidden) {
-        skipped++;
-        continue;
-      }
-
+    for (const sheet of loaded.visibleSheets) {
+      const title = sheet.title;
       visibleIndex++;
       await onProgress?.({
         type: 'sheet',
@@ -873,15 +1056,8 @@ export async function runGoogleSheetSync(
         total: visibleSheetCount,
       });
 
-      const range = `${escapeSheetTitleForRange(title)}!A1:Z1000`;
-      const gridResponse = await sheets.spreadsheets.get({
-        spreadsheetId,
-        ranges: [range],
-        includeGridData: true,
-      });
-      const sheetWithGrid = gridResponse.data.sheets?.find((sh) => sh.properties?.title === title);
-      const rowData = sheetWithGrid?.data?.[0]?.rowData;
-      const { rows, colorAttendance } = sheetGridToRowsAndColorAttendance(rowData);
+      const rows = sheet.rows;
+      const colorAttendance = sheet.colorAttendance;
       const { sampleRows } = processVisibleSheetGrid(title, rows, colorAttendance);
       visibleSlots.push({ sampleRows });
       queued.push({

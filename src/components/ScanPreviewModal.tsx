@@ -12,7 +12,38 @@ import { findLastTaughtSessionRowIndex, parseSheetDatum } from '@/lib/sync/curre
 
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
 
-const CELL_WARN_CLASS = 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90';
+const CELL_WARN_CLASS = 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90 cursor-help';
+
+/** Short hover hints for yellow cells — calm, explanatory, not alarming. */
+const HINT_EMPTY_FOLIEN =
+  'This cell is empty. Add the slide or lesson label so this row is complete.';
+const HINT_EMPTY_DATUM =
+  'No date here yet. Add the lesson date when you can — it helps keep sessions in the right order.';
+const HINT_DATUM_ORDER =
+  'This date doesn’t sit in order with the rows above and below. Each lesson should be strictly after the previous session and strictly before the next (same day as a neighbor can block import).';
+const HINT_EMPTY_VON =
+  'Start time is missing. Add it when this session is scheduled.';
+const HINT_EMPTY_BIS =
+  'End time is missing. Add it when this session is scheduled.';
+const HINT_EMPTY_LEHRER =
+  'Teacher name is missing. Add who led this session.';
+function hintStudentAfterFirstSession(studentName: string): string {
+  return `After attendance was first recorded for ${studentName}, later lessons usually need a mark or note (for example green for present, or “absent”). This cell is empty — you can fill it or skip the row if that’s intentional.`;
+}
+
+function datumCellHoverTitle(
+  rowIsSkipped: boolean,
+  rowOutsideValidation: boolean,
+  datumEmpty: boolean,
+  datumChrono: boolean
+): string | undefined {
+  if (rowIsSkipped || rowOutsideValidation) return undefined;
+  if (!datumEmpty && !datumChrono) return undefined;
+  const parts: string[] = [];
+  if (datumEmpty) parts.push(HINT_EMPTY_DATUM);
+  if (datumChrono) parts.push(HINT_DATUM_ORDER);
+  return parts.join(' ');
+}
 
 function isEmptyCellValue(v: unknown): boolean {
   return String(v ?? '').trim().length === 0;
@@ -150,7 +181,7 @@ function countSheetValidationIssues(
 }
 
 function validationIssuesTooltip(count: number): string {
-  return `${count} validation ${count === 1 ? 'issue' : 'issues'} on this sheet (empty core cells, session date not strictly between neighbors (must be after previous and before next day), or student attendance missing after their first recorded session)`;
+  return `${count} spot${count === 1 ? '' : 's'} to review on this sheet: missing core fields (Folien, date, times, teacher), a date that doesn’t line up with nearby rows, or a student column that stayed empty after their first attendance. Hover a highlighted cell for details.`;
 }
 
 function studentAttendanceCellClass(
@@ -186,6 +217,8 @@ type ScanPreviewModalProps = {
   resyncError?: string;
 };
 
+type HoverHint = { text: string; x: number; y: number } | null;
+
 export default function ScanPreviewModal({
   isOpen,
   scanResult,
@@ -203,6 +236,7 @@ export default function ScanPreviewModal({
   const [mounted, setMounted] = useState(false);
   const [skippedRowsBySheet, setSkippedRowsBySheet] = useState<SkippedRowsBySheet>({});
   const [openRowActionIndex, setOpenRowActionIndex] = useState<number | null>(null);
+  const [hoverHint, setHoverHint] = useState<HoverHint>(null);
   const importLogScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -230,6 +264,26 @@ export default function ScanPreviewModal({
   useEffect(() => {
     setOpenRowActionIndex(null);
   }, [activeTab]);
+
+  const showHint = (text: string, clientX: number, clientY: number) => {
+    setHoverHint({ text, x: clientX + 14, y: clientY + 14 });
+  };
+
+  const moveHint = (clientX: number, clientY: number) => {
+    setHoverHint((prev) => (prev ? { ...prev, x: clientX + 14, y: clientY + 14 } : prev));
+  };
+
+  const hideHint = () => setHoverHint(null);
+
+  const hintHandlers = (hint: string | undefined) =>
+    hint
+      ? {
+          onMouseEnter: (e: React.MouseEvent<HTMLElement>) => showHint(hint, e.clientX, e.clientY),
+          onMouseMove: (e: React.MouseEvent<HTMLElement>) => moveHint(e.clientX, e.clientY),
+          onMouseLeave: hideHint,
+          onBlur: hideHint,
+        }
+      : {};
 
   const makeSheetKey = (sheet: ScannedSheet): string => `${sheet.visibleOrderIndex}:${sheet.title}`;
 
@@ -529,6 +583,11 @@ export default function ScanPreviewModal({
                           className={`px-4 py-2 border-r border-gray-200 ${
                             !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['Folien']) ? CELL_WARN_CLASS : ''
                           }`}
+                          {...hintHandlers(
+                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['Folien'])
+                              ? HINT_EMPTY_FOLIEN
+                              : undefined
+                          )}
                         >
                           {row.values['Folien'] || ''}
                         </td>
@@ -536,11 +595,7 @@ export default function ScanPreviewModal({
                           className={`px-4 py-2 border-r border-gray-200 ${
                             !rowIsSkipped && !rowOutsideValidation && (datumEmpty || datumChrono) ? CELL_WARN_CLASS : ''
                           }`}
-                          title={
-                            !rowIsSkipped && !datumEmpty && datumChrono
-                              ? 'Date must be strictly after the previous session and strictly before the next (same calendar day as a neighbor is not allowed; likely a typo)'
-                              : undefined
-                          }
+                          {...hintHandlers(datumCellHoverTitle(rowIsSkipped, rowOutsideValidation, datumEmpty, datumChrono))}
                         >
                           {row.values['Datum'] || ''}
                         </td>
@@ -548,6 +603,9 @@ export default function ScanPreviewModal({
                           className={`px-4 py-2 border-r border-gray-200 ${
                             !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['von']) ? CELL_WARN_CLASS : ''
                           }`}
+                          {...hintHandlers(
+                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['von']) ? HINT_EMPTY_VON : undefined
+                          )}
                         >
                           {row.values['von'] || ''}
                         </td>
@@ -555,6 +613,9 @@ export default function ScanPreviewModal({
                           className={`px-4 py-2 border-r border-gray-200 ${
                             !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['bis']) ? CELL_WARN_CLASS : ''
                           }`}
+                          {...hintHandlers(
+                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['bis']) ? HINT_EMPTY_BIS : undefined
+                          )}
                         >
                           {row.values['bis'] || ''}
                         </td>
@@ -562,6 +623,11 @@ export default function ScanPreviewModal({
                           className={`px-4 py-2 border-r border-gray-200 ${
                             !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['Lehrer']) ? CELL_WARN_CLASS : ''
                           }`}
+                          {...hintHandlers(
+                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['Lehrer'])
+                              ? HINT_EMPTY_LEHRER
+                              : undefined
+                          )}
                         >
                           {row.values['Lehrer'] || ''}
                         </td>
@@ -578,7 +644,11 @@ export default function ScanPreviewModal({
                             ? CELL_WARN_CLASS
                             : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
                           return (
-                            <td key={cIdx} className={`px-4 py-2 ${rowIsSkipped ? 'border-r border-gray-200' : tone}`}>
+                            <td
+                              key={cIdx}
+                              className={`px-4 py-2 ${rowIsSkipped ? 'border-r border-gray-200' : tone}`}
+                              {...hintHandlers(!rowIsSkipped && warnEmpty ? hintStudentAfterFirstSession(student.name) : undefined)}
+                            >
                               {cellText}
                             </td>
                           );
@@ -656,6 +726,16 @@ export default function ScanPreviewModal({
             )}
           </button>
         </div>
+        {hoverHint ? (
+          <div
+            className="pointer-events-none fixed z-[300] max-w-xs rounded-md border border-slate-200 bg-slate-900/95 px-3 py-2 text-xs leading-relaxed text-white shadow-xl"
+            style={{ left: hoverHint.x, top: hoverHint.y }}
+            role="status"
+            aria-live="polite"
+          >
+            {hoverHint.text}
+          </div>
+        ) : null}
       </div>
     </div>,
     document.body

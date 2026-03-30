@@ -1,14 +1,28 @@
 export async function POST(request: Request) {
-  let url: string;
+  let source: string | { fileName: string; bytes: Uint8Array } | null = null;
   try {
-    const body = (await request.json()) as { url?: string };
-    url = typeof body.url === 'string' ? body.url.trim() : '';
+    const contentType = request.headers.get('content-type') ?? '';
+    if (contentType.includes('multipart/form-data')) {
+      const formData = await request.formData();
+      const file = formData.get('file');
+      if (file instanceof File) {
+        if (!file.name.toLowerCase().endsWith('.xlsx')) {
+          return Response.json({ error: 'Only .xlsx files are supported for file import' }, { status: 400 });
+        }
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        source = { fileName: file.name, bytes };
+      }
+    } else {
+      const body = (await request.json()) as { url?: string };
+      const url = typeof body.url === 'string' ? body.url.trim() : '';
+      if (url) source = url;
+    }
   } catch {
-    return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
+    return Response.json({ error: 'Invalid request body' }, { status: 400 });
   }
 
-  if (!url) {
-    return Response.json({ error: 'Missing url' }, { status: 400 });
+  if (!source) {
+    return Response.json({ error: 'Missing source (Google Sheets URL or .xlsx file)' }, { status: 400 });
   }
 
   const encoder = new TextEncoder();
@@ -23,7 +37,7 @@ export async function POST(request: Request) {
       };
 
       try {
-        const result = await scanGoogleSheet(url, {
+        const result = await scanGoogleSheet(source, {
           onProgress: (event) => {
             send({ event: 'progress', ...event });
           },

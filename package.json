@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.100.1",
+    "exceljs": "^4.4.0",
     "googleapis": "^171.4.0",
     "gsap": "^3.14.2",
     "next": "16.2.1",

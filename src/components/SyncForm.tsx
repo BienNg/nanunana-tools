@@ -10,7 +10,7 @@ type NdjsonLine =
   | { kind: 'progress-status'; message: string }
   | { kind: 'progress-sheet'; title: string; current: number; total: number }
   | { kind: 'progress-db'; message: string }
-  | { kind: 'done'; result: any }
+  | { kind: 'done'; result: unknown }
   | null;
 
 function parseSyncNdjsonLine(line: string): NdjsonLine {
@@ -51,16 +51,24 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
 }
 
 async function streamSheetScan(
-  url: string,
+  source: { url?: string; file?: File | null },
   onProgress: (message: string) => void,
   options?: { startMessage?: string }
 ): Promise<ScanGoogleSheetResult | null> {
   onProgress(options?.startMessage ?? 'Scanning starting…');
-  const res = await fetch('/api/sync-sheet/scan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
-  });
+  const req =
+    source.file != null
+      ? (() => {
+          const formData = new FormData();
+          formData.set('file', source.file);
+          return { method: 'POST', body: formData } as const;
+        })()
+      : {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: source.url ?? '' }),
+        };
+  const res = await fetch('/api/sync-sheet/scan', req);
 
   if (!res.ok) {
     let errText = res.statusText;
@@ -118,6 +126,7 @@ async function streamSheetScan(
 
 export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => void }) {
   const [url, setUrl] = useState('');
+  const [file, setFile] = useState<File | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState('');
@@ -129,12 +138,12 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   const [importDbLog, setImportDbLog] = useState<string[]>([]);
 
   const handleScan = async () => {
-    if (!url) return;
+    if (!url && !file) return;
     setIsScanning(true);
     setError('');
     setPreviewScanError('');
     try {
-      const finalResult = await streamSheetScan(url, setProgressMessage);
+      const finalResult = await streamSheetScan({ url, file }, setProgressMessage);
       if (finalResult?.success) {
         setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
         setIsModalOpen(true);
@@ -152,12 +161,12 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   };
 
   const handleResync = async () => {
-    if (!url) return;
+    if (!url && !file) return;
     setIsScanning(true);
     setPreviewScanError('');
     setError('');
     try {
-      const finalResult = await streamSheetScan(url, setProgressMessage, {
+      const finalResult = await streamSheetScan({ url, file }, setProgressMessage, {
         startMessage: 'Rescanning sheet…',
       });
       if (finalResult?.success) {
@@ -176,7 +185,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   };
 
   const handleImport = async (skippedRowsBySheet: SkippedRowsBySheet) => {
-    if (!url) return;
+    if (!url && !file) return;
     setIsImporting(true);
     setError('');
     setImportDbLog([]);
@@ -184,11 +193,20 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     let finalResult: SyncResult | null = null;
 
     try {
-      const res = await fetch('/api/sync-sheet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, skippedRowsBySheet }),
-      });
+      const req =
+        file != null
+          ? (() => {
+              const formData = new FormData();
+              formData.set('file', file);
+              formData.set('skippedRowsBySheet', JSON.stringify(skippedRowsBySheet));
+              return { method: 'POST', body: formData } as const;
+            })()
+          : {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url, skippedRowsBySheet }),
+            };
+      const res = await fetch('/api/sync-sheet', req);
 
       if (!res.ok) {
         let errText = res.statusText;
@@ -253,6 +271,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       if (finalResult?.success) {
         onSyncComplete();
         setUrl('');
+        setFile(null);
         setIsModalOpen(false);
         setScanResult(null);
       } else if (finalResult) {
@@ -284,16 +303,30 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
             <input
               type="text"
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://docs.google.com/spreadsheets/d/..."
+              onChange={(e) => {
+                setUrl(e.target.value);
+                if (e.target.value.trim()) setFile(null);
+              }}
+              placeholder="Google Sheets URL (or select .xlsx below)"
               disabled={isLoading}
               className="w-full bg-transparent border-none p-0 text-sm focus:ring-0 placeholder:text-slate-400 focus:outline-none disabled:opacity-60"
+            />
+            <input
+              type="file"
+              accept=".xlsx"
+              disabled={isLoading}
+              onChange={(e) => {
+                const picked = e.target.files?.[0] ?? null;
+                setFile(picked);
+                if (picked) setUrl('');
+              }}
+              className="mt-2 block w-full text-xs text-on-surface-variant file:mr-3 file:rounded-md file:border-0 file:bg-primary/10 file:px-2 file:py-1 file:text-primary disabled:opacity-60"
             />
           </div>
           <button
             type="button"
             onClick={handleScan}
-            disabled={isLoading || !url}
+            disabled={isLoading || (!url && !file)}
             className="shrink-0 bg-primary text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary-container transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {isScanning ? (
