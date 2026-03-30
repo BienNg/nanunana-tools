@@ -15,6 +15,7 @@ export default function Sidebar() {
   const dashboardActive = pathname === '/';
   const groupsActive = pathname.startsWith('/groups');
   const teachersActive = pathname.startsWith('/teachers');
+  const studentsActive = pathname.startsWith('/students');
 
   return (
     <aside
@@ -56,13 +57,6 @@ export default function Sidebar() {
             Dashboard
           </span>
         </Link>
-        <Link
-          href="#"
-          className="flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300"
-        >
-          <span className="material-symbols-outlined">rule</span>
-          <span className="font-headline text-sm font-medium">Attendance</span>
-        </Link>
         <Link href="/groups" className={groupsActive ? navActive : navInactive}>
           <span className="material-symbols-outlined">workspaces</span>
           <span
@@ -79,12 +73,13 @@ export default function Sidebar() {
             Teachers
           </span>
         </Link>
-        <Link
-          href="#"
-          className="flex items-center space-x-3 px-4 py-3 text-slate-500 hover:text-slate-900 hover:translate-x-1 transition-all duration-300"
-        >
+        <Link href="/students" className={studentsActive ? navActive : navInactive}>
           <span className="material-symbols-outlined">group</span>
-          <span className="font-headline text-sm font-medium">Students</span>
+          <span
+            className={`font-headline text-sm ${studentsActive ? 'font-semibold' : 'font-medium'}`}
+          >
+            Students
+          </span>
         </Link>
       </nav>
       <div className="mt-auto pt-6 border-t border-slate-200/50 space-y-1">

@@ -43,9 +43,6 @@ export default function Topbar({ showClearDatabase = false }: TopbarProps) {
             <span className="material-symbols-outlined">notifications</span>
             <span className="absolute top-2 right-2 w-2 h-2 bg-error rounded-full border-2 border-white"></span>
           </button>
-          <button className="p-2 text-slate-600 hover:bg-blue-50 rounded-full transition-colors">
-            <span className="material-symbols-outlined">settings</span>
-          </button>
         </div>
         <div className="h-8 w-px bg-slate-200"></div>
         <div className="flex items-center space-x-3">
