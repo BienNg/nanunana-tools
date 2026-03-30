@@ -235,19 +235,32 @@ export default async function TeacherDetailsPage({
 
   const totalLessons = allLessons.length;
 
-  const coursesInPeriod = [...new Set(allLessons.map((l) => l.course_id))]
-    .filter(Boolean)
-    .map((courseId) => {
-      const meta = courses.find((c: any) => c.id === courseId);
-      const sampleLesson = allLessons.find((l) => l.course_id === courseId);
-      const name = meta?.name ?? sampleLesson?.courses?.name ?? 'Unknown course';
-      const groupName = meta?.groups?.name ?? null;
-      const lessonsCount = lessonsByCourseId[courseId]?.length ?? 0;
-      return { courseId, name, groupName, lessonsCount };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const courseMetaById = new Map(courses.map((course: any) => [course.id, course]));
+  const groupsInPeriodMap = new Map<string, { groupId: string; name: string; lessonsCount: number }>();
+  allLessons.forEach((lesson) => {
+    const courseMeta = courseMetaById.get(lesson.course_id);
+    const courseGroup = Array.isArray(courseMeta?.groups) ? courseMeta.groups[0] : courseMeta?.groups;
+    const groupId = courseGroup?.id;
+    if (!groupId) return;
 
-  const periodCoursesSubtitle =
+    const existing = groupsInPeriodMap.get(groupId);
+    if (existing) {
+      existing.lessonsCount += 1;
+      return;
+    }
+
+    groupsInPeriodMap.set(groupId, {
+      groupId,
+      name: courseGroup?.name ?? 'Unknown group',
+      lessonsCount: 1,
+    });
+  });
+
+  const groupsInPeriod = Array.from(groupsInPeriodMap.values()).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+
+  const periodGroupsSubtitle =
     filter === 'monthly' ? selectedMonthLabel : 'All time';
 
   // Recent Sessions
@@ -403,30 +416,27 @@ export default async function TeacherDetailsPage({
             </div>
           </div>
 
-          {/* Courses taught in selected period */}
+          {/* Groups taught in selected period */}
           <div className="lg:col-span-4 flex flex-col gap-6">
             <div className="bg-surface-container-lowest rounded-3xl p-8 border border-outline-variant/10 flex-1 flex flex-col min-h-0">
               <div className="mb-6">
-                <h3 className="text-lg font-bold font-headline">Courses taught</h3>
-                <p className="text-sm text-on-surface-variant font-medium mt-1">{periodCoursesSubtitle}</p>
+                <h3 className="text-lg font-bold font-headline">Groups taught</h3>
+                <p className="text-sm text-on-surface-variant font-medium mt-1">{periodGroupsSubtitle}</p>
               </div>
-              {coursesInPeriod.length > 0 ? (
+              {groupsInPeriod.length > 0 ? (
                 <ul className="space-y-2 overflow-y-auto flex-1 -mr-2 pr-2 max-h-[280px]">
-                  {coursesInPeriod.map((row) => (
-                    <li key={row.courseId}>
+                  {groupsInPeriod.map((row) => (
+                    <li key={row.groupId}>
                       <Link
-                        href={`/courses/${row.courseId}`}
+                        href={`/groups/${row.groupId}`}
                         className="flex items-center gap-3 rounded-2xl border border-outline-variant/10 bg-surface-container-low/40 hover:bg-surface-container-low transition-colors px-4 py-3 group"
                       >
                         <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
-                          <span className="material-symbols-outlined text-xl">menu_book</span>
+                          <span className="material-symbols-outlined text-xl">groups</span>
                         </div>
                         <div className="min-w-0 flex-1">
                           <p className="font-bold text-on-surface truncate">{row.name}</p>
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
-                            {row.groupName ? (
-                              <span className="text-xs text-on-surface-variant truncate">{row.groupName}</span>
-                            ) : null}
                             <span className="text-xs font-semibold text-on-surface-variant">
                               {row.lessonsCount} lesson{row.lessonsCount === 1 ? '' : 's'}
                             </span>
