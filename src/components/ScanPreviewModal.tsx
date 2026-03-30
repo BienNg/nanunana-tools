@@ -6,8 +6,103 @@ import type { ScanGoogleSheetResult, ScannedSampleRow, ScannedSheet } from '@/li
 
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
 
+const CELL_WARN_CLASS = 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90';
+
 function isEmptyCellValue(v: unknown): boolean {
   return String(v ?? '').trim().length === 0;
+}
+
+function normalizeTwoDigitYear(y: number): number {
+  if (y >= 100) return y;
+  return y >= 70 ? 1900 + y : 2000 + y;
+}
+
+/** Local calendar day; returns noon timestamp for stable ordering, or null if invalid. */
+function localDayTimestamp(y: number, month0: number, day: number): number | null {
+  const dt = new Date(y, month0, day);
+  if (dt.getFullYear() !== y || dt.getMonth() !== month0 || dt.getDate() !== day) return null;
+  return new Date(y, month0, day, 12, 0, 0, 0).getTime();
+}
+
+/**
+ * Parse sheet "Datum" cells (German dd.MM.yyyy common; also ISO / slash DMY).
+ * Returns a comparable local-day timestamp, or null if empty or not parseable.
+ */
+function parseSheetDatum(raw: string): number | null {
+  const s = String(raw).trim();
+  if (!s) return null;
+
+  const head = (s.split(/\s|T/, 1)[0] ?? '').trim();
+
+  const de = /^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/.exec(head);
+  if (de) {
+    const d = parseInt(de[1], 10);
+    const m = parseInt(de[2], 10);
+    const y = normalizeTwoDigitYear(parseInt(de[3], 10));
+    return localDayTimestamp(y, m - 1, d);
+  }
+
+  const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(head);
+  if (slash) {
+    const d = parseInt(slash[1], 10);
+    const m = parseInt(slash[2], 10);
+    const y = normalizeTwoDigitYear(parseInt(slash[3], 10));
+    return localDayTimestamp(y, m - 1, d);
+  }
+
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(head);
+  if (iso) {
+    const y = parseInt(iso[1], 10);
+    const m = parseInt(iso[2], 10);
+    const d = parseInt(iso[3], 10);
+    return localDayTimestamp(y, m - 1, d);
+  }
+
+  const parsed = Date.parse(s);
+  if (!Number.isNaN(parsed)) {
+    const dt = new Date(parsed);
+    return localDayTimestamp(dt.getFullYear(), dt.getMonth(), dt.getDate());
+  }
+
+  return null;
+}
+
+/**
+ * Session rows are in teaching order; each date should sit between the previous and next session dates.
+ * Unparseable dates are skipped (no chronology warning).
+ */
+function isDatumChronologyOutlier(rows: ScannedSampleRow[], rowIndex: number): boolean {
+  const n = rows.length;
+  if (n < 2) return false;
+
+  const cur = parseSheetDatum(rows[rowIndex].values['Datum'] ?? '');
+  if (cur === null) return false;
+
+  const prev =
+    rowIndex > 0 ? parseSheetDatum(rows[rowIndex - 1].values['Datum'] ?? '') : null;
+  const next =
+    rowIndex < n - 1 ? parseSheetDatum(rows[rowIndex + 1].values['Datum'] ?? '') : null;
+
+  if (rowIndex === 0) {
+    if (next === null) return false;
+    return cur > next;
+  }
+
+  if (rowIndex === n - 1) {
+    if (prev === null) return false;
+    return cur < prev;
+  }
+
+  if (prev !== null && next !== null) {
+    const lo = Math.min(prev, next);
+    const hi = Math.max(prev, next);
+    return cur < lo || cur > hi;
+  }
+
+  if (prev !== null && next === null) return cur < prev;
+  if (prev === null && next !== null) return cur > next;
+
+  return false;
 }
 
 /** Row index of first non-empty cell for this student, or -1 if they never appear. */
@@ -29,12 +124,15 @@ function isStudentEmptyViolation(
   return rowIndex > first && isEmptyCellValue(rows[rowIndex].values[studentName]);
 }
 
-function countEmptyCellsInSheet(sheet: ScannedSheet): number {
+function countSheetValidationIssues(sheet: ScannedSheet): number {
   const { sampleRows } = sheet;
   let n = 0;
   sampleRows.forEach((row, rIdx) => {
     for (const key of DATA_COLUMN_KEYS) {
       if (isEmptyCellValue(row.values[key])) n++;
+    }
+    if (!isEmptyCellValue(row.values['Datum']) && isDatumChronologyOutlier(sampleRows, rIdx)) {
+      n++;
     }
     for (const s of sheet.headers.students) {
       if (isStudentEmptyViolation(sampleRows, rIdx, s.name)) n++;
@@ -44,7 +142,7 @@ function countEmptyCellsInSheet(sheet: ScannedSheet): number {
 }
 
 function validationIssuesTooltip(count: number): string {
-  return `${count} validation ${count === 1 ? 'issue' : 'issues'} on this sheet (core columns empty, or student attendance missing after their first recorded session)`;
+  return `${count} validation ${count === 1 ? 'issue' : 'issues'} on this sheet (empty core cells, session date out of order vs neighbors, or student attendance missing after their first recorded session)`;
 }
 
 function studentAttendanceCellClass(
@@ -92,7 +190,7 @@ export default function ScanPreviewModal({
 
   const sheetIssueCounts = useMemo(() => {
     if (!isOpen || !scanResult || !mounted) return [];
-    return scanResult.sheets.map((s) => countEmptyCellsInSheet(s));
+    return scanResult.sheets.map((s) => countSheetValidationIssues(s));
   }, [isOpen, scanResult, mounted]);
 
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
@@ -217,62 +315,57 @@ export default function ScanPreviewModal({
                 </thead>
                 <tbody className="divide-y divide-gray-200 bg-white">
                   {activeSheet.sampleRows.length > 0 ? (
-                    activeSheet.sampleRows.map((row, rIdx) => (
+                    activeSheet.sampleRows.map((row, rIdx) => {
+                      const rows = activeSheet.sampleRows;
+                      const datumChrono = isDatumChronologyOutlier(rows, rIdx);
+                      const datumEmpty = isEmptyCellValue(row.values['Datum']);
+                      return (
                       <tr key={rIdx} className="hover:bg-gray-50">
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['Folien'])
-                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
-                              : ''
+                            isEmptyCellValue(row.values['Folien']) ? CELL_WARN_CLASS : ''
                           }`}
                         >
                           {row.values['Folien'] || ''}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['Datum'])
-                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
-                              : ''
+                            datumEmpty || datumChrono ? CELL_WARN_CLASS : ''
                           }`}
+                          title={
+                            !datumEmpty && datumChrono
+                              ? 'Date is out of sequence compared to the previous and next session (likely a typo)'
+                              : undefined
+                          }
                         >
                           {row.values['Datum'] || ''}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['von'])
-                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
-                              : ''
+                            isEmptyCellValue(row.values['von']) ? CELL_WARN_CLASS : ''
                           }`}
                         >
                           {row.values['von'] || ''}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['bis'])
-                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
-                              : ''
+                            isEmptyCellValue(row.values['bis']) ? CELL_WARN_CLASS : ''
                           }`}
                         >
                           {row.values['bis'] || ''}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['Lehrer'])
-                              ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
-                              : ''
+                            isEmptyCellValue(row.values['Lehrer']) ? CELL_WARN_CLASS : ''
                           }`}
                         >
                           {row.values['Lehrer'] || ''}
                         </td>
                         {activeSheet.headers.students.map((student, cIdx) => {
                           const cellText = row.values[student.name] || '';
-                          const warnEmpty = isStudentEmptyViolation(
-                            activeSheet.sampleRows,
-                            rIdx,
-                            student.name
-                          );
+                          const warnEmpty = isStudentEmptyViolation(rows, rIdx, student.name);
                           const tone = warnEmpty
-                            ? 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90'
+                            ? CELL_WARN_CLASS
                             : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
                           return (
                             <td key={cIdx} className={`px-4 py-2 ${tone}`}>
@@ -281,7 +374,8 @@ export default function ScanPreviewModal({
                           );
                         })}
                       </tr>
-                    ))
+                      );
+                    })
                   ) : (
                     <tr>
                       <td
