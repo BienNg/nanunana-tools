@@ -1,12 +1,17 @@
 import { runGoogleSheetSync } from '@/lib/sync/googleSheetSync';
+import type { SkippedRowsBySheet } from '@/lib/sync/googleSheetSync';
 
 export const runtime = 'nodejs';
 
 export async function POST(request: Request) {
   let url: string;
+  let skippedRowsBySheet: SkippedRowsBySheet = {};
   try {
-    const body = (await request.json()) as { url?: string };
+    const body = (await request.json()) as { url?: string; skippedRowsBySheet?: unknown };
     url = typeof body.url === 'string' ? body.url.trim() : '';
+    if (body.skippedRowsBySheet && typeof body.skippedRowsBySheet === 'object') {
+      skippedRowsBySheet = body.skippedRowsBySheet as SkippedRowsBySheet;
+    }
   } catch {
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
@@ -25,6 +30,7 @@ export async function POST(request: Request) {
 
       try {
         const result = await runGoogleSheetSync(url, {
+          skippedRowsBySheet,
           onProgress: (event) => {
             send({ event: 'progress', ...event });
           },

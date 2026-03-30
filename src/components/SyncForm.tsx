@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import ScanPreviewModal from './ScanPreviewModal';
-import type { ScanGoogleSheetResult } from '@/lib/sync/googleSheetSync';
+import type { ScanGoogleSheetResult, SkippedRowsBySheet } from '@/lib/sync/googleSheetSync';
 
 type SyncResult = { success: true; message: string } | { success: false; error: string };
 
@@ -175,7 +175,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     }
   };
 
-  const handleImport = async () => {
+  const handleImport = async (skippedRowsBySheet: SkippedRowsBySheet) => {
     if (!url) return;
     setIsImporting(true);
     setError('');
@@ -187,7 +187,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       const res = await fetch('/api/sync-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, skippedRowsBySheet }),
       });
 
       if (!res.ok) {

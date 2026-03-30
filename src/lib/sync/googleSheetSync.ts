@@ -270,6 +270,7 @@ async function syncOneCourseSheet(
   teacherCache: Map<string, string>,
   colorAttendance: AttendanceFromColor[][] | undefined,
   studentCache: Map<string, string>,
+  skippedPreviewRows: ReadonlySet<number>,
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ): Promise<{ ok: boolean; reason?: string }> {
   const sheetLabel = `[${sheetTitle}]`;
@@ -394,6 +395,7 @@ async function syncOneCourseSheet(
   const teachersForCourse = new Set<string>();
 
   let lessonSeq = 0;
+  let previewRowIndex = -1;
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
@@ -401,6 +403,8 @@ async function syncOneCourseSheet(
     const folien = colIndices.folien !== -1 ? row[colIndices.folien] : '';
     const inhalt = colIndices.inhalt !== -1 ? row[colIndices.inhalt] : '';
     if (!folien && !inhalt) continue;
+    previewRowIndex += 1;
+    if (skippedPreviewRows.has(previewRowIndex)) continue;
 
     const rawDate = colIndices.datum !== -1 ? row[colIndices.datum] : '';
     const parsedDate = parseSheetDate(rawDate != null ? String(rawDate) : null);
@@ -488,6 +492,9 @@ async function syncOneCourseSheet(
 export type SyncGoogleSheetResult =
   | { success: true; message: string }
   | { success: false; error: string };
+
+/** Key format: `${visibleOrderIndex}:${sheetTitle}`; value: preview row indices to skip. */
+export type SkippedRowsBySheet = Record<string, number[]>;
 
 export function columnIndexToA1Letter(index: number): string {
   let letter = '';
@@ -749,9 +756,13 @@ export async function scanGoogleSheet(
 
 export async function runGoogleSheetSync(
   url: string,
-  options?: { onProgress?: (event: SyncProgressEvent) => void | Promise<void> }
+  options?: {
+    onProgress?: (event: SyncProgressEvent) => void | Promise<void>;
+    skippedRowsBySheet?: SkippedRowsBySheet;
+  }
 ): Promise<SyncGoogleSheetResult> {
   const onProgress = options?.onProgress;
+  const skippedRowsBySheet = options?.skippedRowsBySheet ?? {};
   const supabase = getSupabaseAdmin();
   try {
     const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
@@ -898,6 +909,7 @@ export async function runGoogleSheetSync(
         teacherCache,
         item.colorAttendance,
         studentCache,
+        new Set(skippedRowsBySheet[`${item.slotIndex}:${item.title}`] ?? []),
         onProgress
       );
       if (result.ok) synced++;

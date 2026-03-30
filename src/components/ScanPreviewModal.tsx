@@ -6,6 +6,7 @@ import type {
   ScanGoogleSheetResult,
   ScannedSampleRow,
   ScannedSheet,
+  SkippedRowsBySheet,
 } from '@/lib/sync/googleSheetSync';
 import { parseSheetDatum } from '@/lib/sync/currentCourseSheet';
 
@@ -22,24 +23,47 @@ function isEmptyCellValue(v: unknown): boolean {
  * and strictly before the next row’s date (no duplicate session dates vs neighbors).
  * Unparseable dates are skipped (no chronology warning).
  */
-function isDatumChronologyOutlier(rows: ScannedSampleRow[], rowIndex: number): boolean {
+function previousActiveRowIndex(
+  rows: ScannedSampleRow[],
+  rowIndex: number,
+  skippedRows: ReadonlySet<number>
+): number {
+  for (let i = rowIndex - 1; i >= 0; i--) {
+    if (!skippedRows.has(i)) return i;
+  }
+  return -1;
+}
+
+function nextActiveRowIndex(rows: ScannedSampleRow[], rowIndex: number, skippedRows: ReadonlySet<number>): number {
+  for (let i = rowIndex + 1; i < rows.length; i++) {
+    if (!skippedRows.has(i)) return i;
+  }
+  return -1;
+}
+
+function isDatumChronologyOutlier(
+  rows: ScannedSampleRow[],
+  rowIndex: number,
+  skippedRows: ReadonlySet<number>
+): boolean {
+  if (skippedRows.has(rowIndex)) return false;
   const n = rows.length;
   if (n < 2) return false;
 
   const cur = parseSheetDatum(rows[rowIndex].values['Datum'] ?? '');
   if (cur === null) return false;
 
-  const prev =
-    rowIndex > 0 ? parseSheetDatum(rows[rowIndex - 1].values['Datum'] ?? '') : null;
-  const next =
-    rowIndex < n - 1 ? parseSheetDatum(rows[rowIndex + 1].values['Datum'] ?? '') : null;
+  const prevIdx = previousActiveRowIndex(rows, rowIndex, skippedRows);
+  const nextIdx = nextActiveRowIndex(rows, rowIndex, skippedRows);
+  const prev = prevIdx >= 0 ? parseSheetDatum(rows[prevIdx].values['Datum'] ?? '') : null;
+  const next = nextIdx >= 0 ? parseSheetDatum(rows[nextIdx].values['Datum'] ?? '') : null;
 
-  if (rowIndex === 0) {
+  if (prevIdx < 0) {
     if (next === null) return false;
     return cur >= next;
   }
 
-  if (rowIndex === n - 1) {
+  if (nextIdx < 0) {
     if (prev === null) return false;
     return cur <= prev;
   }
@@ -63,8 +87,13 @@ function studentCellHasAttendanceData(row: ScannedSampleRow, studentName: string
 }
 
 /** Row index of first cell with text or color attendance, or -1 if they never appear. */
-function studentFirstAttendanceRowIndex(rows: ScannedSampleRow[], studentName: string): number {
+function studentFirstAttendanceRowIndex(
+  rows: ScannedSampleRow[],
+  studentName: string,
+  skippedRows: ReadonlySet<number>
+): number {
   for (let r = 0; r < rows.length; r++) {
+    if (skippedRows.has(r)) continue;
     if (studentCellHasAttendanceData(rows[r], studentName)) return r;
   }
   return -1;
@@ -74,25 +103,28 @@ function studentFirstAttendanceRowIndex(rows: ScannedSampleRow[], studentName: s
 function isStudentEmptyViolation(
   rows: ScannedSampleRow[],
   rowIndex: number,
-  studentName: string
+  studentName: string,
+  skippedRows: ReadonlySet<number>
 ): boolean {
-  const first = studentFirstAttendanceRowIndex(rows, studentName);
+  if (skippedRows.has(rowIndex)) return false;
+  const first = studentFirstAttendanceRowIndex(rows, studentName, skippedRows);
   if (first < 0) return false;
   return rowIndex > first && !studentCellHasAttendanceData(rows[rowIndex], studentName);
 }
 
-function countSheetValidationIssues(sheet: ScannedSheet): number {
+function countSheetValidationIssues(sheet: ScannedSheet, skippedRows: ReadonlySet<number>): number {
   const { sampleRows } = sheet;
   let n = 0;
   sampleRows.forEach((row, rIdx) => {
+    if (skippedRows.has(rIdx)) return;
     for (const key of DATA_COLUMN_KEYS) {
       if (isEmptyCellValue(row.values[key])) n++;
     }
-    if (!isEmptyCellValue(row.values['Datum']) && isDatumChronologyOutlier(sampleRows, rIdx)) {
+    if (!isEmptyCellValue(row.values['Datum']) && isDatumChronologyOutlier(sampleRows, rIdx, skippedRows)) {
       n++;
     }
     for (const s of sheet.headers.students) {
-      if (isStudentEmptyViolation(sampleRows, rIdx, s.name)) n++;
+      if (isStudentEmptyViolation(sampleRows, rIdx, s.name, skippedRows)) n++;
     }
   });
   return n;
@@ -122,7 +154,7 @@ type ScanPreviewModalProps = {
   isOpen: boolean;
   scanResult: Extract<ScanGoogleSheetResult, { success: true }> | null;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: (skippedRowsBySheet: SkippedRowsBySheet) => void;
   isImporting: boolean;
   /** Latest non-database import step (spreadsheet load, tab fetch, etc.). */
   importProgressMessage?: string;
@@ -150,6 +182,8 @@ export default function ScanPreviewModal({
 }: ScanPreviewModalProps) {
   const [activeTab, setActiveTab] = useState(0);
   const [mounted, setMounted] = useState(false);
+  const [skippedRowsBySheet, setSkippedRowsBySheet] = useState<SkippedRowsBySheet>({});
+  const [openRowActionIndex, setOpenRowActionIndex] = useState<number | null>(null);
   const importLogScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -170,16 +204,25 @@ export default function ScanPreviewModal({
       (s) => cutoff === null || s.visibleOrderIndex <= cutoff
     );
     setActiveTab(firstImportable >= 0 ? firstImportable : 0);
+    setSkippedRowsBySheet({});
+    setOpenRowActionIndex(null);
   }, [isOpen, scanResult]);
+
+  useEffect(() => {
+    setOpenRowActionIndex(null);
+  }, [activeTab]);
+
+  const makeSheetKey = (sheet: ScannedSheet): string => `${sheet.visibleOrderIndex}:${sheet.title}`;
 
   const sheetIssueCounts = useMemo(() => {
     if (!isOpen || !scanResult || !mounted) return [];
     const cutoff = scanResult.currentCourseVisibleIndex;
     return scanResult.sheets.map((s) => {
       if (cutoff !== null && s.visibleOrderIndex > cutoff) return 0;
-      return countSheetValidationIssues(s);
+      const skipped = new Set(skippedRowsBySheet[makeSheetKey(s)] ?? []);
+      return countSheetValidationIssues(s, skipped);
     });
-  }, [isOpen, scanResult, mounted]);
+  }, [isOpen, scanResult, mounted, skippedRowsBySheet]);
 
   const currentCourseVisibleIndex = scanResult?.currentCourseVisibleIndex ?? null;
 
@@ -199,6 +242,22 @@ export default function ScanPreviewModal({
     activeSheet != null &&
     currentCourseVisibleIndex !== null &&
     activeSheet.visibleOrderIndex > currentCourseVisibleIndex;
+
+  const activeSkippedRows = activeSheet ? new Set(skippedRowsBySheet[makeSheetKey(activeSheet)] ?? []) : new Set<number>();
+
+  const toggleSkipRow = (sheet: ScannedSheet, rowIndex: number) => {
+    const key = makeSheetKey(sheet);
+    setSkippedRowsBySheet((prev) => {
+      const before = new Set(prev[key] ?? []);
+      if (before.has(rowIndex)) before.delete(rowIndex);
+      else before.add(rowIndex);
+      const next: SkippedRowsBySheet = { ...prev };
+      if (before.size === 0) delete next[key];
+      else next[key] = [...before].sort((a, b) => a - b);
+      return next;
+    });
+    setOpenRowActionIndex(null);
+  };
 
   return createPortal(
     <div
@@ -365,6 +424,7 @@ export default function ScanPreviewModal({
               <table className="w-full text-left text-sm text-gray-700">
                 <thead className="bg-gray-100 text-gray-600 font-semibold border-b border-gray-200">
                   <tr>
+                    <th className="px-3 py-3 border-r border-gray-200 whitespace-nowrap">Actions</th>
                     <th className="px-4 py-3 border-r border-gray-200 whitespace-nowrap">
                       Folien {activeSheet.headers.folien ? `(${activeSheet.headers.folien})` : ''}
                     </th>
@@ -391,23 +451,59 @@ export default function ScanPreviewModal({
                   {activeSheet.sampleRows.length > 0 ? (
                     activeSheet.sampleRows.map((row, rIdx) => {
                       const rows = activeSheet.sampleRows;
-                      const datumChrono = isDatumChronologyOutlier(rows, rIdx);
+                      const rowIsSkipped = activeSkippedRows.has(rIdx);
+                      const datumChrono = isDatumChronologyOutlier(rows, rIdx, activeSkippedRows);
                       const datumEmpty = isEmptyCellValue(row.values['Datum']);
                       return (
-                      <tr key={rIdx} className="hover:bg-gray-50">
+                      <tr key={rIdx} className={`hover:bg-gray-50 ${rowIsSkipped ? 'bg-gray-50/70 text-gray-400' : ''}`}>
+                        <td className="px-3 py-2 border-r border-gray-200 relative">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenRowActionIndex((prev) => (prev === rIdx ? null : rIdx))
+                            }
+                            disabled={busy}
+                            aria-haspopup="menu"
+                            aria-expanded={openRowActionIndex === rIdx}
+                            aria-label={`Actions for row ${rIdx + 1}`}
+                            className="inline-flex items-center rounded border border-gray-300 bg-white px-1.5 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                          >
+                            <span className="material-symbols-outlined text-base leading-none">more_vert</span>
+                          </button>
+                          {openRowActionIndex === rIdx ? (
+                            <div
+                              role="menu"
+                              className="absolute left-0 top-[calc(100%+0.25rem)] z-20 min-w-[10rem] rounded-md border border-gray-200 bg-white p-1 shadow-lg"
+                            >
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => toggleSkipRow(activeSheet, rIdx)}
+                                disabled={busy}
+                                className={`flex w-full items-center rounded px-2 py-1.5 text-left text-xs font-medium transition-colors disabled:opacity-50 ${
+                                  rowIsSkipped
+                                    ? 'text-gray-700 hover:bg-gray-100'
+                                    : 'text-amber-900 hover:bg-amber-50'
+                                }`}
+                              >
+                                {rowIsSkipped ? 'Undo skip row' : 'Skip row'}
+                              </button>
+                            </div>
+                          ) : null}
+                        </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['Folien']) ? CELL_WARN_CLASS : ''
+                            !rowIsSkipped && isEmptyCellValue(row.values['Folien']) ? CELL_WARN_CLASS : ''
                           }`}
                         >
                           {row.values['Folien'] || ''}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            datumEmpty || datumChrono ? CELL_WARN_CLASS : ''
+                            !rowIsSkipped && (datumEmpty || datumChrono) ? CELL_WARN_CLASS : ''
                           }`}
                           title={
-                            !datumEmpty && datumChrono
+                            !rowIsSkipped && !datumEmpty && datumChrono
                               ? 'Date must be strictly after the previous session and strictly before the next (same calendar day as a neighbor is not allowed; likely a typo)'
                               : undefined
                           }
@@ -416,33 +512,33 @@ export default function ScanPreviewModal({
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['von']) ? CELL_WARN_CLASS : ''
+                            !rowIsSkipped && isEmptyCellValue(row.values['von']) ? CELL_WARN_CLASS : ''
                           }`}
                         >
                           {row.values['von'] || ''}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['bis']) ? CELL_WARN_CLASS : ''
+                            !rowIsSkipped && isEmptyCellValue(row.values['bis']) ? CELL_WARN_CLASS : ''
                           }`}
                         >
                           {row.values['bis'] || ''}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            isEmptyCellValue(row.values['Lehrer']) ? CELL_WARN_CLASS : ''
+                            !rowIsSkipped && isEmptyCellValue(row.values['Lehrer']) ? CELL_WARN_CLASS : ''
                           }`}
                         >
                           {row.values['Lehrer'] || ''}
                         </td>
                         {activeSheet.headers.students.map((student, cIdx) => {
                           const cellText = row.values[student.name] || '';
-                          const warnEmpty = isStudentEmptyViolation(rows, rIdx, student.name);
+                          const warnEmpty = isStudentEmptyViolation(rows, rIdx, student.name, activeSkippedRows);
                           const tone = warnEmpty
                             ? CELL_WARN_CLASS
                             : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
                           return (
-                            <td key={cIdx} className={`px-4 py-2 ${tone}`}>
+                            <td key={cIdx} className={`px-4 py-2 ${rowIsSkipped ? 'border-r border-gray-200' : tone}`}>
                               {cellText}
                             </td>
                           );
@@ -453,7 +549,7 @@ export default function ScanPreviewModal({
                   ) : (
                     <tr>
                       <td
-                        colSpan={5 + activeSheet.headers.students.length}
+                        colSpan={6 + activeSheet.headers.students.length}
                         className="px-4 py-8 text-center text-gray-500"
                       >
                         No data rows found.
@@ -501,7 +597,7 @@ export default function ScanPreviewModal({
           ) : null}
           <button
             type="button"
-            onClick={onConfirm}
+            onClick={() => onConfirm(skippedRowsBySheet)}
             disabled={busy || hasImportBlockingSheetIssues}
             title={
               hasImportBlockingSheetIssues && !busy
