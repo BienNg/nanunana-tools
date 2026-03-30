@@ -405,6 +405,13 @@ export default async function TeacherDetailsPage({
           </div>
           
           <div className="bg-surface-container-lowest p-6 rounded-3xl border border-outline-variant/5 group hover:bg-primary-fixed transition-colors">
+            <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1 group-hover:text-primary">Lessons Scheduled</p>
+            <div className="flex items-baseline gap-2">
+              <span className="text-3xl font-extrabold font-headline">{totalLessons}</span>
+            </div>
+          </div>
+          
+          <div className="bg-surface-container-lowest p-6 rounded-3xl border border-outline-variant/5 group hover:bg-primary-fixed transition-colors">
             <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1 group-hover:text-primary">Total Hours</p>
             <div className="flex items-baseline gap-2">
               <span className="text-3xl font-extrabold font-headline">{totalHoursDisplay}</span>
@@ -423,13 +430,6 @@ export default async function TeacherDetailsPage({
             <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1 group-hover:text-primary">Avg. Attendance</p>
             <div className="flex items-baseline gap-2">
               <span className="text-3xl font-extrabold font-headline text-tertiary">{avgAttendance}%</span>
-            </div>
-          </div>
-          
-          <div className="bg-surface-container-lowest p-6 rounded-3xl border border-outline-variant/5 group hover:bg-primary-fixed transition-colors">
-            <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1 group-hover:text-primary">Lessons Scheduled</p>
-            <div className="flex items-baseline gap-2">
-              <span className="text-3xl font-extrabold font-headline">{totalLessons}</span>
             </div>
           </div>
         </div>
