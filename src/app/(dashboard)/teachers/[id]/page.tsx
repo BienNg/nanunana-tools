@@ -241,12 +241,12 @@ export default async function TeacherDetailsPage({
     : 0;
 
   // Hours trend: always last 6 calendar months (UTC), independent of month filter
-  const hoursByYearMonth: Record<string, number> = {};
+  const minutesByYearMonth: Record<string, number> = {};
   for (const lesson of allTeacherLessons) {
     const ym = yearMonthFromLessonDate(lesson.date);
     if (!ym) continue;
-    hoursByYearMonth[ym] =
-      (hoursByYearMonth[ym] ?? 0) + (lesson.calculatedDurationMinutes || 0) / 60;
+    minutesByYearMonth[ym] =
+      (minutesByYearMonth[ym] ?? 0) + (lesson.calculatedDurationMinutes || 0);
   }
 
   const trendMonthBuckets: { ym: string; label: string }[] = [];
@@ -259,11 +259,15 @@ export default async function TeacherDetailsPage({
     trendMonthBuckets.push({ ym, label });
   }
 
-  const trendData = trendMonthBuckets.map(({ ym, label }) => ({
-    ym,
-    label,
-    hours: hoursByYearMonth[ym] ?? 0,
-  }));
+  const trendData = trendMonthBuckets.map(({ ym, label }) => {
+    const minutes = minutesByYearMonth[ym] ?? 0;
+    return {
+      ym,
+      label,
+      minutes,
+      hours: minutes / 60,
+    };
+  });
 
   const peakHours = Math.max(0, ...trendData.map((d) => d.hours));
   const yAxisMax = Math.max(1, Math.ceil(peakHours));
@@ -434,12 +438,12 @@ export default async function TeacherDetailsPage({
                   <div className="h-px bg-outline-variant/20" />
                 </div>
                 <div className="relative h-full flex items-end justify-around gap-2 sm:gap-3 px-0 sm:px-1 pt-2">
-                  {trendData.map(({ ym, label, hours }) => {
+                  {trendData.map(({ ym, label, minutes, hours }) => {
                     const barTrackPx = 200;
                     const rawBarPx = yAxisMax > 0 ? (hours / yAxisMax) * barTrackPx : 0;
                     const barPx = hours > 0 ? Math.max(rawBarPx, 10) : 0;
-                    const hoursLabel =
-                      hours >= 10 ? Math.round(hours).toString() : (Math.round(hours * 10) / 10).toString();
+                    const hoursLabel = hoursDisplayFromMinutes(minutes);
+                    const hoursTitle = `${hoursLabel} hours`;
 
                     return (
                       <div
@@ -453,7 +457,7 @@ export default async function TeacherDetailsPage({
                           {hours > 0 ? (
                             <span
                               className="text-[11px] font-bold tabular-nums text-on-surface mb-1.5 leading-none"
-                              title={`${hoursLabel} hours`}
+                              title={hoursTitle}
                             >
                               {hoursLabel}
                               <span className="text-on-surface-variant font-semibold">h</span>
@@ -466,7 +470,7 @@ export default async function TeacherDetailsPage({
                           <div
                             className="w-full rounded-t-xl bg-primary mt-auto transition-[height] duration-300 shadow-sm shadow-primary/25"
                             style={{ height: barPx }}
-                            title={`${hoursLabel} hours`}
+                            title={hoursTitle}
                           />
                         </div>
                         <span className="text-[11px] font-bold text-on-surface-variant shrink-0 tracking-wide">
