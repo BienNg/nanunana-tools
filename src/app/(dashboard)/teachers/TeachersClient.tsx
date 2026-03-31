@@ -54,7 +54,7 @@ export default function TeachersClient({ initialTeachers }: { initialTeachers: T
             {filteredTeachers.map((teacher) => (
               <tr 
                 key={teacher.id} 
-                className="hover:bg-slate-50/50 transition-colors group cursor-pointer"
+                className="hover:bg-slate-50/50 transition-colors cursor-pointer"
               >
                 <td className="py-4 px-6">
                   <div className="flex items-center gap-3">
@@ -67,7 +67,7 @@ export default function TeachersClient({ initialTeachers }: { initialTeachers: T
                 <td className="py-4 px-6">
                   <Link 
                     href={`/teachers/${teacher.id}`}
-                    className="inline-flex items-center text-sm font-medium text-primary hover:text-primary/80 opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="inline-flex items-center text-sm font-medium text-primary hover:text-primary/80"
                   >
                     View Dashboard
                     <span className="material-symbols-outlined text-sm ml-1">arrow_forward</span>
