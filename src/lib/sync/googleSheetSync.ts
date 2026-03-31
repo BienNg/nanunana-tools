@@ -82,8 +82,30 @@ function attendanceStatusFromCellData(cell: sheets_v4.Schema$CellData | undefine
   return attendanceStatusFromRgb(rgb.r, rgb.g, rgb.b);
 }
 
+function toIsoDateFromGoogleSerial(serial: number): string {
+  // Google Sheets date serial uses 1899-12-30 as day 0.
+  const baseUtc = Date.UTC(1899, 11, 30);
+  const wholeDays = Math.floor(serial);
+  const dt = new Date(baseUtc + wholeDays * 86400000);
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(dt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function dateTextFromGoogleCell(cell: sheets_v4.Schema$CellData): string | null {
+  const num = cell.effectiveValue?.numberValue;
+  if (num == null || !Number.isFinite(num)) return null;
+  const fmtType =
+    cell.effectiveFormat?.numberFormat?.type ?? cell.userEnteredFormat?.numberFormat?.type ?? null;
+  if (fmtType !== 'DATE' && fmtType !== 'DATE_TIME') return null;
+  return toIsoDateFromGoogleSerial(num);
+}
+
 function cellStringFromCellData(cell: sheets_v4.Schema$CellData | undefined | null): string {
   if (!cell) return '';
+  const dateText = dateTextFromGoogleCell(cell);
+  if (dateText) return dateText;
   if (cell.formattedValue != null && cell.formattedValue !== '') return String(cell.formattedValue);
   const ev = cell.effectiveValue;
   if (!ev) return '';
@@ -325,14 +347,14 @@ function parseSheetDate(raw: string | undefined | null): string | null {
   return null;
 }
 
-type SessionDateSkipReason = 'future' | 'invalid_date' | null;
+type SessionDateSkipReason = 'future' | null;
 
 function classifySessionDateSkip(
   parsedDate: string | null,
   hasDatumColumn: boolean,
   now: Date
 ): SessionDateSkipReason {
-  if (hasDatumColumn && !parsedDate) return 'invalid_date';
+  void hasDatumColumn;
   if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, now)) return 'future';
   return null;
 }
@@ -342,7 +364,7 @@ function isCourseSyncCompleted(
   autoSkippedInvalidDateRows: number
 ): boolean {
   // Completion is based only on future session skips.
-  // User-selected and invalid-date skips do not affect sync_completed.
+  // User-selected rows and date-quality warnings do not affect sync_completed.
   void autoSkippedInvalidDateRows;
   return autoSkippedFutureRows === 0;
 }
@@ -377,7 +399,7 @@ function analyzeRawSheetSessionSkips(
   const seenFolien = new Set<string>();
   let previewRowIndex = -1;
   let autoSkippedFutureRows = 0;
-  let autoSkippedInvalidDateRows = 0;
+  const autoSkippedInvalidDateRows = 0;
 
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
@@ -400,10 +422,6 @@ function analyzeRawSheetSessionSkips(
     const reason = classifySessionDateSkip(parsedDate, colIndices.datum !== -1, now);
     if (reason === 'future') {
       autoSkippedFutureRows += 1;
-      continue;
-    }
-    if (reason === 'invalid_date') {
-      autoSkippedInvalidDateRows += 1;
       continue;
     }
   }
@@ -1058,7 +1076,7 @@ async function syncOneCourseSheet(
   let skippedSessionRows = 0;
   let userSkippedSessionRows = 0;
   let autoSkippedFutureRows = 0;
-  let autoSkippedInvalidDateRows = 0;
+  const autoSkippedInvalidDateRows = 0;
   const seenFolien = new Set<string>();
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
@@ -1111,12 +1129,6 @@ async function syncOneCourseSheet(
     }
     const teacherCell =
       canonicalLessonLabels.length > 0 ? [...new Set(canonicalLessonLabels)].join(', ') : null;
-
-    if (dateSkipReason === 'invalid_date') {
-      skippedSessionRows += 1;
-      autoSkippedInvalidDateRows += 1;
-      continue;
-    }
 
     sessions.push({
       gridRowIndex: i,
@@ -1532,17 +1544,13 @@ function analyzeScannedSheetSessionsForImport(sheet: ScannedSheet, now: Date): S
   const hasDatumColumn = Boolean(sheet.headers.datum);
   const eligibleRowIndices: number[] = [];
   let autoSkippedFutureRows = 0;
-  let autoSkippedInvalidDateRows = 0;
+  const autoSkippedInvalidDateRows = 0;
   for (let rIdx = 0; rIdx < sheet.sampleRows.length; rIdx++) {
     const row = sheet.sampleRows[rIdx];
     const parsedDate = parseSheetDate(row.values['Datum'] ?? '');
     const reason = classifySessionDateSkip(parsedDate, hasDatumColumn, now);
     if (reason === 'future') {
       autoSkippedFutureRows += 1;
-      continue;
-    }
-    if (reason === 'invalid_date') {
-      autoSkippedInvalidDateRows += 1;
       continue;
     }
     eligibleRowIndices.push(rIdx);
@@ -1672,6 +1680,27 @@ function buildReimportDiffForSheet(
       remainingDbIndices.delete(hit);
     }
   }
+  // Pass 2: match by Folien/slide_id when exact row equality fails (edited session content).
+  for (const rIdx of eligible) {
+    if (pairedDbIndexByRow.has(rIdx)) continue;
+    const row = sheet.sampleRows[rIdx];
+    const folienKey = normalizeFolienKey(row.values['Folien']);
+    if (!folienKey) continue;
+    const candidates: number[] = [];
+    for (const dbIdx of remainingDbIndices) {
+      const lesson = dbLessons[dbIdx];
+      if (!lesson) continue;
+      if (normalizeFolienKey(lesson.slide_id) === folienKey) {
+        candidates.push(dbIdx);
+      }
+    }
+    if (candidates.length === 1) {
+      const dbIdx = candidates[0]!;
+      pairedDbIndexByRow.set(rIdx, dbIdx);
+      remainingDbIndices.delete(dbIdx);
+    }
+  }
+  // Pass 3: positional fallback for any still-unmatched rows.
   const fallbackDbIndices = [...remainingDbIndices].sort((a, b) => a - b);
   let fallbackCursor = 0;
   for (const rIdx of eligible) {
@@ -2220,7 +2249,7 @@ export async function scanGoogleSheet(
                 diff.syncCompletedMismatch = true;
                 diff.syncCompletedMismatchReason = analyzedSyncCompleted
                   ? 'Database says this course is not completed, but the current Review Import analysis marks it completed.'
-                  : `Database says this course is completed, but the current Review Import analysis marks it not completed (${scannedSessionAnalysis.autoSkippedFutureRows} future + ${scannedSessionAnalysis.autoSkippedInvalidDateRows} invalid date row(s) are skipped).`;
+                  : `Database says this course is completed, but the current Review Import analysis marks it not completed (${scannedSessionAnalysis.autoSkippedFutureRows} future row(s) are skipped).`;
               }
               if (!dbSyncCompleted && analyzedSyncCompleted) {
                 diff.pendingCompletionSync = true;

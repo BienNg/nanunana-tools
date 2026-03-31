@@ -33,6 +33,8 @@ const HINT_EMPTY_FOLIEN =
   'This cell is empty. Add the slide or lesson label so this row is complete.';
 const HINT_EMPTY_DATUM =
   'No date here yet. Add the lesson date when you can — it helps keep sessions in the right order.';
+const HINT_INVALID_DATUM =
+  'This date format is not recognized. Use a real date (for example 11.03.2026 or 2026-03-11) so this lesson is scheduled correctly.';
 const HINT_DATUM_ORDER =
   'This date doesn’t sit in order with the rows above and below. Each lesson should be strictly after the previous session and strictly before the next (same day as a neighbor can block import).';
 const HINT_EMPTY_VON =
@@ -49,12 +51,14 @@ function datumCellHoverTitle(
   rowIsSkipped: boolean,
   rowOutsideValidation: boolean,
   datumEmpty: boolean,
+  datumInvalid: boolean,
   datumChrono: boolean
 ): string | undefined {
   if (rowIsSkipped || rowOutsideValidation) return undefined;
-  if (!datumEmpty && !datumChrono) return undefined;
+  if (!datumEmpty && !datumInvalid && !datumChrono) return undefined;
   const parts: string[] = [];
   if (datumEmpty) parts.push(HINT_EMPTY_DATUM);
+  if (datumInvalid) parts.push(HINT_INVALID_DATUM);
   if (datumChrono) parts.push(HINT_DATUM_ORDER);
   return parts.join(' ');
 }
@@ -87,7 +91,7 @@ function formatDatumForDisplay(raw: string): string {
 /**
  * Session rows are in teaching order; each date must be strictly after the previous row’s date
  * and strictly before the next row’s date (no duplicate session dates vs neighbors).
- * Unparseable dates are skipped (no chronology warning).
+ * Unparseable dates are warning-only (no chronology warning).
  * Future session rows (Datum after local today) are excluded like skipped rows.
  */
 function rowOutsideValidationScope(
@@ -237,6 +241,13 @@ function countSheetValidationIssues(
     for (const key of DATA_COLUMN_KEYS) {
       if (!validationInReimportScope(sheet, rIdx, key)) continue;
       if (isEmptyCellValue(row.values[key])) n++;
+    }
+    if (
+      !isEmptyCellValue(row.values['Datum']) &&
+      parseSheetDatum(row.values['Datum'] ?? '') === null &&
+      validationInReimportScope(sheet, rIdx, 'Datum')
+    ) {
+      n++;
     }
     if (
       !isEmptyCellValue(row.values['Datum']) &&
@@ -939,6 +950,7 @@ export default function ScanPreviewModal({
                         previewValidationNow
                       );
                       const datumEmpty = isEmptyCellValue(row.values['Datum']);
+                      const datumInvalid = !datumEmpty && parseSheetDatum(row.values['Datum'] ?? '') === null;
                       const isNewReimportSession = Boolean(
                         activeSheet.reimportDiff?.newSessionRowIndices.includes(rIdx)
                       );
@@ -960,8 +972,14 @@ export default function ScanPreviewModal({
                         !rowOutsideValidation &&
                         datumChronoInReimportScope(activeSheet, rIdx) &&
                         !datumEmpty &&
+                        !datumInvalid &&
                         datumChrono;
-                      const warnDatum = warnDatumEmpty || warnDatumChrono;
+                      const warnDatumInvalid =
+                        !rowIsSkipped &&
+                        !rowOutsideValidation &&
+                        validationInReimportScope(activeSheet, rIdx, 'Datum') &&
+                        datumInvalid;
+                      const warnDatum = warnDatumEmpty || warnDatumInvalid || warnDatumChrono;
                       const warnVon =
                         !rowIsSkipped &&
                         !rowOutsideValidation &&
@@ -1069,6 +1087,7 @@ export default function ScanPreviewModal({
                                   rowIsSkipped,
                                   rowOutsideValidation,
                                   warnDatumEmpty,
+                                  warnDatumInvalid,
                                   warnDatumChrono
                                 )
                               : reimportChangeHintText(activeSheet, rIdx, 'Datum')
