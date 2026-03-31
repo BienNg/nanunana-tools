@@ -10,6 +10,7 @@ import { parseWorkbookClassTypeInput } from '@/lib/courseDuration';
 
 type AttendanceFromColor = 'Present' | 'Absent' | null;
 type SheetRow = string[];
+const LESSON_SYNC_CONCURRENCY = 4;
 
 type LoadedVisibleSheet = {
   title: string;
@@ -38,6 +39,28 @@ function canonicalGoogleSpreadsheetUrl(spreadsheetId: string): string {
 
 function googleSheetTabUrl(spreadsheetId: string, sheetId: number): string {
   return `${canonicalGoogleSpreadsheetUrl(spreadsheetId)}#gid=${sheetId}`;
+}
+
+async function runWithConcurrencyLimit(
+  total: number,
+  limit: number,
+  worker: (index: number) => Promise<void>
+): Promise<void> {
+  if (total <= 0) return;
+  const safeLimit = Math.max(1, Math.min(limit, total));
+  let nextIndex = 0;
+
+  const runOne = async () => {
+    for (;;) {
+      const idx = nextIndex;
+      if (idx >= total) return;
+      nextIndex += 1;
+      await worker(idx);
+    }
+  };
+
+  const workers = Array.from({ length: safeLimit }, () => runOne());
+  await Promise.all(workers);
 }
 
 /** PostgREST when the column was never migrated / not in schema cache yet. */
@@ -1260,7 +1283,7 @@ async function syncOneCourseSheet(
     dbLessons.length = sessions.length;
   }
 
-  for (let sIdx = 0; sIdx < sessions.length; sIdx++) {
+  await runWithConcurrencyLimit(sessions.length, LESSON_SYNC_CONCURRENCY, async (sIdx) => {
     const sess = sessions[sIdx];
     const row = rows[sess.gridRowIndex];
     if (!row) {
@@ -1348,7 +1371,7 @@ async function syncOneCourseSheet(
         onProgress
       );
     }
-  }
+  });
 
   await syncCourseTeachers(
     supabase,
@@ -3100,7 +3123,7 @@ async function syncOneScannedCourseSheet(
     dbLessons.length = sessions.length;
   }
 
-  for (let sIdx = 0; sIdx < sessions.length; sIdx++) {
+  await runWithConcurrencyLimit(sessions.length, LESSON_SYNC_CONCURRENCY, async (sIdx) => {
     const sess = sessions[sIdx];
     const row = scannedSheet.sampleRows[sess.gridRowIndex];
     if (!row) throw new Error(`${sheetLabel} lessons — internal row lookup failed for session index ${sIdx + 1}`);
@@ -3174,7 +3197,7 @@ async function syncOneScannedCourseSheet(
         onProgress
       );
     }
-  }
+  });
 
   await syncCourseTeachers(
     supabase,

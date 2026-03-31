@@ -144,6 +144,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [previewScanError, setPreviewScanError] = useState('');
   const [importDbLog, setImportDbLog] = useState<string[]>([]);
+  const [importRequiresResync, setImportRequiresResync] = useState(false);
 
   const handleScan = async () => {
     if (!url && !file) return;
@@ -154,6 +155,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       const finalResult = await streamSheetScan({ url, file }, setProgressMessage);
       if (finalResult?.success) {
         setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
+        setImportRequiresResync(false);
         setIsModalOpen(true);
       } else if (finalResult) {
         setError((finalResult as { success: false; error: string }).error || 'Failed to scan');
@@ -179,6 +181,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       });
       if (finalResult?.success) {
         setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
+        setImportRequiresResync(false);
       } else if (finalResult) {
         setPreviewScanError((finalResult as { success: false; error: string }).error || 'Failed to scan');
       } else {
@@ -284,6 +287,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       }
 
       if (finalResult?.success) {
+        setImportRequiresResync(true);
         router.refresh();
         onSyncComplete();
       } else if (finalResult) {
@@ -382,6 +386,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
         isResyncing={isScanning}
         resyncProgressMessage={progressMessage}
         resyncError={previewScanError}
+        importRequiresResync={importRequiresResync}
       />
     </>
   );

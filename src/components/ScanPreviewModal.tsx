@@ -383,6 +383,8 @@ type ScanPreviewModalProps = {
   isResyncing?: boolean;
   resyncProgressMessage?: string;
   resyncError?: string;
+  /** Import finished once; require a fresh resync before allowing another import. */
+  importRequiresResync?: boolean;
 };
 
 type HoverHint = { text: string; x: number; y: number } | null;
@@ -399,6 +401,7 @@ export default function ScanPreviewModal({
   isResyncing = false,
   resyncProgressMessage = '',
   resyncError = '',
+  importRequiresResync = false,
 }: ScanPreviewModalProps) {
   const [activeTab, setActiveTab] = useState(0);
   const [mounted, setMounted] = useState(false);
@@ -526,6 +529,7 @@ export default function ScanPreviewModal({
   const requiresManualWorkbookClassType = scanResult?.workbookClassType == null;
 
   const confirmImportBlocked =
+    importRequiresResync ||
     hasImportBlockingSheetIssues ||
     resolvedWorkbookClassType === null ||
     (hasNoDetectedImportChanges && !hasManualImportSelections);
@@ -915,6 +919,19 @@ export default function ScanPreviewModal({
               <p className="mt-1 text-xs text-sky-900">
                 This import matches what is already in the database for the importable tabs. There is nothing new to
                 apply, so import is disabled.
+              </p>
+            </section>
+          ) : null}
+          {importRequiresResync && !isImporting && !isResyncing ? (
+            <section
+              className="mb-4 rounded-md border border-slate-300 bg-slate-50/90 px-4 py-3"
+              role="status"
+              aria-live="polite"
+            >
+              <h3 className="text-sm font-semibold text-slate-900">Import completed</h3>
+              <p className="mt-1 text-xs text-slate-700">
+                Confirm &amp; Import is disabled after a completed import. Use <strong>Resync</strong> to fetch the
+                latest sheet state before importing again.
               </p>
             </section>
           ) : null}
@@ -1331,6 +1348,8 @@ export default function ScanPreviewModal({
             title={
               !busy && resolvedWorkbookClassType === null
                 ? 'Select a class type (or fix the workbook title and resync).'
+                : !busy && importRequiresResync
+                  ? 'Import completed. Resync first before importing again.'
                 : !busy && hasNoDetectedImportChanges
                   ? 'No updates were found for importable tabs. Change the sheet and resync first.'
                 : !busy && hasImportBlockingSheetIssues
