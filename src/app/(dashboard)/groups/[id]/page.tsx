@@ -13,7 +13,7 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
   // Fetch group details
   const { data: group } = await supabase
     .from('groups')
-    .select('id, name')
+    .select('id, name, sync_completed')
     .eq('id', id)
     .single();
 
@@ -58,9 +58,12 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
             <h2 className="text-4xl font-extrabold text-on-surface tracking-tight font-headline">
               {group.name}
             </h2>
-            <p className="text-on-surface-variant mt-1 font-medium">
-              {courses?.length || 0} {(courses?.length === 1) ? 'Course' : 'Courses'}
-            </p>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <p className="text-on-surface-variant font-medium">
+                {courses?.length || 0} {(courses?.length === 1) ? 'Course' : 'Courses'}
+              </p>
+              <SyncCompletionPill completed={group.sync_completed ?? false} />
+            </div>
           </div>
         </div>
       </div>
