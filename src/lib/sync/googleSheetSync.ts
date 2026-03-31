@@ -21,6 +21,11 @@ type LoadedVisibleSheet = {
 
 type LoadedWorkbook = {
   sourceKey: string;
+  /**
+   * Google spreadsheet id for `groups.spreadsheet_id` lookup.
+   * Set when this workbook is tied to a Google file (API load or XLSX export fallback), else null.
+   */
+  groupSpreadsheetId: string | null;
   workbookTitle: string;
   /** Workbook URL (`…/spreadsheets/d/{id}/edit`); null for file-only imports. */
   spreadsheetUrl: string | null;
@@ -303,9 +308,20 @@ function parseSheetDate(raw: string | undefined | null): string | null {
 export type WorkbookClassType = GroupClassType;
 
 function detectClassType(title: string): WorkbookClassType | null {
-  if (title.includes('Online_DE')) return 'Online_DE';
-  if (title.includes('Online_VN')) return 'Online_VN';
-  if (title.includes('Offline')) return 'Offline';
+  const normalized = title.trim();
+  if (!normalized) return null;
+
+  if (/\bonline_de\b/i.test(normalized)) return 'Online_DE';
+  if (/\bonline_vn\b/i.test(normalized)) return 'Online_VN';
+  if (/\boffline\b/i.test(normalized)) return 'Offline';
+
+  // Single-letter class types can appear as standalone tokens or prefixes like "M22".
+  const hasShortClassToken = (token: 'm' | 'a' | 'p'): boolean =>
+    new RegExp(`(^|[^a-z0-9])${token}(?=\\d|[^a-z0-9]|$)`, 'i').test(normalized);
+  if (hasShortClassToken('m')) return 'M';
+  if (hasShortClassToken('a')) return 'A';
+  if (hasShortClassToken('p')) return 'P';
+
   return null;
 }
 
@@ -563,11 +579,6 @@ async function syncCourseTeachers(
   sheetLabel: string,
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ) {
-  await onProgress?.({
-    type: 'db',
-    message: `${sheetLabel} course_teachers — delete existing links for course`,
-  });
-  await supabase.from('course_teachers').delete().eq('course_id', courseId);
   const namesByKey = new Map<string, string>();
   for (const name of teacherNames) {
     const key = normalizePersonNameKey(name);
@@ -575,9 +586,7 @@ async function syncCourseTeachers(
     namesByKey.set(key, name);
   }
   const names = [...namesByKey.values()];
-  if (names.length === 0) return;
 
-  // Check in memory first — only names truly missing from the normalized cache need a DB insert.
   const newNames = names.filter((n) => !teacherCache.has(normalizePersonNameKey(n)));
 
   if (newNames.length > 0) {
@@ -590,7 +599,6 @@ async function syncCourseTeachers(
       .insert(newNames.map((name) => ({ name })))
       .select('id, name');
 
-    // Update the cache so subsequent courses don't re-insert the same teachers.
     (inserted ?? []).forEach((t: { id: string; name: string }) => {
       const key = normalizePersonNameKey(t.name);
       if (!key) return;
@@ -599,16 +607,160 @@ async function syncCourseTeachers(
     });
   }
 
-  const links = names
-    .map((n) => ({ course_id: courseId, teacher_id: teacherCache.get(normalizePersonNameKey(n)) }))
-    .filter((l): l is { course_id: string; teacher_id: string } => Boolean(l.teacher_id));
+  const desiredTeacherIds = new Set<string>();
+  for (const n of names) {
+    const tid = teacherCache.get(normalizePersonNameKey(n));
+    if (tid) desiredTeacherIds.add(tid);
+  }
 
-  if (links.length > 0) {
+  const { data: existingLinks, error: linkSelErr } = await supabase
+    .from('course_teachers')
+    .select('teacher_id')
+    .eq('course_id', courseId);
+  if (linkSelErr) throw new Error(linkSelErr.message);
+  const existingIds = new Set((existingLinks ?? []).map((r) => r.teacher_id as string));
+
+  const toRemove = [...existingIds].filter((id) => !desiredTeacherIds.has(id));
+  const toAdd = [...desiredTeacherIds].filter((id) => !existingIds.has(id));
+
+  if (toRemove.length > 0) {
     await onProgress?.({
       type: 'db',
-      message: `${sheetLabel} course_teachers — insert ${links.length} link(s)`,
+      message: `${sheetLabel} course_teachers — remove ${toRemove.length} link(s)`,
     });
-    await supabase.from('course_teachers').insert(links);
+    await supabase.from('course_teachers').delete().eq('course_id', courseId).in('teacher_id', toRemove);
+  }
+  if (toAdd.length > 0) {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} course_teachers — add ${toAdd.length} link(s)`,
+    });
+    await supabase
+      .from('course_teachers')
+      .insert(toAdd.map((teacher_id) => ({ course_id: courseId, teacher_id })));
+  }
+}
+
+type SheetParsedSession = {
+  gridRowIndex: number;
+  folien: string;
+  parsedDate: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  teacherCell: string | null;
+};
+
+function sortDbLessonsForSync(
+  lessons: { id: string; date: string | null; start_time: string | null }[]
+): void {
+  lessons.sort((a, b) => {
+    const da = a.date as string | null | undefined;
+    const db = b.date as string | null | undefined;
+    if (!da && !db) {
+      /* both null */
+    } else if (!da) return 1;
+    else if (!db) return -1;
+    else if (da !== db) return String(da).localeCompare(String(db));
+
+    const ta = a.start_time != null ? String(a.start_time) : '';
+    const tb = b.start_time != null ? String(b.start_time) : '';
+    if (ta !== tb) return ta.localeCompare(tb);
+    return String(a.id).localeCompare(String(b.id));
+  });
+}
+
+function storedLessonMatchesSheetSession(
+  db: {
+    slide_id: string | null;
+    date: string | null;
+    start_time: string | null;
+    end_time: string | null;
+    teacher: string | null;
+  },
+  session: SheetParsedSession
+): boolean {
+  const folienStr = session.folien.trim();
+  if (normalizeFolienKey(folienStr) !== normalizeFolienKey(db.slide_id)) return false;
+  const dbD = db.date != null ? String(db.date).slice(0, 10) : null;
+  if ((session.parsedDate ?? null) !== (dbD ?? null)) return false;
+  if (
+    (session.startTime ?? null) !== (dbTimeToComparable(db.start_time) ?? null) ||
+    (session.endTime ?? null) !== (dbTimeToComparable(db.end_time) ?? null)
+  ) {
+    return false;
+  }
+  if (
+    normalizeTeacherCellForCompare(session.teacherCell) !== normalizeTeacherCellForCompare(db.teacher)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+async function syncLessonAttendanceIncremental(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  lessonId: string,
+  desired: { student_id: string; status: 'Present' | 'Absent'; feedback: string }[],
+  sheetLabel: string,
+  lessonHint: string,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+) {
+  const want = new Map<string, { status: string; feedback: string }>();
+  for (const r of desired) {
+    want.set(r.student_id, { status: r.status, feedback: r.feedback });
+  }
+
+  const { data: existing, error: selErr } = await supabase
+    .from('attendance_records')
+    .select('id, student_id, status, feedback')
+    .eq('lesson_id', lessonId);
+  if (selErr) throw new Error(selErr.message);
+
+  const byStudent = new Map((existing ?? []).map((r) => [r.student_id as string, r]));
+  let inserted = 0;
+  let updated = 0;
+  let deleted = 0;
+
+  for (const [sid, w] of want) {
+    const row = byStudent.get(sid);
+    if (!row) {
+      const { error: insErr } = await supabase.from('attendance_records').insert({
+        lesson_id: lessonId,
+        student_id: sid,
+        status: w.status,
+        feedback: w.feedback,
+      });
+      if (insErr) throw new Error(insErr.message);
+      inserted++;
+    } else {
+      const same =
+        String(row.status) === w.status && String(row.feedback ?? '').trim() === w.feedback.trim();
+      if (!same) {
+        const { error: upErr } = await supabase
+          .from('attendance_records')
+          .update({ status: w.status, feedback: w.feedback })
+          .eq('id', row.id);
+        if (upErr) throw new Error(upErr.message);
+        updated++;
+      }
+    }
+  }
+
+  const removeIds: string[] = [];
+  for (const [sid, row] of byStudent) {
+    if (!want.has(sid)) removeIds.push(row.id as string);
+  }
+  if (removeIds.length > 0) {
+    const { error: delErr } = await supabase.from('attendance_records').delete().in('id', removeIds);
+    if (delErr) throw new Error(delErr.message);
+    deleted = removeIds.length;
+  }
+
+  if (inserted + updated + deleted > 0) {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} attendance — ${lessonHint}: +${inserted} ~${updated} −${deleted}`,
+    });
   }
 }
 
@@ -668,7 +820,7 @@ async function syncOneCourseSheet(
   });
   const { data: existing } = await supabase
     .from('courses')
-    .select('id')
+    .select('id, sheet_url')
     .eq('group_id', groupId)
     .eq('name', sheetTitle)
     .maybeSingle();
@@ -676,7 +828,9 @@ async function syncOneCourseSheet(
   let courseId: string;
   if (existing?.id) {
     courseId = existing.id;
-    if (sheetUrl) {
+    const prevUrl = (existing.sheet_url ?? '').trim();
+    const nextUrl = (sheetUrl ?? '').trim();
+    if (sheetUrl && prevUrl !== nextUrl) {
       await onProgress?.({
         type: 'db',
         message: `${sheetLabel} courses — update sheet_url`,
@@ -714,6 +868,13 @@ async function syncOneCourseSheet(
     courseId = row.id;
   }
 
+  const { data: existingEnrollRows, error: enrollSelErr } = await supabase
+    .from('course_students')
+    .select('student_id')
+    .eq('course_id', courseId);
+  if (enrollSelErr) throw new Error(enrollSelErr.message);
+  const enrolledStudentIds = new Set((existingEnrollRows ?? []).map((r) => r.student_id as string));
+
   for (const col of uniqueStudentCols) {
     const name = col.name;
     let studentId = studentCache.get(name);
@@ -736,16 +897,22 @@ async function syncOneCourseSheet(
       studentId = newId;
       studentCache.set(name, newId);
     }
+    if (!studentId) {
+      throw new Error(`Missing student id for "${name}" after upsert`);
+    }
 
-    await onProgress?.({
-      type: 'db',
-      message: `${sheetLabel} course_students — upsert enroll "${name}"`,
-    });
-    const { error: enrollError } = await supabase
-      .from('course_students')
-      .upsert({ course_id: courseId, student_id: studentId }, { onConflict: 'course_id,student_id' });
-    if (enrollError) {
-      throw new Error(`Failed to enroll student "${name}" in course: ${enrollError.message}`);
+    if (!enrolledStudentIds.has(studentId)) {
+      await onProgress?.({
+        type: 'db',
+        message: `${sheetLabel} course_students — enroll "${name}"`,
+      });
+      const { error: enrollError } = await supabase
+        .from('course_students')
+        .upsert({ course_id: courseId, student_id: studentId }, { onConflict: 'course_id,student_id' });
+      if (enrollError) {
+        throw new Error(`Failed to enroll student "${name}" in course: ${enrollError.message}`);
+      }
+      enrolledStudentIds.add(studentId);
     }
   }
 
@@ -755,15 +922,8 @@ async function syncOneCourseSheet(
     if (sid) studentMap[col.name] = sid;
   }
 
-  await onProgress?.({
-    type: 'db',
-    message: `${sheetLabel} lessons — delete existing for course`,
-  });
-  await supabase.from('lessons').delete().eq('course_id', courseId);
-
   const teachersForCourse = new Set<string>();
-
-  let lessonSeq = 0;
+  const sessions: SheetParsedSession[] = [];
   let previewRowIndex = -1;
   let skippedSessionRows = 0;
   const seenFolien = new Set<string>();
@@ -801,7 +961,7 @@ async function syncOneCourseSheet(
     const teacherColIndices =
       lehrerCols.length > 0
         ? lehrerCols
-        : [headers.findIndex((h) => h && /\blehrer\b/i.test(String(h).trim()))].filter((i) => i >= 0);
+        : [headers.findIndex((h) => h && /\blehrer\b/i.test(String(h).trim()))].filter((idx) => idx >= 0);
     for (const idx of teacherColIndices) {
       teacherParts.push(...parseTeacherNames(row[idx]));
     }
@@ -821,63 +981,133 @@ async function syncOneCourseSheet(
       continue;
     }
 
-    lessonSeq += 1;
-    const lessonHint = parsedDate
-      ? `date ${parsedDate}`
-      : folien
-        ? `slide ${String(folien).slice(0, 40)}`
-        : `row #${lessonSeq}`;
+    sessions.push({
+      gridRowIndex: i,
+      folien: folien ? String(folien) : '',
+      parsedDate,
+      startTime,
+      endTime,
+      teacherCell,
+    });
+  }
+
+  await onProgress?.({
+    type: 'db',
+    message: `${sheetLabel} lessons — load ${sessions.length} sheet session(s), merge with DB`,
+  });
+  const { data: dbLessonRows, error: lesErr } = await supabase
+    .from('lessons')
+    .select('id, slide_id, date, start_time, end_time, teacher')
+    .eq('course_id', courseId);
+  if (lesErr) throw new Error(lesErr.message);
+  const dbLessons = [...(dbLessonRows ?? [])] as {
+    id: string;
+    slide_id: string | null;
+    date: string | null;
+    start_time: string | null;
+    end_time: string | null;
+    teacher: string | null;
+  }[];
+  sortDbLessonsForSync(dbLessons);
+
+  if (dbLessons.length > sessions.length) {
+    const dropIds = dbLessons.slice(sessions.length).map((l) => l.id);
     await onProgress?.({
       type: 'db',
-      message: `${sheetLabel} lessons — insert (${lessonHint})`,
+      message: `${sheetLabel} lessons — delete ${dropIds.length} row(s) past sheet end`,
     });
-    const { data: lesson, error: lessonError } = await supabase
-      .from('lessons')
-      .insert({
-        course_id: courseId,
-        slide_id: folien ? String(folien) : null,
-        date: parsedDate,
-        start_time: startTime,
-        end_time: endTime,
-        teacher: teacherCell,
-      })
-      .select('id')
-      .single();
+    const { error: delLessErr } = await supabase.from('lessons').delete().in('id', dropIds);
+    if (delLessErr) throw new Error(delLessErr.message);
+    dbLessons.length = sessions.length;
+  }
 
-    if (lessonError || !lesson) {
-      console.error('Error inserting lesson:', lessonError);
+  for (let sIdx = 0; sIdx < sessions.length; sIdx++) {
+    const sess = sessions[sIdx];
+    const row = rows[sess.gridRowIndex];
+    if (!row) {
       skippedSessionRows += 1;
       continue;
     }
 
-    const attendanceInserts: {
-      lesson_id: string;
-      student_id: string;
-      feedback: string;
-      status: string;
-    }[] = [];
+    const lessonHint = sess.parsedDate
+      ? `date ${sess.parsedDate}`
+      : sess.folien
+        ? `slide ${sess.folien.slice(0, 40)}`
+        : `row #${sIdx + 1}`;
 
-    const attRow = colorAttendance?.[i];
+    const attRow = colorAttendance?.[sess.gridRowIndex];
+    const attendanceDesired: { student_id: string; status: 'Present' | 'Absent'; feedback: string }[] =
+      [];
     for (const col of uniqueStudentCols) {
       const sid = studentMap[col.name];
       if (!sid) continue;
       const status = pickFirstAttendanceStatus(attRow, col.indices);
       if (status === null) continue;
-      const feedback = mergedFeedbackFromRow(row, col.indices);
-      attendanceInserts.push({
-        lesson_id: lesson.id,
+      attendanceDesired.push({
         student_id: sid,
-        feedback,
         status,
+        feedback: mergedFeedbackFromRow(row, col.indices),
       });
     }
 
-    if (attendanceInserts.length > 0) {
+    if (sIdx < dbLessons.length) {
+      const L = dbLessons[sIdx];
+      if (!storedLessonMatchesSheetSession(L, sess)) {
+        await onProgress?.({
+          type: 'db',
+          message: `${sheetLabel} lessons — update (${lessonHint})`,
+        });
+        const { error: upLesErr } = await supabase
+          .from('lessons')
+          .update({
+            slide_id: sess.folien ? String(sess.folien) : null,
+            date: sess.parsedDate,
+            start_time: sess.startTime,
+            end_time: sess.endTime,
+            teacher: sess.teacherCell,
+          })
+          .eq('id', L.id);
+        if (upLesErr) throw new Error(upLesErr.message);
+      }
+      await syncLessonAttendanceIncremental(
+        supabase,
+        L.id,
+        attendanceDesired,
+        sheetLabel,
+        lessonHint,
+        onProgress
+      );
+    } else {
       await onProgress?.({
         type: 'db',
-        message: `${sheetLabel} attendance_records — insert ${attendanceInserts.length} row(s) for ${lessonHint}`,
+        message: `${sheetLabel} lessons — insert (${lessonHint})`,
       });
-      await supabase.from('attendance_records').insert(attendanceInserts);
+      const { data: lesson, error: lessonError } = await supabase
+        .from('lessons')
+        .insert({
+          course_id: courseId,
+          slide_id: sess.folien ? String(sess.folien) : null,
+          date: sess.parsedDate,
+          start_time: sess.startTime,
+          end_time: sess.endTime,
+          teacher: sess.teacherCell,
+        })
+        .select('id')
+        .single();
+
+      if (lessonError || !lesson) {
+        console.error('Error inserting lesson:', lessonError);
+        skippedSessionRows += 1;
+        continue;
+      }
+      await syncLessonAttendanceIncremental(
+        supabase,
+        lesson.id,
+        attendanceDesired,
+        sheetLabel,
+        lessonHint,
+        onProgress
+      );
     }
   }
 
@@ -932,10 +1162,24 @@ export type ScannedSampleRow = {
   studentAttendance: Record<string, 'Present' | 'Absent' | null>;
 };
 
+/** When the tab matches an existing course (name + sheet URL), preview only flags updates vs the database. */
+export type ScannedSheetReimportDiff = {
+  courseId: string;
+  /** Sample row index → column keys that differ from the stored lesson (Folien, Datum, von, bis, Lehrer, or student name). */
+  changedCellsByRow: Record<number, string[]>;
+  /** Tooltip copy for each cell in `changedCellsByRow` (same keys). */
+  changeHintsByRow: Record<number, Record<string, string>>;
+  /** Import-eligible rows with no paired existing lesson (positional), treated as new sessions. */
+  newSessionRowIndices: number[];
+  hasStructuralChanges: boolean;
+};
+
 export type ScannedSheet = {
   title: string;
   /** 0-based index among visible workbook tabs (API order), for current-course import cutoff. */
   visibleOrderIndex: number;
+  /** Tab URL when known (Google); null for plain .xlsx. */
+  sheetUrl: string | null;
   headers: {
     folien?: string;
     datum?: string;
@@ -945,7 +1189,311 @@ export type ScannedSheet = {
     students: ScannedStudent[];
   };
   sampleRows: ScannedSampleRow[];
+  /** Present when this tab maps to an existing course with lessons; UI highlights only changes. */
+  reimportDiff?: ScannedSheetReimportDiff;
 };
+
+function parseGidFromGoogleSheetUrl(url: string): string | null {
+  const m = url.match(/[#&]gid=(\d+)/i);
+  return m?.[1] ?? null;
+}
+
+/** Same spreadsheet tab for course matching during scan (legacy rows may omit `sheet_url`). */
+function courseDbUrlMatchesTabUrl(dbUrl: string | null | undefined, tabUrl: string | null): boolean {
+  const d = (dbUrl ?? '').trim();
+  const t = (tabUrl ?? '').trim();
+  if (!d && !t) return true;
+  if (!d && t) return true;
+  if (d && !t) return false;
+  const idD = parseSpreadsheetIdFromUrl(d);
+  const idT = parseSpreadsheetIdFromUrl(t);
+  if (idD && idT && idD === idT) {
+    const gD = parseGidFromGoogleSheetUrl(d);
+    const gT = parseGidFromGoogleSheetUrl(t);
+    if (gD && gT) return gD === gT;
+    if (!gD && !gT) return true;
+    return false;
+  }
+  return d === t;
+}
+
+function normalizeTeacherCellForCompare(raw: string | undefined | null): string {
+  const parts = parseTeacherNames(raw)
+    .map((p) => normalizePersonNameKey(p))
+    .filter(Boolean)
+    .sort();
+  return parts.join('|');
+}
+
+function dbTimeToComparable(value: string | null | undefined): string | null {
+  if (value == null || value === '') return null;
+  const m = String(value).match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return normalizeTimeForDb(value);
+  const hh = m[1].padStart(2, '0');
+  const mm = m[2].padStart(2, '0');
+  const ss = (m[3] ?? '00').padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+function sheetStudentStatusForCompare(row: ScannedSampleRow, studentName: string): 'Present' | 'Absent' | null {
+  const a = row.studentAttendance[studentName];
+  if (a === 'Present' || a === 'Absent') return a;
+  const t = String(row.values[studentName] ?? '').trim();
+  if (/\babwesend\b/i.test(t) || /\babsent\b/i.test(t)) return 'Absent';
+  return null;
+}
+
+function reimportHintDisplayCell(s: string | undefined | null): string {
+  const t = String(s ?? '').trim();
+  return t.length > 0 ? t : '(empty)';
+}
+
+function reimportHintIsoDateDe(iso: string | null): string {
+  if (!iso) return '(empty)';
+  const head = String(iso).slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(head);
+  if (!m) return head;
+  return `${m[3]}.${m[2]}.${m[1]}`;
+}
+
+function reimportHintSheetDatum(raw: string | undefined): string {
+  const parsed = parseSheetDate(raw ?? '');
+  if (parsed) return reimportHintIsoDateDe(parsed);
+  return reimportHintDisplayCell(raw);
+}
+
+function reimportHintTimeCompare(comparable: string | null): string {
+  if (!comparable) return '(empty)';
+  const m = comparable.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (m) return `${m[1]}:${m[2]}`;
+  return comparable;
+}
+
+function dbAttendanceStatusToken(status: string): 'Present' | 'Absent' | null {
+  if (status === 'Present' || status === 'Absent') return status;
+  return null;
+}
+
+function reimportAttendanceLine(status: 'Present' | 'Absent' | null, feedback: string): string {
+  const parts: string[] = [];
+  if (status === 'Present' || status === 'Absent') parts.push(status);
+  else parts.push('no mark');
+  const fb = feedback.trim();
+  if (fb) parts.push(`note “${fb}”`);
+  return parts.join(', ');
+}
+
+/**
+ * Sample row indices eligible for lesson import (matches syncOneCourseSheet with empty user skips).
+ * `rIdx === previewRowIndex` for each row in sampleRows.
+ */
+function eligibleImportSampleRowIndices(sheet: ScannedSheet, now: Date): number[] {
+  const datumCol = Boolean(sheet.headers.datum);
+  const out: number[] = [];
+  for (let rIdx = 0; rIdx < sheet.sampleRows.length; rIdx++) {
+    const row = sheet.sampleRows[rIdx];
+    const parsedDate = parseSheetDate(row.values['Datum'] ?? '');
+    if (datumCol && !parsedDate) continue;
+    if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, now)) continue;
+    out.push(rIdx);
+  }
+  return out;
+}
+
+type LessonCompareSnapshot = {
+  slide_id: string | null;
+  date: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  teacher: string | null;
+  attendanceByStudentName: Map<string, { status: string; feedback: string }>;
+};
+
+async function loadLessonSnapshotsMapForCourses(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  courseIds: string[],
+  studentIdToName: Map<string, string>,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+): Promise<Map<string, LessonCompareSnapshot[]>> {
+  const out = new Map<string, LessonCompareSnapshot[]>();
+  for (const id of courseIds) out.set(id, []);
+  if (courseIds.length === 0) return out;
+
+  await onProgress?.({ type: 'db', message: 'reimport diff — batch load lessons' });
+  const { data: lessons, error: leErr } = await supabase
+    .from('lessons')
+    .select('id, course_id, slide_id, date, start_time, end_time, teacher')
+    .in('course_id', courseIds);
+  if (leErr) throw new Error(leErr.message);
+  if (!lessons?.length) return out;
+
+  lessons.sort((a, b) => {
+    const ca = String(a.course_id);
+    const cb = String(b.course_id);
+    if (ca !== cb) return ca.localeCompare(cb);
+    const da = a.date as string | null | undefined;
+    const db = b.date as string | null | undefined;
+    if (!da && !db) {
+      /* both null — order by time then id */
+    } else if (!da) return 1;
+    else if (!db) return -1;
+    else if (da !== db) return String(da).localeCompare(String(db));
+
+    const ta = a.start_time != null ? String(a.start_time) : '';
+    const tb = b.start_time != null ? String(b.start_time) : '';
+    if (ta !== tb) return ta.localeCompare(tb);
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  const lessonIds = lessons.map((l) => l.id as string);
+  const { data: records, error: attErr } = await supabase
+    .from('attendance_records')
+    .select('lesson_id, student_id, status, feedback')
+    .in('lesson_id', lessonIds);
+  if (attErr) throw new Error(attErr.message);
+
+  const attByLesson = new Map<string, Map<string, { status: string; feedback: string }>>();
+  for (const r of records ?? []) {
+    const lid = r.lesson_id as string;
+    const sid = r.student_id as string;
+    const name = studentIdToName.get(sid);
+    if (!name) continue;
+    let m = attByLesson.get(lid);
+    if (!m) {
+      m = new Map();
+      attByLesson.set(lid, m);
+    }
+    m.set(name, { status: String(r.status), feedback: String(r.feedback ?? '') });
+  }
+
+  for (const L of lessons) {
+    const cid = L.course_id as string;
+    const arr = out.get(cid);
+    if (!arr) continue;
+    arr.push({
+      slide_id: L.slide_id != null ? String(L.slide_id) : null,
+      date: L.date != null ? String(L.date).slice(0, 10) : null,
+      start_time: L.start_time != null ? String(L.start_time) : null,
+      end_time: L.end_time != null ? String(L.end_time) : null,
+      teacher: L.teacher != null ? String(L.teacher) : null,
+      attendanceByStudentName: attByLesson.get(L.id as string) ?? new Map(),
+    });
+  }
+  return out;
+}
+
+function buildReimportDiffForSheet(
+  sheet: ScannedSheet,
+  courseId: string,
+  dbLessons: LessonCompareSnapshot[],
+  now: Date
+): ScannedSheetReimportDiff {
+  const eligible = eligibleImportSampleRowIndices(sheet, now);
+  const changedCellsByRow: Record<number, string[]> = {};
+  const changeHintsByRow: Record<number, Record<string, string>> = {};
+  const newSessionRowIndices: number[] = [];
+
+  for (let i = 0; i < eligible.length; i++) {
+    const rIdx = eligible[i];
+    const row = sheet.sampleRows[rIdx];
+    const lesson = dbLessons[i];
+    if (!lesson) {
+      newSessionRowIndices.push(rIdx);
+      continue;
+    }
+
+    const changed: string[] = [];
+    const hints: Record<string, string> = {};
+    const track = (key: string, hint: string) => {
+      changed.push(key);
+      hints[key] = hint;
+    };
+
+    if (normalizeFolienKey(row.values['Folien']) !== normalizeFolienKey(lesson.slide_id)) {
+      track(
+        'Folien',
+        `Folien / slides: was “${reimportHintDisplayCell(lesson.slide_id)}” — sheet now “${reimportHintDisplayCell(row.values['Folien'])}”.`
+      );
+    }
+
+    const sheetDate = parseSheetDate(row.values['Datum'] ?? '');
+    const dbD = lesson.date;
+    if ((sheetDate ?? null) !== (dbD ?? null)) {
+      track(
+        'Datum',
+        `Date: was ${reimportHintIsoDateDe(dbD)} — sheet now ${reimportHintSheetDatum(row.values['Datum'])}.`
+      );
+    }
+
+    const sStart = normalizeTimeForDb(row.values['von'] ?? null);
+    const sEnd = normalizeTimeForDb(row.values['bis'] ?? null);
+    if ((sStart ?? null) !== (dbTimeToComparable(lesson.start_time) ?? null)) {
+      track(
+        'von',
+        `Start (von): was ${reimportHintTimeCompare(dbTimeToComparable(lesson.start_time))} — sheet now ${reimportHintTimeCompare(sStart)}.`
+      );
+    }
+    if ((sEnd ?? null) !== (dbTimeToComparable(lesson.end_time) ?? null)) {
+      track(
+        'bis',
+        `End (bis): was ${reimportHintTimeCompare(dbTimeToComparable(lesson.end_time))} — sheet now ${reimportHintTimeCompare(sEnd)}.`
+      );
+    }
+
+    const tSheet = normalizeTeacherCellForCompare(row.values['Lehrer']);
+    const tDb = normalizeTeacherCellForCompare(lesson.teacher);
+    if (tSheet !== tDb) {
+      track(
+        'Lehrer',
+        `Teacher: was “${reimportHintDisplayCell(lesson.teacher)}” — sheet now “${reimportHintDisplayCell(row.values['Lehrer'])}”.`
+      );
+    }
+
+    for (const st of sheet.headers.students) {
+      const name = st.name;
+      const stSheet = sheetStudentStatusForCompare(row, name);
+      const fbSheet = String(row.values[name] ?? '').trim();
+      const dbRec = lesson.attendanceByStudentName.get(name);
+      if (!dbRec) {
+        if (stSheet !== null || fbSheet !== '') {
+          track(
+            name,
+            `${name}: no attendance was stored — sheet now ${reimportAttendanceLine(stSheet, fbSheet)}.`
+          );
+        }
+      } else {
+        const dbSt = dbAttendanceStatusToken(dbRec.status);
+        if (stSheet !== dbSt) {
+          track(
+            name,
+            `${name}: was ${reimportAttendanceLine(dbSt, dbRec.feedback)} — sheet now ${reimportAttendanceLine(stSheet, fbSheet)}.`
+          );
+        } else if (fbSheet !== (dbRec.feedback ?? '').trim()) {
+          track(
+            name,
+            `${name}: note was “${reimportHintDisplayCell(dbRec.feedback)}” — sheet now “${reimportHintDisplayCell(fbSheet)}”.`
+          );
+        }
+      }
+    }
+
+    if (changed.length > 0) {
+      changedCellsByRow[rIdx] = changed;
+      changeHintsByRow[rIdx] = hints;
+    }
+  }
+
+  const hasStructuralChanges =
+    newSessionRowIndices.length > 0 || Object.keys(changedCellsByRow).length > 0;
+
+  return {
+    courseId,
+    changedCellsByRow,
+    changeHintsByRow,
+    newSessionRowIndices,
+    hasStructuralChanges,
+  };
+}
 
 function collectTeacherNamesFromScannedSheets(sheets: ScannedSheet[]): string[] {
   const namesByKey = new Map<string, string>();
@@ -970,7 +1518,10 @@ function processVisibleSheetGrid(
   rows: SheetRow[] | undefined | null,
   colorAttendance: AttendanceFromColor[][] | undefined | null,
   options?: { dedupeFolienRows?: boolean }
-): { sampleRows: ScannedSampleRow[]; scanned: Omit<ScannedSheet, 'visibleOrderIndex'> | null } {
+): {
+  sampleRows: ScannedSampleRow[];
+  scanned: Omit<ScannedSheet, 'visibleOrderIndex' | 'sheetUrl' | 'reimportDiff'> | null;
+} {
   const empty: { sampleRows: ScannedSampleRow[]; scanned: null } = { sampleRows: [], scanned: null };
   if (!rows || rows.length < 4) return empty;
 
@@ -1052,14 +1603,8 @@ function processVisibleSheetGrid(
     const studentAttendance: Record<string, 'Present' | 'Absent' | null> = {};
     const attRow = color[i];
     for (const col of uniqueStudentCols) {
-      let text = '';
-      for (const idx of col.indices) {
-        if (row[idx]) {
-          text = String(row[idx]).trim();
-          break;
-        }
-      }
-      rowValues[col.name] = text;
+      // Must match syncOneCourseSheet: feedback persisted as merged text from all columns (e.g. K, L, M).
+      rowValues[col.name] = mergedFeedbackFromRow(row, col.indices);
       studentAttendance[col.name] = pickFirstAttendanceStatus(attRow, col.indices);
     }
 
@@ -1069,7 +1614,7 @@ function processVisibleSheetGrid(
     sampleRows.push({ values: rowValues, studentAttendance });
   }
 
-  const scanned: Omit<ScannedSheet, 'visibleOrderIndex'> = {
+  const scanned: Omit<ScannedSheet, 'visibleOrderIndex' | 'sheetUrl' | 'reimportDiff'> = {
     title,
     headers: {
       folien: colIndices.folien !== -1 ? columnIndexToA1Letter(colIndices.folien) : undefined,
@@ -1157,6 +1702,7 @@ async function loadWorkbookFromGoogleSheets(
 
   return {
     sourceKey: spreadsheetId,
+    groupSpreadsheetId: spreadsheetId,
     workbookTitle,
     spreadsheetUrl: canonicalGoogleSpreadsheetUrl(spreadsheetId),
     visibleSheets,
@@ -1192,7 +1738,7 @@ async function loadWorkbookFromXlsx(
     visibleSheets.push({ title: ws.name, rows, colorAttendance, sheetUrl: null });
   }
 
-  return { sourceKey, workbookTitle, spreadsheetUrl: null, visibleSheets };
+  return { sourceKey, groupSpreadsheetId: null, workbookTitle, spreadsheetUrl: null, visibleSheets };
 }
 
 async function loadWorkbookFromXlsxBytes(
@@ -1263,7 +1809,11 @@ async function loadWorkbookFromSource(
           downloaded.bytes,
           onProgress
         );
-        return { ...fromXlsx, spreadsheetUrl: canonicalGoogleSpreadsheetUrl(spreadsheetId) };
+        return {
+          ...fromXlsx,
+          spreadsheetUrl: canonicalGoogleSpreadsheetUrl(spreadsheetId),
+          groupSpreadsheetId: spreadsheetId,
+        };
       }
     }
 
@@ -1314,9 +1864,61 @@ export async function scanGoogleSheet(
       });
       visibleSlots.push({ sampleRows });
       if (scanned) {
-        scannedSheets.push({ ...scanned, visibleOrderIndex: visibleSlotIndex });
+        scannedSheets.push({
+          ...scanned,
+          visibleOrderIndex: visibleSlotIndex,
+          sheetUrl: sheet.sheetUrl ?? null,
+        });
       }
       visibleSlotIndex++;
+    }
+
+    const groupLookupId = loaded.groupSpreadsheetId ?? null;
+    if (groupLookupId) {
+      await onProgress?.({ type: 'db', message: 'reimport diff — match courses to database' });
+      const { data: grp, error: grpErr } = await supabase
+        .from('groups')
+        .select('id')
+        .eq('spreadsheet_id', groupLookupId)
+        .maybeSingle();
+      if (!grpErr && grp?.id) {
+        const [cRes, sRes] = await Promise.all([
+          supabase.from('courses').select('id, name, sheet_url').eq('group_id', grp.id),
+          supabase.from('students').select('id, name').eq('group_id', grp.id),
+        ]);
+        const courses = cRes.data ?? [];
+        const studentIdToName = new Map(
+          (sRes.data ?? []).map((s) => [s.id as string, String(s.name)])
+        );
+        const courseIdBySheet = new Map<string, string>();
+        const matchedCourseIds = new Set<string>();
+        for (const sh of scannedSheets) {
+          const hit = courses.find(
+            (c) => c.name === sh.title && courseDbUrlMatchesTabUrl(c.sheet_url, sh.sheetUrl)
+          );
+          if (hit) {
+            courseIdBySheet.set(`${sh.visibleOrderIndex}:${sh.title}`, hit.id);
+            matchedCourseIds.add(hit.id);
+          }
+        }
+        if (matchedCourseIds.size > 0) {
+          const snapshotsMap = await loadLessonSnapshotsMapForCourses(
+            supabase,
+            [...matchedCourseIds],
+            studentIdToName,
+            onProgress
+          );
+          const now = new Date();
+          for (const sh of scannedSheets) {
+            const cid = courseIdBySheet.get(`${sh.visibleOrderIndex}:${sh.title}`);
+            if (!cid) continue;
+            const snaps = snapshotsMap.get(cid) ?? [];
+            if (snaps.length > 0) {
+              sh.reimportDiff = buildReimportDiffForSheet(sh, cid, snaps, now);
+            }
+          }
+        }
+      }
     }
 
     const currentCourseVisibleIndex = findCurrentCourseVisibleIndex(visibleSlots, new Date());
@@ -1390,20 +1992,26 @@ export async function runGoogleSheetSync(
     );
 
     await onProgress?.({ type: 'db', message: 'groups — select by spreadsheet_id' });
+    const groupLookupId = loaded.groupSpreadsheetId ?? sourceKey;
     const { data: existingGroup, error: groupSelectError } = await supabase
       .from('groups')
-      .select('id')
-      .eq('spreadsheet_id', sourceKey)
+      .select('id, name, class_type, spreadsheet_url')
+      .eq('spreadsheet_id', groupLookupId)
       .maybeSingle();
 
     if (groupSelectError) throw new Error(groupSelectError.message);
-    let group = existingGroup;
+    let group: {
+      id: string;
+      name?: string | null;
+      class_type?: string | null;
+      spreadsheet_url?: string | null;
+    } | null = existingGroup;
 
     if (!group) {
       await onProgress?.({ type: 'db', message: 'groups — insert' });
       const baseGroup = {
         name: workbookTitle,
-        spreadsheet_id: sourceKey,
+        spreadsheet_id: groupLookupId,
         class_type: classType,
       };
       let inserted: { id: string } | null = null;
@@ -1425,30 +2033,47 @@ export async function runGoogleSheetSync(
       }
       group = inserted;
     } else {
-      await onProgress?.({ type: 'db', message: 'groups — update name, class_type, spreadsheet_url' });
-      if (loaded.spreadsheetUrl) {
-        const { error: upErr } = await supabase
-          .from('groups')
-          .update({
-            name: workbookTitle,
-            class_type: classType,
-            spreadsheet_url: loaded.spreadsheetUrl,
-          })
-          .eq('id', group.id);
-        if (upErr && isSupabaseMissingColumnError(upErr.message, 'spreadsheet_url')) {
-          await supabase
+      const prevName = (existingGroup?.name ?? '').trim();
+      const prevClass = existingGroup?.class_type ?? null;
+      const prevUrl = (existingGroup?.spreadsheet_url ?? '').trim();
+      const nextUrl = (loaded.spreadsheetUrl ?? '').trim();
+      const groupNeedsUpdate =
+        prevName !== workbookTitle.trim() ||
+        prevClass !== classType ||
+        (loaded.spreadsheetUrl != null && prevUrl !== nextUrl);
+
+      if (groupNeedsUpdate) {
+        await onProgress?.({ type: 'db', message: 'groups — update changed fields' });
+        if (loaded.spreadsheetUrl) {
+          const { error: upErr } = await supabase
+            .from('groups')
+            .update({
+              name: workbookTitle,
+              class_type: classType,
+              spreadsheet_url: loaded.spreadsheetUrl,
+            })
+            .eq('id', group.id);
+          if (upErr && isSupabaseMissingColumnError(upErr.message, 'spreadsheet_url')) {
+            const { error: up2 } = await supabase
+              .from('groups')
+              .update({ name: workbookTitle, class_type: classType })
+              .eq('id', group.id);
+            if (up2) throw new Error(up2.message);
+          } else if (upErr) {
+            throw new Error(upErr.message);
+          }
+        } else {
+          const { error: upErr } = await supabase
             .from('groups')
             .update({ name: workbookTitle, class_type: classType })
             .eq('id', group.id);
-        } else if (upErr) {
-          throw new Error(upErr.message);
+          if (upErr) throw new Error(upErr.message);
         }
-      } else {
-        await supabase
-          .from('groups')
-          .update({ name: workbookTitle, class_type: classType })
-          .eq('id', group.id);
       }
+    }
+
+    if (!group) {
+      throw new Error('Internal error: group not resolved after load/insert');
     }
 
     await onProgress?.({ type: 'db', message: 'students — select by group_id (cache)' });

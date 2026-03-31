@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { localDateISO } from '@/lib/localDate';
 import { supabase } from '@/lib/supabase/client';
 
 export default function StatsGrid() {
@@ -6,6 +7,7 @@ export default function StatsGrid() {
     totalStudents: 0,
     attendanceRate: 0,
     upcomingClasses: 0,
+    activeCourses: 0,
   });
 
   useEffect(() => {
@@ -25,15 +27,19 @@ export default function StatsGrid() {
         attendanceRate = Math.round((presentCount / attendance.length) * 1000) / 10;
       }
 
-      const { count: upcomingClasses } = await supabase
+      const { data: pendingLessons } = await supabase
         .from('lessons')
-        .select('*', { count: 'exact', head: true })
-        .eq('is_done', false);
+        .select('course_id')
+        .gte('date', localDateISO());
+      const pending = pendingLessons ?? [];
+      const upcomingClasses = pending.length;
+      const activeCourses = new Set(pending.map((l) => l.course_id).filter(Boolean)).size;
 
       setStats({
         totalStudents: totalStudents || 0,
         attendanceRate,
-        upcomingClasses: upcomingClasses || 0,
+        upcomingClasses,
+        activeCourses,
       });
     }
 
@@ -96,14 +102,12 @@ export default function StatsGrid() {
 
       <div className="bg-gradient-to-br from-primary to-primary-container p-6 rounded-[1rem] shadow-md flex flex-col justify-between h-48 text-white group hover:scale-[1.02] transition-transform">
         <div className="flex justify-between items-start">
-          <span className="material-symbols-outlined text-white/50" style={{ fontVariationSettings: "'FILL' 1" }}>
-            star
-          </span>
+          <span className="material-symbols-outlined text-white/50">pending_actions</span>
         </div>
         <div>
-          <div className="text-sm font-bold opacity-80 uppercase tracking-tighter">Course Active</div>
-          <div className="text-xl font-bold font-headline">Ongoing Learning</div>
-          <div className="text-xs opacity-70 mt-1">Check progress</div>
+          <div className="text-4xl font-black font-headline leading-none">{stats.activeCourses}</div>
+          <div className="text-sm font-medium opacity-90 mt-2">Active courses</div>
+          <div className="text-xs opacity-70 mt-1">With a lesson today or later</div>
         </div>
       </div>
     </div>

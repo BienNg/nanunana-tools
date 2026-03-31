@@ -21,6 +21,11 @@ import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
 
 const CELL_WARN_CLASS = 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90 cursor-help';
+/** Cell differs from the last imported lesson (re-import of an existing course tab). */
+const CELL_UPDATE_CLASS = 'bg-sky-50 ring-1 ring-inset ring-sky-300/80 cursor-help';
+
+const NEW_SESSION_ROW_HINT =
+  'New session row: this lesson was not in the database at this position after the last import.';
 
 /** Short hover hints for yellow cells — calm, explanatory, not alarming. */
 const HINT_EMPTY_FOLIEN =
@@ -202,6 +207,21 @@ function isStudentEmptyViolation(
   return rowIndex > first && !studentCellHasAttendanceData(rows[rowIndex], studentName);
 }
 
+/** When re-importing an existing tab, only count validation for new sessions or cells that will change. */
+function validationInReimportScope(sheet: ScannedSheet, rowIdx: number, columnKey: string): boolean {
+  const d = sheet.reimportDiff;
+  if (!d) return true;
+  if (d.newSessionRowIndices.includes(rowIdx)) return true;
+  return (d.changedCellsByRow[rowIdx] ?? []).includes(columnKey);
+}
+
+function datumChronoInReimportScope(sheet: ScannedSheet, rowIdx: number): boolean {
+  const d = sheet.reimportDiff;
+  if (!d) return true;
+  if (d.newSessionRowIndices.includes(rowIdx)) return true;
+  return (d.changedCellsByRow[rowIdx] ?? []).includes('Datum');
+}
+
 function countSheetValidationIssues(
   sheet: ScannedSheet,
   skippedRows: ReadonlySet<number>,
@@ -213,12 +233,18 @@ function countSheetValidationIssues(
   sampleRows.forEach((row, rIdx) => {
     if (rowOutsideValidationScope(sampleRows, rIdx, skippedRows, maxValidationRowIndex, now)) return;
     for (const key of DATA_COLUMN_KEYS) {
+      if (!validationInReimportScope(sheet, rIdx, key)) continue;
       if (isEmptyCellValue(row.values[key])) n++;
     }
-    if (!isEmptyCellValue(row.values['Datum']) && isDatumChronologyOutlier(sampleRows, rIdx, skippedRows, maxValidationRowIndex, now)) {
+    if (
+      !isEmptyCellValue(row.values['Datum']) &&
+      datumChronoInReimportScope(sheet, rIdx) &&
+      isDatumChronologyOutlier(sampleRows, rIdx, skippedRows, maxValidationRowIndex, now)
+    ) {
       n++;
     }
     for (const s of sheet.headers.students) {
+      if (!validationInReimportScope(sheet, rIdx, s.name)) continue;
       if (isStudentEmptyViolation(sampleRows, rIdx, s.name, skippedRows, maxValidationRowIndex, now)) n++;
     }
   });
@@ -227,6 +253,21 @@ function countSheetValidationIssues(
 
 function validationIssuesTooltip(count: number): string {
   return `${count} spot${count === 1 ? '' : 's'} to review on this sheet: missing core fields (Folien, date, times, teacher), a date that doesn’t line up with nearby rows, or a student column that stayed empty after their first attendance. Hover a highlighted cell for details.`;
+}
+
+function showReimportCellHighlight(
+  sheet: ScannedSheet,
+  rowIdx: number,
+  colKey: string,
+  hasValidationWarn: boolean
+): boolean {
+  if (!sheet.reimportDiff || hasValidationWarn) return false;
+  if (sheet.reimportDiff.newSessionRowIndices.includes(rowIdx)) return false;
+  return (sheet.reimportDiff.changedCellsByRow[rowIdx] ?? []).includes(colKey);
+}
+
+function reimportChangeHintText(sheet: ScannedSheet, rowIdx: number, colKey: string): string | undefined {
+  return sheet.reimportDiff?.changeHintsByRow[rowIdx]?.[colKey];
 }
 
 function studentAttendanceCellClass(
@@ -474,6 +515,8 @@ export default function ScanPreviewModal({
             let tabLabel = tabLabelBase;
             if (isCurrentCourse) tabLabel = `${tabLabelBase}, current course`;
             else if (isFutureCourseTab) tabLabel = `${sheet.title}, not included in this import`;
+            const hasReimportUpdates = Boolean(sheet.reimportDiff?.hasStructuralChanges);
+            if (hasReimportUpdates) tabLabel = `${tabLabelBase}, updates since last import`;
             return (
               <button
                 key={idx}
@@ -483,10 +526,15 @@ export default function ScanPreviewModal({
                 disabled={isResyncing || isFutureCourseTab}
                 onClick={() => setActiveTab(idx)}
                 aria-label={tabLabel}
+                title={hasReimportUpdates ? 'This tab matches an existing course; highlights show changes since the last import.' : undefined}
                 className={
                   isFutureCourseTab
                     ? 'shrink-0 rounded-t-lg border border-b-0 border-transparent bg-gray-100/80 px-5 py-3 text-sm font-semibold whitespace-nowrap text-gray-400 cursor-not-allowed inline-flex items-center gap-2'
                     : `shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+                        hasReimportUpdates && activeTab !== idx
+                          ? 'border-sky-200/90 bg-sky-50/50'
+                          : ''
+                      } ${
                         activeTab === idx
                           ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
                           : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-100/80 hover:text-gray-900'
@@ -494,6 +542,14 @@ export default function ScanPreviewModal({
                 }
               >
                 <span className="truncate max-w-[min(40vw,20rem)]">{sheet.title}</span>
+                {hasReimportUpdates ? (
+                  <span
+                    className="inline-flex shrink-0 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-semibold text-sky-950 ring-1 ring-sky-300/80"
+                    aria-hidden
+                  >
+                    Δ
+                  </span>
+                ) : null}
                 {tabIssues > 0 && (
                   <span
                     className="inline-flex shrink-0 items-center gap-1 rounded-full bg-yellow-100 px-2.5 py-1 text-sm font-medium text-yellow-950 ring-1 ring-yellow-300/80"
@@ -523,8 +579,7 @@ export default function ScanPreviewModal({
             >
               <h3 className="text-sm font-semibold text-amber-950">Unknown class type</h3>
               <p className="mt-1 text-xs text-amber-900">
-                The workbook title &ldquo;{scanResult.workbookTitle}&rdquo; does not contain{' '}
-                <strong>Online_DE</strong>, <strong>Online_VN</strong>, or <strong>Offline</strong> (substring match).
+                The workbook title &ldquo;{scanResult.workbookTitle}&rdquo; does not contain a recognized class type.
                 Choose a class type below for this import, or rename the spreadsheet / .xlsx and use{' '}
                 <strong>Resync</strong>.
               </p>
@@ -720,8 +775,50 @@ export default function ScanPreviewModal({
                         previewValidationNow
                       );
                       const datumEmpty = isEmptyCellValue(row.values['Datum']);
+                      const isNewReimportSession = Boolean(
+                        activeSheet.reimportDiff?.newSessionRowIndices.includes(rIdx)
+                      );
+                      const warnFolien =
+                        !rowIsSkipped &&
+                        !rowOutsideValidation &&
+                        validationInReimportScope(activeSheet, rIdx, 'Folien') &&
+                        isEmptyCellValue(row.values['Folien']);
+                      const warnDatumEmpty =
+                        !rowIsSkipped &&
+                        !rowOutsideValidation &&
+                        validationInReimportScope(activeSheet, rIdx, 'Datum') &&
+                        datumEmpty;
+                      const warnDatumChrono =
+                        !rowIsSkipped &&
+                        !rowOutsideValidation &&
+                        datumChronoInReimportScope(activeSheet, rIdx) &&
+                        !datumEmpty &&
+                        datumChrono;
+                      const warnDatum = warnDatumEmpty || warnDatumChrono;
+                      const warnVon =
+                        !rowIsSkipped &&
+                        !rowOutsideValidation &&
+                        validationInReimportScope(activeSheet, rIdx, 'von') &&
+                        isEmptyCellValue(row.values['von']);
+                      const warnBis =
+                        !rowIsSkipped &&
+                        !rowOutsideValidation &&
+                        validationInReimportScope(activeSheet, rIdx, 'bis') &&
+                        isEmptyCellValue(row.values['bis']);
+                      const warnLehrer =
+                        !rowIsSkipped &&
+                        !rowOutsideValidation &&
+                        validationInReimportScope(activeSheet, rIdx, 'Lehrer') &&
+                        isEmptyCellValue(row.values['Lehrer']);
                       return (
-                      <tr key={rIdx} className={`hover:bg-gray-50 ${rowIsSkipped ? 'bg-gray-50/70 text-gray-400' : ''}`}>
+                      <tr
+                        key={rIdx}
+                        className={`hover:bg-gray-50 ${rowIsSkipped ? 'bg-gray-50/70 text-gray-400' : ''} ${
+                          !rowIsSkipped && isNewReimportSession && activeSheet.reimportDiff
+                            ? 'bg-sky-50/45'
+                            : ''
+                        }`}
+                      >
                         <td className="px-3 py-2 border-r border-gray-200 relative">
                           <button
                             type="button"
@@ -759,74 +856,122 @@ export default function ScanPreviewModal({
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['Folien']) ? CELL_WARN_CLASS : ''
+                            warnFolien
+                              ? CELL_WARN_CLASS
+                              : showReimportCellHighlight(activeSheet, rIdx, 'Folien', warnFolien)
+                                ? CELL_UPDATE_CLASS
+                                : isNewReimportSession && activeSheet.reimportDiff
+                                  ? 'cursor-help'
+                                  : ''
                           }`}
                           {...hintHandlers(
-                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['Folien'])
+                            warnFolien
                               ? HINT_EMPTY_FOLIEN
-                              : undefined
+                              : isNewReimportSession && activeSheet.reimportDiff
+                                ? NEW_SESSION_ROW_HINT
+                                : reimportChangeHintText(activeSheet, rIdx, 'Folien')
                           )}
                         >
                           {normalizeDisplayCellText(row.values['Folien'])}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            !rowIsSkipped && !rowOutsideValidation && (datumEmpty || datumChrono) ? CELL_WARN_CLASS : ''
+                            warnDatum
+                              ? CELL_WARN_CLASS
+                              : showReimportCellHighlight(activeSheet, rIdx, 'Datum', warnDatum)
+                                ? CELL_UPDATE_CLASS
+                                : ''
                           }`}
-                          {...hintHandlers(datumCellHoverTitle(rowIsSkipped, rowOutsideValidation, datumEmpty, datumChrono))}
+                          {...hintHandlers(
+                            warnDatum
+                              ? datumCellHoverTitle(
+                                  rowIsSkipped,
+                                  rowOutsideValidation,
+                                  warnDatumEmpty,
+                                  warnDatumChrono
+                                )
+                              : reimportChangeHintText(activeSheet, rIdx, 'Datum')
+                          )}
                         >
                           {formatDatumForDisplay(row.values['Datum'] || '')}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['von']) ? CELL_WARN_CLASS : ''
+                            warnVon
+                              ? CELL_WARN_CLASS
+                              : showReimportCellHighlight(activeSheet, rIdx, 'von', warnVon)
+                                ? CELL_UPDATE_CLASS
+                                : ''
                           }`}
                           {...hintHandlers(
-                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['von']) ? HINT_EMPTY_VON : undefined
+                            warnVon ? HINT_EMPTY_VON : reimportChangeHintText(activeSheet, rIdx, 'von')
                           )}
                         >
                           {normalizeDisplayCellText(row.values['von'])}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['bis']) ? CELL_WARN_CLASS : ''
+                            warnBis
+                              ? CELL_WARN_CLASS
+                              : showReimportCellHighlight(activeSheet, rIdx, 'bis', warnBis)
+                                ? CELL_UPDATE_CLASS
+                                : ''
                           }`}
                           {...hintHandlers(
-                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['bis']) ? HINT_EMPTY_BIS : undefined
+                            warnBis ? HINT_EMPTY_BIS : reimportChangeHintText(activeSheet, rIdx, 'bis')
                           )}
                         >
                           {normalizeDisplayCellText(row.values['bis'])}
                         </td>
                         <td
                           className={`px-4 py-2 border-r border-gray-200 ${
-                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['Lehrer']) ? CELL_WARN_CLASS : ''
+                            warnLehrer
+                              ? CELL_WARN_CLASS
+                              : showReimportCellHighlight(activeSheet, rIdx, 'Lehrer', warnLehrer)
+                                ? CELL_UPDATE_CLASS
+                                : ''
                           }`}
                           {...hintHandlers(
-                            !rowIsSkipped && !rowOutsideValidation && isEmptyCellValue(row.values['Lehrer'])
+                            warnLehrer
                               ? HINT_EMPTY_LEHRER
-                              : undefined
+                              : reimportChangeHintText(activeSheet, rIdx, 'Lehrer')
                           )}
                         >
                           {normalizeDisplayCellText(row.values['Lehrer'])}
                         </td>
                         {activeSheet.headers.students.map((student, cIdx) => {
                           const cellText = normalizeDisplayCellText(row.values[student.name]);
-                          const warnEmpty = isStudentEmptyViolation(
-                            rows,
+                          const studentInScope = validationInReimportScope(activeSheet, rIdx, student.name);
+                          const warnEmpty =
+                            studentInScope &&
+                            isStudentEmptyViolation(
+                              rows,
+                              rIdx,
+                              student.name,
+                              activeSkippedRows,
+                              activeMaxValidationRowIndex,
+                              previewValidationNow
+                            );
+                          const updateCell = showReimportCellHighlight(
+                            activeSheet,
                             rIdx,
                             student.name,
-                            activeSkippedRows,
-                            activeMaxValidationRowIndex,
-                            previewValidationNow
+                            warnEmpty
                           );
                           const tone = warnEmpty
                             ? CELL_WARN_CLASS
-                            : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
+                            : updateCell
+                              ? CELL_UPDATE_CLASS
+                              : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
                           return (
                             <td
                               key={cIdx}
                               className={`px-4 py-2 ${rowIsSkipped ? 'border-r border-gray-200' : tone}`}
-                              {...hintHandlers(!rowIsSkipped && warnEmpty ? hintStudentAfterFirstSession(student.name) : undefined)}
+                              {...hintHandlers(
+                                !rowIsSkipped && warnEmpty
+                                  ? hintStudentAfterFirstSession(student.name)
+                                  : reimportChangeHintText(activeSheet, rIdx, student.name)
+                              )}
                             >
                               {cellText}
                             </td>

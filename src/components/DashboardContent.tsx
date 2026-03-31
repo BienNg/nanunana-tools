@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import gsap from 'gsap';
+import ActiveCoursesPanel from './ActiveCoursesPanel';
 import SyncForm from './SyncForm';
 import StatsGrid from './StatsGrid';
 
@@ -45,6 +46,9 @@ export default function DashboardContent() {
       {/* Bento Stats Grid */}
       <StatsGrid />
 
+      <div className="mt-8">
+        <ActiveCoursesPanel />
+      </div>
     </section>
   );
 }
