@@ -7,7 +7,7 @@ export default async function GroupsPage() {
   const supabase = getSupabaseAdmin();
   const { data: groups, error } = await supabase
     .from('groups')
-    .select('id, name')
+    .select('id, name, spreadsheet_url')
     .order('name', { ascending: false });
 
   if (error) {
@@ -27,7 +27,12 @@ export default async function GroupsPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {groups?.map((group) => (
-          <GroupCard key={group.id} id={group.id} name={group.name} />
+          <GroupCard
+            key={group.id}
+            id={group.id}
+            name={group.name}
+            spreadsheetUrl={group.spreadsheet_url}
+          />
         ))}
         {(!groups || groups.length === 0) && (
           <div className="col-span-full p-12 text-center bg-surface-container-lowest border border-outline-variant/10 rounded-2xl flex flex-col items-center justify-center min-h-[200px]">

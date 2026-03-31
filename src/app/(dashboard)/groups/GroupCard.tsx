@@ -3,8 +3,17 @@
 import { useEffect, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { deleteGroupAndRelatedData } from '@/app/actions/deleteGroup';
+import { GoogleSheetsLogo } from '@/components/icons/GoogleSheetsLogo';
 
-export default function GroupCard({ id, name }: { id: string; name: string }) {
+export default function GroupCard({
+  id,
+  name,
+  spreadsheetUrl,
+}: {
+  id: string;
+  name: string;
+  spreadsheetUrl: string | null;
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
@@ -62,11 +71,27 @@ export default function GroupCard({ id, name }: { id: string; name: string }) {
       aria-label={`Open group ${name}`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0 flex-1 pr-2">
           <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center mb-4 text-primary group-hover:bg-primary group-hover:text-white transition-colors">
             <span className="material-symbols-outlined">workspaces</span>
           </div>
           <h3 className="text-xl font-bold text-on-surface mb-2">{name}</h3>
+          {spreadsheetUrl ? (
+            <a
+              href={spreadsheetUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => event.stopPropagation()}
+              className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-outline-variant/20 hover:bg-green-50/80 hover:border-green-200/60 dark:hover:bg-green-950/30 dark:hover:border-green-800/50 transition-colors mt-2 p-1.5"
+              aria-label={`Open Google Sheet for ${name}`}
+              title={spreadsheetUrl}
+            >
+              <GoogleSheetsLogo className="h-[22px] w-[22px] shrink-0" />
+            </a>
+          ) : (
+            <p className="text-xs text-on-surface-variant/70 mt-1">No Google Sheet URL</p>
+          )}
         </div>
 
         <div className="relative" ref={rootRef}>
