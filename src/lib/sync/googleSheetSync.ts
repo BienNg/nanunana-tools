@@ -1478,6 +1478,45 @@ function reimportAttendanceLine(status: 'Present' | 'Absent' | null, feedback: s
   return parts.join(', ');
 }
 
+function reimportRowExactlyMatchesLesson(
+  row: ScannedSampleRow,
+  lesson: LessonCompareSnapshot,
+  studentNames: string[]
+): boolean {
+  if (normalizeFolienKey(row.values['Folien']) !== normalizeFolienKey(lesson.slide_id)) return false;
+
+  const sheetDate = parseSheetDate(row.values['Datum'] ?? '');
+  if ((sheetDate ?? null) !== (lesson.date ?? null)) return false;
+
+  const sStart = normalizeTimeForDb(row.values['von'] ?? null);
+  const sEnd = normalizeTimeForDb(row.values['bis'] ?? null);
+  if (
+    (sStart ?? null) !== (dbTimeToComparable(lesson.start_time) ?? null) ||
+    (sEnd ?? null) !== (dbTimeToComparable(lesson.end_time) ?? null)
+  ) {
+    return false;
+  }
+
+  const tSheet = normalizeTeacherCellForCompare(row.values['Lehrer']);
+  const tDb = normalizeTeacherCellForCompare(lesson.teacher);
+  if (tSheet !== tDb) return false;
+
+  for (const name of studentNames) {
+    const stSheet = sheetStudentStatusForCompare(row, name);
+    const fbSheet = String(row.values[name] ?? '').trim();
+    const dbRec = lesson.attendanceByStudentName.get(name);
+    if (!dbRec) {
+      if (stSheet !== null || fbSheet !== '') return false;
+      continue;
+    }
+    const dbSt = dbAttendanceStatusToken(dbRec.status);
+    if (stSheet !== dbSt) return false;
+    if (fbSheet !== (dbRec.feedback ?? '').trim()) return false;
+  }
+
+  return true;
+}
+
 type ScannedImportSessionAnalysis = {
   eligibleRowIndices: number[];
   autoSkippedFutureRows: number;
@@ -1609,11 +1648,44 @@ function buildReimportDiffForSheet(
   const changedCellsByRow: Record<number, string[]> = {};
   const changeHintsByRow: Record<number, Record<string, string>> = {};
   const newSessionRowIndices: number[] = [];
+  const studentNames = sheet.headers.students.map((s) => s.name);
 
-  for (let i = 0; i < eligible.length; i++) {
-    const rIdx = eligible[i];
+  /**
+   * Pair scanned rows to DB lessons by exact-content match first (order-insensitive),
+   * then fall back to remaining DB rows in positional order.
+   * This avoids false positives when the same sessions are merely re-ordered.
+   */
+  const pairedDbIndexByRow = new Map<number, number>();
+  const remainingDbIndices = new Set<number>(dbLessons.map((_, idx) => idx));
+  for (const rIdx of eligible) {
     const row = sheet.sampleRows[rIdx];
-    const lesson = dbLessons[i];
+    let hit: number | null = null;
+    for (const dbIdx of remainingDbIndices) {
+      const lesson = dbLessons[dbIdx];
+      if (lesson && reimportRowExactlyMatchesLesson(row, lesson, studentNames)) {
+        hit = dbIdx;
+        break;
+      }
+    }
+    if (hit !== null) {
+      pairedDbIndexByRow.set(rIdx, hit);
+      remainingDbIndices.delete(hit);
+    }
+  }
+  const fallbackDbIndices = [...remainingDbIndices].sort((a, b) => a - b);
+  let fallbackCursor = 0;
+  for (const rIdx of eligible) {
+    if (pairedDbIndexByRow.has(rIdx)) continue;
+    const dbIdx = fallbackDbIndices[fallbackCursor];
+    if (dbIdx == null) continue;
+    pairedDbIndexByRow.set(rIdx, dbIdx);
+    fallbackCursor += 1;
+  }
+
+  for (const rIdx of eligible) {
+    const row = sheet.sampleRows[rIdx];
+    const dbIdx = pairedDbIndexByRow.get(rIdx);
+    const lesson = dbIdx == null ? undefined : dbLessons[dbIdx];
     if (!lesson) {
       newSessionRowIndices.push(rIdx);
       continue;
