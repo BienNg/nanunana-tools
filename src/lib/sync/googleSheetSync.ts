@@ -361,12 +361,14 @@ function classifySessionDateSkip(
 
 function isCourseSyncCompleted(
   autoSkippedFutureRows: number,
-  autoSkippedInvalidDateRows: number
+  autoSkippedInvalidDateRows: number,
+  eligibleSessionRows: number,
+  openSessionRows: number
 ): boolean {
   // Completion is based only on future session skips.
   // User-selected rows and date-quality warnings do not affect sync_completed.
   void autoSkippedInvalidDateRows;
-  return autoSkippedFutureRows === 0;
+  return autoSkippedFutureRows === 0 && eligibleSessionRows > 0 && openSessionRows === 0;
 }
 
 function isGroupSyncCompleted(
@@ -383,15 +385,51 @@ function analyzeRawSheetSessionSkips(
     skippedPreviewRows?: ReadonlySet<number>;
     now?: Date;
   }
-): { autoSkippedFutureRows: number; autoSkippedInvalidDateRows: number; autoSkippedTotal: number } {
-  if (!rows || rows.length < 4) return { autoSkippedFutureRows: 0, autoSkippedInvalidDateRows: 0, autoSkippedTotal: 0 };
+): {
+  autoSkippedFutureRows: number;
+  autoSkippedInvalidDateRows: number;
+  autoSkippedTotal: number;
+  eligibleSessionRows: number;
+  openSessionRows: number;
+} {
+  if (!rows || rows.length < 4) {
+    return {
+      autoSkippedFutureRows: 0,
+      autoSkippedInvalidDateRows: 0,
+      autoSkippedTotal: 0,
+      eligibleSessionRows: 0,
+      openSessionRows: 0,
+    };
+  }
   const headerRowIndex = findHeaderRowIndex(rows);
-  if (headerRowIndex === -1) return { autoSkippedFutureRows: 0, autoSkippedInvalidDateRows: 0, autoSkippedTotal: 0 };
+  if (headerRowIndex === -1) {
+    return {
+      autoSkippedFutureRows: 0,
+      autoSkippedInvalidDateRows: 0,
+      autoSkippedTotal: 0,
+      eligibleSessionRows: 0,
+      openSessionRows: 0,
+    };
+  }
   const headers = rows[headerRowIndex];
-  if (!headers) return { autoSkippedFutureRows: 0, autoSkippedInvalidDateRows: 0, autoSkippedTotal: 0 };
+  if (!headers) {
+    return {
+      autoSkippedFutureRows: 0,
+      autoSkippedInvalidDateRows: 0,
+      autoSkippedTotal: 0,
+      eligibleSessionRows: 0,
+      openSessionRows: 0,
+    };
+  }
   const colIndices = findCoreColumnIndices(headers);
   if (colIndices.folien === -1 && colIndices.inhalt === -1) {
-    return { autoSkippedFutureRows: 0, autoSkippedInvalidDateRows: 0, autoSkippedTotal: 0 };
+    return {
+      autoSkippedFutureRows: 0,
+      autoSkippedInvalidDateRows: 0,
+      autoSkippedTotal: 0,
+      eligibleSessionRows: 0,
+      openSessionRows: 0,
+    };
   }
 
   const now = options?.now ?? new Date();
@@ -400,6 +438,8 @@ function analyzeRawSheetSessionSkips(
   let previewRowIndex = -1;
   let autoSkippedFutureRows = 0;
   const autoSkippedInvalidDateRows = 0;
+  let eligibleSessionRows = 0;
+  let openSessionRows = 0;
 
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
@@ -424,12 +464,16 @@ function analyzeRawSheetSessionSkips(
       autoSkippedFutureRows += 1;
       continue;
     }
+    eligibleSessionRows += 1;
+    if (!parsedDate) openSessionRows += 1;
   }
 
   return {
     autoSkippedFutureRows,
     autoSkippedInvalidDateRows,
     autoSkippedTotal: autoSkippedFutureRows + autoSkippedInvalidDateRows,
+    eligibleSessionRows,
+    openSessionRows,
   };
 }
 
@@ -785,11 +829,13 @@ async function syncCourseTeachers(
 
 type SheetParsedSession = {
   gridRowIndex: number;
+  previewRowIndex: number;
   folien: string;
   parsedDate: string | null;
   startTime: string | null;
   endTime: string | null;
   teacherCell: string | null;
+  teacherParts: string[];
 };
 
 function sortDbLessonsForSync(
@@ -862,30 +908,37 @@ async function syncLessonAttendanceIncremental(
   let inserted = 0;
   let updated = 0;
   let deleted = 0;
+  const toUpsert: { lesson_id: string; student_id: string; status: string; feedback: string }[] = [];
 
   for (const [sid, w] of want) {
     const row = byStudent.get(sid);
     if (!row) {
-      const { error: insErr } = await supabase.from('attendance_records').insert({
+      toUpsert.push({
         lesson_id: lessonId,
         student_id: sid,
         status: w.status,
         feedback: w.feedback,
       });
-      if (insErr) throw new Error(insErr.message);
       inserted++;
     } else {
       const same =
         String(row.status) === w.status && String(row.feedback ?? '').trim() === w.feedback.trim();
       if (!same) {
-        const { error: upErr } = await supabase
-          .from('attendance_records')
-          .update({ status: w.status, feedback: w.feedback })
-          .eq('id', row.id);
-        if (upErr) throw new Error(upErr.message);
+        toUpsert.push({
+          lesson_id: lessonId,
+          student_id: sid,
+          status: w.status,
+          feedback: w.feedback,
+        });
         updated++;
       }
     }
+  }
+  if (toUpsert.length > 0) {
+    const { error: upsertErr } = await supabase
+      .from('attendance_records')
+      .upsert(toUpsert, { onConflict: 'lesson_id,student_id' });
+    if (upsertErr) throw new Error(upsertErr.message);
   }
 
   const removeIds: string[] = [];
@@ -1085,6 +1138,7 @@ async function syncOneCourseSheet(
   }
 
   const teachersForCourse = new Set<string>();
+  const sessionDrafts: SheetParsedSession[] = [];
   const sessions: SheetParsedSession[] = [];
   let previewRowIndex = -1;
   let skippedSessionRows = 0;
@@ -1115,13 +1169,6 @@ async function syncOneCourseSheet(
 
     const rawDate = colIndices.datum !== -1 ? row[colIndices.datum] : '';
     const parsedDate = parseSheetDate(rawDate != null ? String(rawDate) : null);
-    const dateSkipReason = classifySessionDateSkip(parsedDate, colIndices.datum !== -1, new Date());
-    if (dateSkipReason === 'future') {
-      skippedSessionRows += 1;
-      autoSkippedFutureRows += 1;
-      continue;
-    }
-
     const startTime = normalizeTimeForDb(colIndices.von !== -1 ? row[colIndices.von] : null);
     const endTime = normalizeTimeForDb(colIndices.bis !== -1 ? row[colIndices.bis] : null);
 
@@ -1133,7 +1180,6 @@ async function syncOneCourseSheet(
     for (const idx of teacherColIndices) {
       teacherParts.push(...parseTeacherNames(row[idx]));
     }
-    teacherParts.forEach((n) => teachersForCourse.add(n));
     const canonicalLessonLabels: string[] = [];
     for (const part of teacherParts) {
       const nk = normalizePersonNameKey(part);
@@ -1144,14 +1190,44 @@ async function syncOneCourseSheet(
     const teacherCell =
       canonicalLessonLabels.length > 0 ? [...new Set(canonicalLessonLabels)].join(', ') : null;
 
-    sessions.push({
+    sessionDrafts.push({
       gridRowIndex: i,
+      previewRowIndex,
       folien: folien ? String(folien) : '',
       parsedDate,
       startTime,
       endTime,
       teacherCell,
+      teacherParts,
     });
+  }
+
+  let trailingNoDateTeacher = true;
+  const autoSkippedNoDateTeacherPreviewRows = new Set<number>();
+  for (let i = sessionDrafts.length - 1; i >= 0; i--) {
+    const sess = sessionDrafts[i];
+    const noDateTeacher = !sess.parsedDate && !sess.teacherCell;
+    if (trailingNoDateTeacher && noDateTeacher) {
+      autoSkippedNoDateTeacherPreviewRows.add(sess.previewRowIndex);
+    } else {
+      trailingNoDateTeacher = false;
+    }
+  }
+
+  for (const sess of sessionDrafts) {
+    if (autoSkippedNoDateTeacherPreviewRows.has(sess.previewRowIndex)) {
+      skippedSessionRows += 1;
+      autoSkippedFutureRows += 1;
+      continue;
+    }
+    const dateSkipReason = classifySessionDateSkip(sess.parsedDate, colIndices.datum !== -1, new Date());
+    if (dateSkipReason === 'future') {
+      skippedSessionRows += 1;
+      autoSkippedFutureRows += 1;
+      continue;
+    }
+    sess.teacherParts.forEach((n) => teachersForCourse.add(n));
+    sessions.push(sess);
   }
 
   await onProgress?.({
@@ -1284,7 +1360,12 @@ async function syncOneCourseSheet(
     onProgress
   );
 
-  const courseSyncCompleted = isCourseSyncCompleted(autoSkippedFutureRows, autoSkippedInvalidDateRows);
+  const courseSyncCompleted = isCourseSyncCompleted(
+    autoSkippedFutureRows,
+    autoSkippedInvalidDateRows,
+    sessions.length,
+    sessions.filter((sess) => !sess.parsedDate || !sess.teacherCell).length
+  );
   await onProgress?.({
     type: 'db',
     message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
@@ -1372,6 +1453,8 @@ export type ScannedSheet = {
   visibleOrderIndex: number;
   /** Tab URL when known (Google); null for plain .xlsx. */
   sheetUrl: string | null;
+  /** Completion inferred from Review Import analysis (auto-skipped future/invalid-date rows). */
+  analyzedSyncCompleted?: boolean;
   headers: {
     folien?: string;
     datum?: string;
@@ -1548,7 +1631,27 @@ type ScannedImportSessionAnalysis = {
   autoSkippedFutureRows: number;
   autoSkippedInvalidDateRows: number;
   autoSkippedTotal: number;
+  openSessionRows: number;
 };
+
+function trailingNoDateTeacherRowIndices(
+  rows: ReadonlyArray<{ values: Record<string, string> }>
+): ReadonlySet<number> {
+  const out = new Set<number>();
+  let allFollowingNoDateTeacher = true;
+  for (let rIdx = rows.length - 1; rIdx >= 0; rIdx--) {
+    const row = rows[rIdx];
+    const hasDate = String(row.values['Datum'] ?? '').trim().length > 0;
+    const hasTeacher = String(row.values['Lehrer'] ?? '').trim().length > 0;
+    const noDateTeacher = !hasDate && !hasTeacher;
+    if (allFollowingNoDateTeacher && noDateTeacher) {
+      out.add(rIdx);
+    } else {
+      allFollowingNoDateTeacher = false;
+    }
+  }
+  return out;
+}
 
 /**
  * Shared scan/import classification for session-like rows in scanned sampleRows.
@@ -1556,11 +1659,17 @@ type ScannedImportSessionAnalysis = {
  */
 function analyzeScannedSheetSessionsForImport(sheet: ScannedSheet, now: Date): ScannedImportSessionAnalysis {
   const hasDatumColumn = Boolean(sheet.headers.datum);
+  const autoSkippedNoDateTeacherRows = trailingNoDateTeacherRowIndices(sheet.sampleRows);
   const eligibleRowIndices: number[] = [];
   let autoSkippedFutureRows = 0;
   const autoSkippedInvalidDateRows = 0;
+  let openSessionRows = 0;
   for (let rIdx = 0; rIdx < sheet.sampleRows.length; rIdx++) {
     const row = sheet.sampleRows[rIdx];
+    if (autoSkippedNoDateTeacherRows.has(rIdx)) {
+      autoSkippedFutureRows += 1;
+      continue;
+    }
     const parsedDate = parseSheetDate(row.values['Datum'] ?? '');
     const reason = classifySessionDateSkip(parsedDate, hasDatumColumn, now);
     if (reason === 'future') {
@@ -1568,12 +1677,15 @@ function analyzeScannedSheetSessionsForImport(sheet: ScannedSheet, now: Date): S
       continue;
     }
     eligibleRowIndices.push(rIdx);
+    const teacher = String(row.values['Lehrer'] ?? '').trim();
+    if (!parsedDate || !teacher) openSessionRows += 1;
   }
   return {
     eligibleRowIndices,
     autoSkippedFutureRows,
     autoSkippedInvalidDateRows,
     autoSkippedTotal: autoSkippedFutureRows + autoSkippedInvalidDateRows,
+    openSessionRows,
   };
 }
 
@@ -2379,6 +2491,16 @@ export async function scanGoogleSheet(
     }
 
     const titleClassType = detectClassType(workbookTitle);
+    const initialAnalysisNow = new Date();
+    for (const sh of scannedSheets) {
+      const scannedSessionAnalysis = analyzeScannedSheetSessionsForImport(sh, initialAnalysisNow);
+      sh.analyzedSyncCompleted = isCourseSyncCompleted(
+        scannedSessionAnalysis.autoSkippedFutureRows,
+        scannedSessionAnalysis.autoSkippedInvalidDateRows,
+        scannedSessionAnalysis.eligibleRowIndices.length,
+        scannedSessionAnalysis.openSessionRows
+      );
+    }
     let dbWorkbookClassType: WorkbookClassType | null = null;
     const groupLookupId = loaded.groupSpreadsheetId ?? null;
     if (groupLookupId) {
@@ -2428,7 +2550,9 @@ export async function scanGoogleSheet(
               const dbSyncCompleted = Boolean(matched.sync_completed);
               const analyzedSyncCompleted = isCourseSyncCompleted(
                 scannedSessionAnalysis.autoSkippedFutureRows,
-                scannedSessionAnalysis.autoSkippedInvalidDateRows
+                scannedSessionAnalysis.autoSkippedInvalidDateRows,
+                scannedSessionAnalysis.eligibleRowIndices.length,
+                scannedSessionAnalysis.openSessionRows
               );
               diff.dbSyncCompleted = dbSyncCompleted;
               diff.analyzedSyncCompleted = analyzedSyncCompleted;
@@ -2881,6 +3005,7 @@ async function syncOneScannedCourseSheet(
   }
 
   const teachersForCourse = new Set<string>();
+  const sessionDrafts: SheetParsedSession[] = [];
   const sessions: SheetParsedSession[] = [];
   let skippedSessionRows = 0;
   let userSkippedSessionRows = 0;
@@ -2896,14 +3021,7 @@ async function syncOneScannedCourseSheet(
       continue;
     }
     const parsedDate = parseSheetDate(String(row.values['Datum'] ?? ''));
-    const dateSkipReason = classifySessionDateSkip(parsedDate, hasDatumColumn, new Date());
-    if (dateSkipReason === 'future') {
-      skippedSessionRows += 1;
-      autoSkippedFutureRows += 1;
-      continue;
-    }
     const teacherParts = parseTeacherNames(String(row.values['Lehrer'] ?? ''));
-    teacherParts.forEach((n) => teachersForCourse.add(n));
     const canonicalLessonLabels: string[] = [];
     for (const part of teacherParts) {
       const nk = normalizePersonNameKey(part);
@@ -2912,14 +3030,44 @@ async function syncOneScannedCourseSheet(
       canonicalLessonLabels.push(label);
     }
     const teacherCell = canonicalLessonLabels.length > 0 ? [...new Set(canonicalLessonLabels)].join(', ') : null;
-    sessions.push({
+    sessionDrafts.push({
       gridRowIndex: rowIndex,
+      previewRowIndex: rowIndex,
       folien: String(row.values['Folien'] ?? ''),
       parsedDate,
       startTime: normalizeTimeForDb(String(row.values['von'] ?? '')),
       endTime: normalizeTimeForDb(String(row.values['bis'] ?? '')),
       teacherCell,
+      teacherParts,
     });
+  }
+
+  let trailingNoDateTeacher = true;
+  const autoSkippedNoDateTeacherPreviewRows = new Set<number>();
+  for (let i = sessionDrafts.length - 1; i >= 0; i--) {
+    const sess = sessionDrafts[i];
+    const noDateTeacher = !sess.parsedDate && !sess.teacherCell;
+    if (trailingNoDateTeacher && noDateTeacher) {
+      autoSkippedNoDateTeacherPreviewRows.add(sess.previewRowIndex);
+    } else {
+      trailingNoDateTeacher = false;
+    }
+  }
+
+  for (const sess of sessionDrafts) {
+    if (autoSkippedNoDateTeacherPreviewRows.has(sess.previewRowIndex)) {
+      skippedSessionRows += 1;
+      autoSkippedFutureRows += 1;
+      continue;
+    }
+    const dateSkipReason = classifySessionDateSkip(sess.parsedDate, hasDatumColumn, new Date());
+    if (dateSkipReason === 'future') {
+      skippedSessionRows += 1;
+      autoSkippedFutureRows += 1;
+      continue;
+    }
+    sess.teacherParts.forEach((n) => teachersForCourse.add(n));
+    sessions.push(sess);
   }
 
   await onProgress?.({
@@ -3038,7 +3186,12 @@ async function syncOneScannedCourseSheet(
     onProgress
   );
 
-  const courseSyncCompleted = isCourseSyncCompleted(autoSkippedFutureRows, autoSkippedInvalidDateRows);
+  const courseSyncCompleted = isCourseSyncCompleted(
+    autoSkippedFutureRows,
+    autoSkippedInvalidDateRows,
+    sessions.length,
+    sessions.filter((sess) => !sess.parsedDate || !sess.teacherCell).length
+  );
   await onProgress?.({
     type: 'db',
     message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,

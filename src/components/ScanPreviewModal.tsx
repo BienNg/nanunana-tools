@@ -98,10 +98,12 @@ function rowOutsideValidationScope(
   rows: ScannedSampleRow[],
   rowIndex: number,
   skippedRows: ReadonlySet<number>,
+  trailingNoDateTeacherRows: ReadonlySet<number>,
   maxValidationRowIndex: number | null,
   now: Date
 ): boolean {
   if (skippedRows.has(rowIndex)) return true;
+  if (trailingNoDateTeacherRows.has(rowIndex)) return true;
   if (maxValidationRowIndex !== null && rowIndex > maxValidationRowIndex) return true;
   return isSheetDatumStrictlyAfterToday(rows[rowIndex]?.values['Datum'], now);
 }
@@ -110,11 +112,12 @@ function previousActiveRowIndex(
   rows: ScannedSampleRow[],
   rowIndex: number,
   skippedRows: ReadonlySet<number>,
+  trailingNoDateTeacherRows: ReadonlySet<number>,
   maxValidationRowIndex: number | null,
   now: Date
 ): number {
   for (let i = rowIndex - 1; i >= 0; i--) {
-    if (rowOutsideValidationScope(rows, i, skippedRows, maxValidationRowIndex, now)) continue;
+    if (rowOutsideValidationScope(rows, i, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) continue;
     return i;
   }
   return -1;
@@ -124,11 +127,12 @@ function nextActiveRowIndex(
   rows: ScannedSampleRow[],
   rowIndex: number,
   skippedRows: ReadonlySet<number>,
+  trailingNoDateTeacherRows: ReadonlySet<number>,
   maxValidationRowIndex: number | null,
   now: Date
 ): number {
   for (let i = rowIndex + 1; i < rows.length; i++) {
-    if (rowOutsideValidationScope(rows, i, skippedRows, maxValidationRowIndex, now)) continue;
+    if (rowOutsideValidationScope(rows, i, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) continue;
     return i;
   }
   return -1;
@@ -138,18 +142,19 @@ function isDatumChronologyOutlier(
   rows: ScannedSampleRow[],
   rowIndex: number,
   skippedRows: ReadonlySet<number>,
+  trailingNoDateTeacherRows: ReadonlySet<number>,
   maxValidationRowIndex: number | null,
   now: Date
 ): boolean {
-  if (rowOutsideValidationScope(rows, rowIndex, skippedRows, maxValidationRowIndex, now)) return false;
+  if (rowOutsideValidationScope(rows, rowIndex, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) return false;
   const n = rows.length;
   if (n < 2) return false;
 
   const cur = parseSheetDatum(rows[rowIndex].values['Datum'] ?? '');
   if (cur === null) return false;
 
-  const prevIdx = previousActiveRowIndex(rows, rowIndex, skippedRows, maxValidationRowIndex, now);
-  const nextIdx = nextActiveRowIndex(rows, rowIndex, skippedRows, maxValidationRowIndex, now);
+  const prevIdx = previousActiveRowIndex(rows, rowIndex, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now);
+  const nextIdx = nextActiveRowIndex(rows, rowIndex, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now);
   const prev = prevIdx >= 0 ? parseSheetDatum(rows[prevIdx].values['Datum'] ?? '') : null;
   const next = nextIdx >= 0 ? parseSheetDatum(rows[nextIdx].values['Datum'] ?? '') : null;
 
@@ -186,12 +191,13 @@ function studentFirstAttendanceRowIndex(
   rows: ScannedSampleRow[],
   studentName: string,
   skippedRows: ReadonlySet<number>,
+  trailingNoDateTeacherRows: ReadonlySet<number>,
   maxValidationRowIndex: number | null,
   now: Date
 ): number {
   const end = maxValidationRowIndex === null ? rows.length - 1 : Math.min(rows.length - 1, maxValidationRowIndex);
   for (let r = 0; r <= end; r++) {
-    if (rowOutsideValidationScope(rows, r, skippedRows, maxValidationRowIndex, now)) continue;
+    if (rowOutsideValidationScope(rows, r, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) continue;
     if (studentCellHasAttendanceData(rows[r], studentName)) return r;
   }
   return -1;
@@ -203,13 +209,37 @@ function isStudentEmptyViolation(
   rowIndex: number,
   studentName: string,
   skippedRows: ReadonlySet<number>,
+  trailingNoDateTeacherRows: ReadonlySet<number>,
   maxValidationRowIndex: number | null,
   now: Date
 ): boolean {
-  if (rowOutsideValidationScope(rows, rowIndex, skippedRows, maxValidationRowIndex, now)) return false;
-  const first = studentFirstAttendanceRowIndex(rows, studentName, skippedRows, maxValidationRowIndex, now);
+  if (rowOutsideValidationScope(rows, rowIndex, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) return false;
+  const first = studentFirstAttendanceRowIndex(
+    rows,
+    studentName,
+    skippedRows,
+    trailingNoDateTeacherRows,
+    maxValidationRowIndex,
+    now
+  );
   if (first < 0) return false;
   return rowIndex > first && !studentCellHasAttendanceData(rows[rowIndex], studentName);
+}
+
+function trailingNoDateTeacherSessionRows(rows: ScannedSampleRow[]): ReadonlySet<number> {
+  const out = new Set<number>();
+  let allFollowingNoDateTeacher = true;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const noDate = isEmptyCellValue(rows[i]?.values['Datum']);
+    const noTeacher = isEmptyCellValue(rows[i]?.values['Lehrer']);
+    const isNoDateTeacher = noDate && noTeacher;
+    if (allFollowingNoDateTeacher && isNoDateTeacher) {
+      out.add(i);
+    } else {
+      allFollowingNoDateTeacher = false;
+    }
+  }
+  return out;
 }
 
 /** When re-importing an existing tab, only count validation for new sessions or cells that will change. */
@@ -231,13 +261,15 @@ function countSheetValidationIssues(
   sheet: ScannedSheet,
   skippedRows: ReadonlySet<number>,
   skippedAttendanceCells: ReadonlySet<string>,
+  trailingNoDateTeacherRows: ReadonlySet<number>,
   maxValidationRowIndex: number | null,
   now: Date
 ): number {
   const { sampleRows } = sheet;
   let n = 0;
   sampleRows.forEach((row, rIdx) => {
-    if (rowOutsideValidationScope(sampleRows, rIdx, skippedRows, maxValidationRowIndex, now)) return;
+    if (rowOutsideValidationScope(sampleRows, rIdx, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now))
+      return;
     for (const key of DATA_COLUMN_KEYS) {
       if (!validationInReimportScope(sheet, rIdx, key)) continue;
       if (isEmptyCellValue(row.values[key])) n++;
@@ -252,14 +284,25 @@ function countSheetValidationIssues(
     if (
       !isEmptyCellValue(row.values['Datum']) &&
       datumChronoInReimportScope(sheet, rIdx) &&
-      isDatumChronologyOutlier(sampleRows, rIdx, skippedRows, maxValidationRowIndex, now)
+      isDatumChronologyOutlier(sampleRows, rIdx, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)
     ) {
       n++;
     }
     for (const s of sheet.headers.students) {
       if (!validationInReimportScope(sheet, rIdx, s.name)) continue;
       if (skippedAttendanceCells.has(`${rIdx}:${s.name}`)) continue;
-      if (isStudentEmptyViolation(sampleRows, rIdx, s.name, skippedRows, maxValidationRowIndex, now)) n++;
+      if (
+        isStudentEmptyViolation(
+          sampleRows,
+          rIdx,
+          s.name,
+          skippedRows,
+          trailingNoDateTeacherRows,
+          maxValidationRowIndex,
+          now
+        )
+      )
+        n++;
     }
   });
   return n;
@@ -430,11 +473,19 @@ export default function ScanPreviewModal({
       if (cutoff !== null && s.visibleOrderIndex > cutoff) return 0;
       const skipped = new Set(skippedRowsBySheet[makeSheetKey(s)] ?? []);
       const skippedAttendance = new Set(skippedAttendanceCellsBySheet[makeSheetKey(s)] ?? []);
+      const trailingNoDateTeacherRows = trailingNoDateTeacherSessionRows(s.sampleRows);
       const maxValidationRowIndex =
         cutoff !== null && s.visibleOrderIndex === cutoff
           ? findLastTaughtSessionRowIndex(s.sampleRows, now)
           : null;
-      return countSheetValidationIssues(s, skipped, skippedAttendance, maxValidationRowIndex, now);
+      return countSheetValidationIssues(
+        s,
+        skipped,
+        skippedAttendance,
+        trailingNoDateTeacherRows,
+        maxValidationRowIndex,
+        now
+      );
     });
   }, [isOpen, scanResult, mounted, skippedRowsBySheet, skippedAttendanceCellsBySheet]);
 
@@ -527,6 +578,9 @@ export default function ScanPreviewModal({
     activeSheet.visibleOrderIndex > currentCourseVisibleIndex;
 
   const activeSkippedRows = activeSheet ? new Set(skippedRowsBySheet[makeSheetKey(activeSheet)] ?? []) : new Set<number>();
+  const activeTrailingNoDateTeacherRows = activeSheet
+    ? trailingNoDateTeacherSessionRows(activeSheet.sampleRows)
+    : new Set<number>();
   const activeSkippedAttendanceCells = activeSheet
     ? new Set(skippedAttendanceCellsBySheet[makeSheetKey(activeSheet)] ?? [])
     : new Set<string>();
@@ -630,9 +684,11 @@ export default function ScanPreviewModal({
             const hasReimportUpdates = Boolean(sheet.reimportDiff?.hasStructuralChanges);
             const hasPendingCompletionSync = Boolean(sheet.reimportDiff?.pendingCompletionSync);
             const hasSyncCompletedMismatch = Boolean(sheet.reimportDiff?.syncCompletedMismatch);
+            const isCourseCompleted = Boolean(sheet.analyzedSyncCompleted ?? sheet.reimportDiff?.analyzedSyncCompleted);
             if (hasReimportUpdates) tabLabel = `${tabLabelBase}, updates since last import`;
             if (hasPendingCompletionSync) tabLabel = `${tabLabelBase}, will be marked complete`;
             if (hasSyncCompletedMismatch) tabLabel = `${tabLabelBase}, sync completion mismatch`;
+            else if (isCourseCompleted) tabLabel = `${tabLabel}, completed`;
             return (
               <button
                 key={idx}
@@ -666,6 +722,13 @@ export default function ScanPreviewModal({
                       }`
                 }
               >
+                {isCourseCompleted ? (
+                  <span
+                    className="size-2.5 shrink-0 rounded-full bg-emerald-500 ring-1 ring-emerald-300/80"
+                    title={hasPendingCompletionSync ? 'Will be marked complete on import' : 'Course completed'}
+                    aria-hidden
+                  />
+                ) : null}
                 <span className="truncate max-w-[min(40vw,20rem)]">{sheet.title}</span>
                 {hasReimportUpdates ? (
                   <span
@@ -935,10 +998,13 @@ export default function ScanPreviewModal({
                     activeSheet.sampleRows.map((row, rIdx) => {
                       const rows = activeSheet.sampleRows;
                       const rowIsSkipped = activeSkippedRows.has(rIdx);
+                      const rowIsTrailingNoDateTeacher = activeTrailingNoDateTeacherRows.has(rIdx);
+                      const rowIsAutoSkipped = rowIsSkipped || rowIsTrailingNoDateTeacher;
                       const rowOutsideValidation = rowOutsideValidationScope(
                         rows,
                         rIdx,
                         activeSkippedRows,
+                        activeTrailingNoDateTeacherRows,
                         activeMaxValidationRowIndex,
                         previewValidationNow
                       );
@@ -946,6 +1012,7 @@ export default function ScanPreviewModal({
                         rows,
                         rIdx,
                         activeSkippedRows,
+                        activeTrailingNoDateTeacherRows,
                         activeMaxValidationRowIndex,
                         previewValidationNow
                       );
@@ -958,60 +1025,62 @@ export default function ScanPreviewModal({
                       const hasRowReimportDiff = isNewReimportSession || changedCells.length > 0;
                       const rowDiffText = rowDiffSummary(activeSheet, rIdx);
                       const warnFolien =
-                        !rowIsSkipped &&
+                        !rowIsAutoSkipped &&
                         !rowOutsideValidation &&
                         validationInReimportScope(activeSheet, rIdx, 'Folien') &&
                         isEmptyCellValue(row.values['Folien']);
                       const warnDatumEmpty =
-                        !rowIsSkipped &&
+                        !rowIsAutoSkipped &&
                         !rowOutsideValidation &&
                         validationInReimportScope(activeSheet, rIdx, 'Datum') &&
                         datumEmpty;
                       const warnDatumChrono =
-                        !rowIsSkipped &&
+                        !rowIsAutoSkipped &&
                         !rowOutsideValidation &&
                         datumChronoInReimportScope(activeSheet, rIdx) &&
                         !datumEmpty &&
                         !datumInvalid &&
                         datumChrono;
                       const warnDatumInvalid =
-                        !rowIsSkipped &&
+                        !rowIsAutoSkipped &&
                         !rowOutsideValidation &&
                         validationInReimportScope(activeSheet, rIdx, 'Datum') &&
                         datumInvalid;
                       const warnDatum = warnDatumEmpty || warnDatumInvalid || warnDatumChrono;
                       const warnVon =
-                        !rowIsSkipped &&
+                        !rowIsAutoSkipped &&
                         !rowOutsideValidation &&
                         validationInReimportScope(activeSheet, rIdx, 'von') &&
                         isEmptyCellValue(row.values['von']);
                       const warnBis =
-                        !rowIsSkipped &&
+                        !rowIsAutoSkipped &&
                         !rowOutsideValidation &&
                         validationInReimportScope(activeSheet, rIdx, 'bis') &&
                         isEmptyCellValue(row.values['bis']);
                       const warnLehrer =
-                        !rowIsSkipped &&
+                        !rowIsAutoSkipped &&
                         !rowOutsideValidation &&
                         validationInReimportScope(activeSheet, rIdx, 'Lehrer') &&
                         isEmptyCellValue(row.values['Lehrer']);
                       return (
                       <tr
                         key={rIdx}
-                        className={`hover:bg-gray-50 ${rowIsSkipped ? 'bg-gray-50/70 text-gray-400' : ''} ${
-                          !rowIsSkipped && hasRowReimportDiff && activeSheet.reimportDiff
+                        className={`hover:bg-gray-50 ${
+                          rowIsAutoSkipped ? 'bg-gray-50/70 text-gray-400' : ''
+                        } ${
+                          !rowIsAutoSkipped && hasRowReimportDiff && activeSheet.reimportDiff
                             ? 'bg-sky-50/70'
                             : ''
                         }`}
                       >
                         <td
                           className={`px-3 py-2 border-r border-gray-200 relative ${
-                            !rowIsSkipped && hasRowReimportDiff && activeSheet.reimportDiff
+                            !rowIsAutoSkipped && hasRowReimportDiff && activeSheet.reimportDiff
                               ? 'border-l-4 border-l-sky-500 bg-sky-50/60'
                               : ''
                           }`}
                         >
-                          {!rowIsSkipped && rowDiffText ? (
+                          {!rowIsAutoSkipped && rowDiffText ? (
                             <div
                               className="mb-1 inline-flex max-w-full items-center rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-950 ring-1 ring-sky-300/80"
                               title={rowDiffText}
@@ -1151,6 +1220,7 @@ export default function ScanPreviewModal({
                               rIdx,
                               student.name,
                               activeSkippedRows,
+                              activeTrailingNoDateTeacherRows,
                               activeMaxValidationRowIndex,
                               previewValidationNow
                             );
@@ -1167,19 +1237,19 @@ export default function ScanPreviewModal({
                             : updateCell
                               ? CELL_UPDATE_CLASS
                               : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
-                          const canToggleCellSkip = !rowIsSkipped && (isCellSkipped || warnEmpty);
+                          const canToggleCellSkip = !rowIsAutoSkipped && (isCellSkipped || warnEmpty);
                           return (
                             <td
                               key={cIdx}
-                              className={`px-4 py-2 ${rowIsSkipped ? 'border-r border-gray-200' : tone} ${canToggleCellSkip ? 'cursor-pointer select-none' : ''}`}
+                              className={`px-4 py-2 ${rowIsAutoSkipped ? 'border-r border-gray-200' : tone} ${canToggleCellSkip ? 'cursor-pointer select-none' : ''}`}
                               onClick={() => {
                                 if (busy || !canToggleCellSkip) return;
                                 toggleSkipAttendanceCell(activeSheet, rIdx, student.name);
                               }}
                               {...hintHandlers(
-                                !rowIsSkipped && isCellSkipped
+                                !rowIsAutoSkipped && isCellSkipped
                                   ? `This attendance cell will be skipped for ${student.name} in this session. Click to include it again.`
-                                  : !rowIsSkipped && warnEmpty
+                                  : !rowIsAutoSkipped && warnEmpty
                                   ? hintStudentAfterFirstSession(student.name)
                                   : reimportChangeHintText(activeSheet, rIdx, student.name)
                               )}
