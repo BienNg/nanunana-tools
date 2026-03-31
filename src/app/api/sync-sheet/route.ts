@@ -1,4 +1,5 @@
 import { runGoogleSheetSync } from '@/lib/sync/googleSheetSync';
+import { revalidatePath } from 'next/cache';
 import type {
   SkippedAttendanceCellsBySheet,
   SkippedRowsBySheet,
@@ -108,6 +109,13 @@ export async function POST(request: Request) {
             send({ event: 'progress', ...event });
           },
         });
+        if (result.success) {
+          // Ensure dashboard/group/course server components don't show stale completion pills after import.
+          revalidatePath('/');
+          revalidatePath('/groups');
+          revalidatePath('/groups/[id]', 'page');
+          revalidatePath('/courses/[id]', 'page');
+        }
         send({ event: 'done', result });
       } catch (e) {
         const error = e instanceof Error ? e.message : 'Unknown error';

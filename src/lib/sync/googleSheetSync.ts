@@ -302,7 +302,100 @@ function parseSheetDate(raw: string | undefined | null): string | null {
     const [d, m, y] = s.split('.').map((p) => p.trim());
     return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
   }
+  /**
+   * Tolerant fallback for sheet cells like:
+   * - "16.12.2025 00:00:00"
+   * - "16.12.25"
+   * - "Di, 16.12.2025"
+   */
+  const dmy = s.match(/(^|[^\d])(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?=$|[^\d])/);
+  if (dmy) {
+    const d = dmy[2] ?? '';
+    const m = dmy[3] ?? '';
+    const yy = dmy[4] ?? '';
+    let y = yy;
+    if (yy.length === 2) {
+      const n = Number(yy);
+      if (Number.isFinite(n)) y = String(n >= 70 ? 1900 + n : 2000 + n);
+    }
+    if (y.length === 4) {
+      return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    }
+  }
   return null;
+}
+
+type SessionDateSkipReason = 'future' | 'invalid_date' | null;
+
+function classifySessionDateSkip(
+  parsedDate: string | null,
+  hasDatumColumn: boolean,
+  now: Date
+): SessionDateSkipReason {
+  if (hasDatumColumn && !parsedDate) return 'invalid_date';
+  if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, now)) return 'future';
+  return null;
+}
+
+function analyzeRawSheetSessionSkips(
+  rows: SheetRow[] | undefined,
+  options?: {
+    dedupeFolienRows?: boolean;
+    skippedPreviewRows?: ReadonlySet<number>;
+    now?: Date;
+  }
+): { autoSkippedFutureRows: number; autoSkippedInvalidDateRows: number; autoSkippedTotal: number } {
+  if (!rows || rows.length < 4) return { autoSkippedFutureRows: 0, autoSkippedInvalidDateRows: 0, autoSkippedTotal: 0 };
+  const headerRowIndex = findHeaderRowIndex(rows);
+  if (headerRowIndex === -1) return { autoSkippedFutureRows: 0, autoSkippedInvalidDateRows: 0, autoSkippedTotal: 0 };
+  const headers = rows[headerRowIndex];
+  if (!headers) return { autoSkippedFutureRows: 0, autoSkippedInvalidDateRows: 0, autoSkippedTotal: 0 };
+  const colIndices = findCoreColumnIndices(headers);
+  if (colIndices.folien === -1 && colIndices.inhalt === -1) {
+    return { autoSkippedFutureRows: 0, autoSkippedInvalidDateRows: 0, autoSkippedTotal: 0 };
+  }
+
+  const now = options?.now ?? new Date();
+  const skippedPreviewRows = options?.skippedPreviewRows ?? new Set<number>();
+  const seenFolien = new Set<string>();
+  let previewRowIndex = -1;
+  let autoSkippedFutureRows = 0;
+  let autoSkippedInvalidDateRows = 0;
+
+  for (let i = headerRowIndex + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    const folien = colIndices.folien !== -1 ? row[colIndices.folien] : '';
+    const inhalt = colIndices.inhalt !== -1 ? row[colIndices.inhalt] : '';
+    if (!folien && !inhalt) continue;
+    if (options?.dedupeFolienRows) {
+      const folienKey = normalizeFolienKey(folien);
+      if (folienKey) {
+        if (seenFolien.has(folienKey)) continue;
+        seenFolien.add(folienKey);
+      }
+    }
+    previewRowIndex += 1;
+    if (skippedPreviewRows.has(previewRowIndex)) continue;
+
+    const rawDate = colIndices.datum !== -1 ? row[colIndices.datum] : '';
+    const parsedDate = parseSheetDate(rawDate != null ? String(rawDate) : null);
+    const reason = classifySessionDateSkip(parsedDate, colIndices.datum !== -1, now);
+    if (reason === 'future') {
+      autoSkippedFutureRows += 1;
+      continue;
+    }
+    if (reason === 'invalid_date') {
+      autoSkippedInvalidDateRows += 1;
+      continue;
+    }
+  }
+
+  return {
+    autoSkippedFutureRows,
+    autoSkippedInvalidDateRows,
+    autoSkippedTotal: autoSkippedFutureRows + autoSkippedInvalidDateRows,
+  };
 }
 
 export type WorkbookClassType = GroupClassType;
@@ -778,7 +871,13 @@ async function syncOneCourseSheet(
   sheetUrl: string | null,
   options?: { dedupeFolienRows?: boolean },
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
-): Promise<{ ok: boolean; reason?: string; hadSkippedSessions?: boolean }> {
+): Promise<{
+  ok: boolean;
+  reason?: string;
+  hadSkippedSessions?: boolean;
+  courseId?: string;
+  syncCompleted?: boolean;
+}> {
   const sheetLabel = `[${sheetTitle}]`;
   if (!rows || rows.length < 4) return { ok: false, reason: 'too_few_rows' };
 
@@ -819,14 +918,28 @@ async function syncOneCourseSheet(
     type: 'db',
     message: `${sheetLabel} courses — select by group + name`,
   });
-  const { data: existing } = await supabase
+  const { data: existingCourses, error: existingCoursesErr } = await supabase
     .from('courses')
     .select('id, sheet_url')
     .eq('group_id', groupId)
-    .eq('name', sheetTitle)
-    .maybeSingle();
+    .eq('name', sheetTitle);
+  if (existingCoursesErr) throw new Error(existingCoursesErr.message);
 
   let courseId: string;
+  let existing: { id: string; sheet_url: string | null } | null = null;
+  if ((existingCourses ?? []).length === 1) {
+    existing = existingCourses![0] as { id: string; sheet_url: string | null };
+  } else if ((existingCourses ?? []).length > 1) {
+    const rows = (existingCourses ?? []) as { id: string; sheet_url: string | null }[];
+    if (sheetUrl) {
+      existing = rows.find((c) => courseDbUrlMatchesTabUrl(c.sheet_url, sheetUrl)) ?? null;
+    }
+    if (!existing) {
+      // Fall back to a row without stored tab URL (legacy imports), else first row.
+      existing = rows.find((c) => !(c.sheet_url ?? '').trim()) ?? rows[0] ?? null;
+    }
+  }
+
   if (existing?.id) {
     courseId = existing.id;
     const prevUrl = (existing.sheet_url ?? '').trim();
@@ -928,6 +1041,8 @@ async function syncOneCourseSheet(
   let previewRowIndex = -1;
   let skippedSessionRows = 0;
   let userSkippedSessionRows = 0;
+  let autoSkippedFutureRows = 0;
+  let autoSkippedInvalidDateRows = 0;
   const seenFolien = new Set<string>();
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
@@ -952,8 +1067,10 @@ async function syncOneCourseSheet(
 
     const rawDate = colIndices.datum !== -1 ? row[colIndices.datum] : '';
     const parsedDate = parseSheetDate(rawDate != null ? String(rawDate) : null);
-    if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, new Date())) {
+    const dateSkipReason = classifySessionDateSkip(parsedDate, colIndices.datum !== -1, new Date());
+    if (dateSkipReason === 'future') {
       skippedSessionRows += 1;
+      autoSkippedFutureRows += 1;
       continue;
     }
 
@@ -979,8 +1096,9 @@ async function syncOneCourseSheet(
     const teacherCell =
       canonicalLessonLabels.length > 0 ? [...new Set(canonicalLessonLabels)].join(', ') : null;
 
-    if (colIndices.datum !== -1 && !parsedDate) {
+    if (dateSkipReason === 'invalid_date') {
       skippedSessionRows += 1;
+      autoSkippedInvalidDateRows += 1;
       continue;
     }
 
@@ -1028,8 +1146,7 @@ async function syncOneCourseSheet(
     const sess = sessions[sIdx];
     const row = rows[sess.gridRowIndex];
     if (!row) {
-      skippedSessionRows += 1;
-      continue;
+      throw new Error(`${sheetLabel} lessons — internal row lookup failed for parsed session index ${sIdx + 1}`);
     }
 
     const lessonHint = sess.parsedDate
@@ -1100,9 +1217,9 @@ async function syncOneCourseSheet(
         .single();
 
       if (lessonError || !lesson) {
-        console.error('Error inserting lesson:', lessonError);
-        skippedSessionRows += 1;
-        continue;
+        throw new Error(
+          `${sheetLabel} lessons — insert failed (${lessonHint}): ${lessonError?.message ?? 'unknown error'}`
+        );
       }
       await syncLessonAttendanceIncremental(
         supabase,
@@ -1128,7 +1245,7 @@ async function syncOneCourseSheet(
   const courseSyncCompleted = skippedSessionRows === 0;
   await onProgress?.({
     type: 'db',
-    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (user_skipped=${userSkippedSessionRows}, total_skipped=${skippedSessionRows})`,
+    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
   });
   const { error: courseSyncFlagErr } = await supabase
     .from('courses')
@@ -1137,8 +1254,26 @@ async function syncOneCourseSheet(
   if (courseSyncFlagErr && !isSupabaseMissingColumnError(courseSyncFlagErr.message, 'sync_completed')) {
     throw new Error(courseSyncFlagErr.message);
   }
+  const { data: verifyRow, error: verifyErr } = await supabase
+    .from('courses')
+    .select('id, sync_completed')
+    .eq('id', courseId)
+    .maybeSingle();
+  if (verifyErr && !isSupabaseMissingColumnError(verifyErr.message, 'sync_completed')) {
+    throw new Error(verifyErr.message);
+  }
+  if (verifyRow && Boolean(verifyRow.sync_completed) !== courseSyncCompleted) {
+    throw new Error(
+      `${sheetLabel} courses — sync_completed verification mismatch for ${courseId}: expected ${courseSyncCompleted}, got ${Boolean(verifyRow.sync_completed)}`
+    );
+  }
 
-  return { ok: true, hadSkippedSessions: skippedSessionRows > 0 };
+  return {
+    ok: true,
+    hadSkippedSessions: skippedSessionRows > 0,
+    courseId,
+    syncCompleted: courseSyncCompleted,
+  };
 }
 
 export type SyncGoogleSheetResult =
@@ -1177,6 +1312,14 @@ export type ScannedSheetReimportDiff = {
   changeHintsByRow: Record<number, Record<string, string>>;
   /** Existing DB course is not completed yet; allow re-import to refresh completion flags even without content diffs. */
   pendingCompletionSync?: boolean;
+  /** Current completion flag in `courses.sync_completed` for this matched tab/course. */
+  dbSyncCompleted?: boolean;
+  /** Completion inferred from Review Import analysis (auto skips only: future/invalid rows). */
+  analyzedSyncCompleted?: boolean;
+  /** True when database completion does not match current Review Import analysis. */
+  syncCompletedMismatch?: boolean;
+  /** Human-readable mismatch context for UI tooltips/notices. */
+  syncCompletedMismatchReason?: string;
   /** Import-eligible rows with no paired existing lesson (positional), treated as new sessions. */
   newSessionRowIndices: number[];
   hasStructuralChanges: boolean;
@@ -1223,6 +1366,35 @@ function courseDbUrlMatchesTabUrl(dbUrl: string | null | undefined, tabUrl: stri
     return false;
   }
   return d === t;
+}
+
+type ExistingCourseRow = {
+  id: string;
+  name: string;
+  sheet_url: string | null;
+  sync_completed?: boolean | null;
+};
+
+/**
+ * Match scan tab to existing DB course similarly to sync import resolution:
+ * prefer exact tab URL when possible, but fall back to same-name rows so
+ * completion mismatches are still surfaced for legacy/missing sheet_url data.
+ */
+function findExistingCourseForScannedTab(
+  courses: ExistingCourseRow[],
+  sheetTitle: string,
+  sheetUrl: string | null
+): ExistingCourseRow | null {
+  const sameName = courses.filter((c) => c.name === sheetTitle);
+  if (sameName.length === 0) return null;
+  if (sameName.length === 1) return sameName[0] ?? null;
+  if (sheetUrl) {
+    const byUrl = sameName.find((c) => courseDbUrlMatchesTabUrl(c.sheet_url, sheetUrl));
+    if (byUrl) return byUrl;
+  }
+  const withoutStoredUrl = sameName.find((c) => !(c.sheet_url ?? '').trim());
+  if (withoutStoredUrl) return withoutStoredUrl;
+  return sameName[0] ?? null;
 }
 
 function normalizeTeacherCellForCompare(raw: string | undefined | null): string {
@@ -1291,21 +1463,42 @@ function reimportAttendanceLine(status: 'Present' | 'Absent' | null, feedback: s
   return parts.join(', ');
 }
 
+type ScannedImportSessionAnalysis = {
+  eligibleRowIndices: number[];
+  autoSkippedFutureRows: number;
+  autoSkippedInvalidDateRows: number;
+  autoSkippedTotal: number;
+};
+
 /**
- * Sample row indices eligible for lesson import (matches syncOneCourseSheet with empty user skips).
+ * Shared scan/import classification for session-like rows in scanned sampleRows.
  * `rIdx === previewRowIndex` for each row in sampleRows.
  */
-function eligibleImportSampleRowIndices(sheet: ScannedSheet, now: Date): number[] {
-  const datumCol = Boolean(sheet.headers.datum);
-  const out: number[] = [];
+function analyzeScannedSheetSessionsForImport(sheet: ScannedSheet, now: Date): ScannedImportSessionAnalysis {
+  const hasDatumColumn = Boolean(sheet.headers.datum);
+  const eligibleRowIndices: number[] = [];
+  let autoSkippedFutureRows = 0;
+  let autoSkippedInvalidDateRows = 0;
   for (let rIdx = 0; rIdx < sheet.sampleRows.length; rIdx++) {
     const row = sheet.sampleRows[rIdx];
     const parsedDate = parseSheetDate(row.values['Datum'] ?? '');
-    if (datumCol && !parsedDate) continue;
-    if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, now)) continue;
-    out.push(rIdx);
+    const reason = classifySessionDateSkip(parsedDate, hasDatumColumn, now);
+    if (reason === 'future') {
+      autoSkippedFutureRows += 1;
+      continue;
+    }
+    if (reason === 'invalid_date') {
+      autoSkippedInvalidDateRows += 1;
+      continue;
+    }
+    eligibleRowIndices.push(rIdx);
   }
-  return out;
+  return {
+    eligibleRowIndices,
+    autoSkippedFutureRows,
+    autoSkippedInvalidDateRows,
+    autoSkippedTotal: autoSkippedFutureRows + autoSkippedInvalidDateRows,
+  };
 }
 
 type LessonCompareSnapshot = {
@@ -1396,7 +1589,8 @@ function buildReimportDiffForSheet(
   dbLessons: LessonCompareSnapshot[],
   now: Date
 ): ScannedSheetReimportDiff {
-  const eligible = eligibleImportSampleRowIndices(sheet, now);
+  const analysis = analyzeScannedSheetSessionsForImport(sheet, now);
+  const eligible = analysis.eligibleRowIndices;
   const changedCellsByRow: Record<number, string[]> = {};
   const changeHintsByRow: Record<number, Record<string, string>> = {};
   const newSessionRowIndices: number[] = [];
@@ -1881,29 +2075,32 @@ export async function scanGoogleSheet(
       visibleSlotIndex++;
     }
 
+    const titleClassType = detectClassType(workbookTitle);
+    let dbWorkbookClassType: WorkbookClassType | null = null;
     const groupLookupId = loaded.groupSpreadsheetId ?? null;
     if (groupLookupId) {
       await onProgress?.({ type: 'db', message: 'reimport diff — match courses to database' });
       const { data: grp, error: grpErr } = await supabase
         .from('groups')
-        .select('id')
+        .select('id, class_type')
         .eq('spreadsheet_id', groupLookupId)
         .maybeSingle();
+      if (!grpErr) {
+        dbWorkbookClassType = parseWorkbookClassTypeInput(grp?.class_type);
+      }
       if (!grpErr && grp?.id) {
         const [cRes, sRes] = await Promise.all([
           supabase.from('courses').select('id, name, sheet_url, sync_completed').eq('group_id', grp.id),
           supabase.from('students').select('id, name').eq('group_id', grp.id),
         ]);
-        const courses = cRes.data ?? [];
+        const courses = (cRes.data ?? []) as ExistingCourseRow[];
         const studentIdToName = new Map(
           (sRes.data ?? []).map((s) => [s.id as string, String(s.name)])
         );
         const courseIdBySheet = new Map<string, string>();
         const matchedCourseIds = new Set<string>();
         for (const sh of scannedSheets) {
-          const hit = courses.find(
-            (c) => c.name === sh.title && courseDbUrlMatchesTabUrl(c.sheet_url, sh.sheetUrl)
-          );
+          const hit = findExistingCourseForScannedTab(courses, sh.title, sh.sheetUrl);
           if (hit) {
             courseIdBySheet.set(`${sh.visibleOrderIndex}:${sh.title}`, hit.id);
             matchedCourseIds.add(hit.id);
@@ -1921,14 +2118,25 @@ export async function scanGoogleSheet(
             const cid = courseIdBySheet.get(`${sh.visibleOrderIndex}:${sh.title}`);
             if (!cid) continue;
             const snaps = snapshotsMap.get(cid) ?? [];
-            if (snaps.length > 0) {
-              const diff = buildReimportDiffForSheet(sh, cid, snaps, now);
-              const matched = courses.find((c) => c.id === cid);
-              if (matched && !Boolean(matched.sync_completed)) {
+            const diff = buildReimportDiffForSheet(sh, cid, snaps, now);
+            const matched = courses.find((c) => c.id === cid);
+            const scannedSessionAnalysis = analyzeScannedSheetSessionsForImport(sh, now);
+            if (matched) {
+              const dbSyncCompleted = Boolean(matched.sync_completed);
+              const analyzedSyncCompleted = scannedSessionAnalysis.autoSkippedTotal === 0;
+              diff.dbSyncCompleted = dbSyncCompleted;
+              diff.analyzedSyncCompleted = analyzedSyncCompleted;
+              if (dbSyncCompleted !== analyzedSyncCompleted) {
+                diff.syncCompletedMismatch = true;
+                diff.syncCompletedMismatchReason = analyzedSyncCompleted
+                  ? 'Database says this course is not completed, but the current Review Import analysis marks it completed.'
+                  : `Database says this course is completed, but the current Review Import analysis marks it not completed (${scannedSessionAnalysis.autoSkippedFutureRows} future + ${scannedSessionAnalysis.autoSkippedInvalidDateRows} invalid date row(s) are skipped).`;
+              }
+              if (!dbSyncCompleted && analyzedSyncCompleted) {
                 diff.pendingCompletionSync = true;
               }
-              sh.reimportDiff = diff;
             }
+            sh.reimportDiff = diff;
           }
         }
       }
@@ -1947,7 +2155,7 @@ export async function scanGoogleSheet(
     return {
       success: true,
       workbookTitle,
-      workbookClassType: detectClassType(workbookTitle),
+      workbookClassType: titleClassType ?? dbWorkbookClassType,
       sheets: scannedSheets,
       currentCourseVisibleIndex,
       detectedNewTeachers,
@@ -1986,7 +2194,17 @@ export async function runGoogleSheetSync(
       message: `Workbook: ${workbookTitle}`,
     });
 
-    const classType = resolveClassTypeForSync(workbookTitle, options?.workbookClassType);
+    const groupLookupId = loaded.groupSpreadsheetId ?? sourceKey;
+    let classType = resolveClassTypeForSync(workbookTitle, options?.workbookClassType);
+    if (classType === null) {
+      const { data: existingGroupForClass, error: groupClassErr } = await supabase
+        .from('groups')
+        .select('class_type')
+        .eq('spreadsheet_id', groupLookupId)
+        .maybeSingle();
+      if (groupClassErr) throw new Error(groupClassErr.message);
+      classType = parseWorkbookClassTypeInput(existingGroupForClass?.class_type);
+    }
     if (classType === null) {
       return {
         success: false,
@@ -2007,7 +2225,6 @@ export async function runGoogleSheetSync(
     );
 
     await onProgress?.({ type: 'db', message: 'groups — select by spreadsheet_id' });
-    const groupLookupId = loaded.groupSpreadsheetId ?? sourceKey;
     const { data: existingGroup, error: groupSelectError } = await supabase
       .from('groups')
       .select('id, name, class_type, spreadsheet_url')
@@ -2174,13 +2391,7 @@ export async function runGoogleSheetSync(
       if (result.ok) {
         synced++;
         if (result.hadSkippedSessions) anyCourseHadSkippedSessions = true;
-        const { data: c } = await supabase
-          .from('courses')
-          .select('id')
-          .eq('group_id', group.id)
-          .eq('name', item.title)
-          .maybeSingle();
-        if (c?.id) importedCourseIds.push(c.id);
+        if (result.courseId) importedCourseIds.push(result.courseId);
       } else skipped++;
     }
 

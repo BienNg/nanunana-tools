@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import ScanPreviewModal from './ScanPreviewModal';
 import type {
   ScanGoogleSheetResult,
@@ -131,6 +132,7 @@ async function streamSheetScan(
 }
 
 export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => void }) {
+  const router = useRouter();
   const [url, setUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [isScanning, setIsScanning] = useState(false);
@@ -293,11 +295,8 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       }
 
       if (finalResult?.success) {
+        router.refresh();
         onSyncComplete();
-        setUrl('');
-        setFile(null);
-        setIsModalOpen(false);
-        setScanResult(null);
       } else if (finalResult) {
         setError(finalResult.error || 'Failed to sync');
       } else {
