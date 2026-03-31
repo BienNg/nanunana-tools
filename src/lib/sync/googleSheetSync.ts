@@ -1,6 +1,7 @@
 import { google, sheets_v4 } from 'googleapis';
 import ExcelJS from 'exceljs';
 import { createHash } from 'node:crypto';
+import { parseSpreadsheetIdFromUrl } from '@/lib/googleSheets/parseSpreadsheetIdFromUrl';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { findCurrentCourseVisibleIndex, isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
@@ -119,11 +120,6 @@ function sheetGridToRowsAndColorAttendance(
 /** Escape a worksheet title for use in A1 notation: 'Sheet Name'!A1:Z */
 function escapeSheetTitleForRange(title: string): string {
   return `'${title.replace(/'/g, "''")}'`;
-}
-
-function parseSpreadsheetIdFromUrl(url: string): string | null {
-  const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
-  return match?.[1] ?? null;
 }
 
 function parseGoogleDriveFileIdFromUrl(url: string): string | null {

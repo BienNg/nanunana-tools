@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
+import { attachGroupSpreadsheet } from '@/app/actions/attachGroupSpreadsheet';
 import { deleteGroupAndRelatedData } from '@/app/actions/deleteGroup';
 import { GoogleSheetsLogo } from '@/components/icons/GoogleSheetsLogo';
 import { SyncCompletionPill } from '@/components/SyncCompletionPill';
@@ -20,6 +21,11 @@ export default function GroupCard({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [sheetPanelOpen, setSheetPanelOpen] = useState(false);
+  const [sheetUrlInput, setSheetUrlInput] = useState('');
+  const [sheetError, setSheetError] = useState<string | null>(null);
+  const [sheetMismatches, setSheetMismatches] = useState<string[]>([]);
+  const [sheetPending, startSheetTransition] = useTransition();
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -96,7 +102,101 @@ export default function GroupCard({
               <GoogleSheetsLogo className="h-[22px] w-[22px] shrink-0" />
             </a>
           ) : (
-            <p className="text-xs text-on-surface-variant/70 mt-1">No Google Sheet URL</p>
+            <div
+              className="mt-2 space-y-2"
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
+              {!sheetPanelOpen ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSheetError(null);
+                    setSheetMismatches([]);
+                    setSheetPanelOpen(true);
+                  }}
+                  className="text-xs font-semibold text-primary hover:underline underline-offset-2 rounded-md py-1 -my-1 px-0 text-left"
+                >
+                  Add Google Sheet URL
+                </button>
+              ) : (
+                <form
+                  className="space-y-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    setSheetError(null);
+                    setSheetMismatches([]);
+                    startSheetTransition(async () => {
+                      const result = await attachGroupSpreadsheet(id, sheetUrlInput);
+                      if (!result.ok) {
+                        setSheetError(result.error);
+                        setSheetMismatches(result.mismatches ?? []);
+                        return;
+                      }
+                      setSheetPanelOpen(false);
+                      setSheetUrlInput('');
+                      router.refresh();
+                    });
+                  }}
+                >
+                  <label className="sr-only" htmlFor={`group-sheet-url-${id}`}>
+                    Google Sheets URL for {name}
+                  </label>
+                  <input
+                    id={`group-sheet-url-${id}`}
+                    type="url"
+                    name="spreadsheetUrl"
+                    value={sheetUrlInput}
+                    onChange={(event) => setSheetUrlInput(event.target.value)}
+                    placeholder="https://docs.google.com/spreadsheets/d/…"
+                    disabled={sheetPending}
+                    className="w-full rounded-lg border border-outline-variant/25 bg-surface-container-low px-3 py-2 text-xs text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    autoComplete="off"
+                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="submit"
+                      disabled={sheetPending || !sheetUrlInput.trim()}
+                      className="rounded-lg bg-primary text-on-primary px-3 py-1.5 text-xs font-semibold disabled:opacity-50 hover:opacity-90 transition-opacity"
+                    >
+                      {sheetPending ? 'Linking…' : 'Link spreadsheet'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={sheetPending}
+                      onClick={() => {
+                        setSheetPanelOpen(false);
+                        setSheetError(null);
+                        setSheetMismatches([]);
+                        setSheetUrlInput('');
+                      }}
+                      className="text-xs font-medium text-on-surface-variant hover:text-on-surface px-2 py-1.5 rounded-lg"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <p className="text-[11px] leading-snug text-on-surface-variant/80">
+                    The file title must match <span className="font-medium text-on-surface-variant">{name}</span>.
+                    If this group has courses, each course needs a visible tab with the same name (case and spacing
+                    normalized). Extra tabs in the workbook are ignored.
+                  </p>
+                  {sheetError ? (
+                    <div className="rounded-lg border border-red-200/80 dark:border-red-900/50 bg-red-50/60 dark:bg-red-950/25 px-2.5 py-2 space-y-1.5" role="alert">
+                      <p className="text-[11px] font-semibold leading-snug text-red-800 dark:text-red-300">
+                        {sheetError}
+                      </p>
+                      {sheetMismatches.length > 0 ? (
+                        <ul className="text-[11px] leading-snug text-red-800/90 dark:text-red-200/90 list-disc pl-4 space-y-1">
+                          {sheetMismatches.map((line, i) => (
+                            <li key={i}>{line}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </form>
+              )}
+            </div>
           )}
         </div>
 
