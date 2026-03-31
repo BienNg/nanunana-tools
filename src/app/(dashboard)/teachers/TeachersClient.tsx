@@ -6,9 +6,16 @@ import Link from 'next/link';
 type Teacher = {
   id: string;
   name: string;
+  monthHours: { label: string; hoursDisplay: string }[];
 };
 
-export default function TeachersClient({ initialTeachers }: { initialTeachers: Teacher[] }) {
+export default function TeachersClient({
+  initialTeachers,
+  monthColumnLabels,
+}: {
+  initialTeachers: Teacher[];
+  monthColumnLabels: string[];
+}) {
   const [search, setSearch] = useState('');
   
   const filteredTeachers = initialTeachers.filter((teacher) =>
@@ -47,6 +54,14 @@ export default function TeachersClient({ initialTeachers }: { initialTeachers: T
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Name</th>
+              {monthColumnLabels.map((label) => (
+                <th
+                  key={label}
+                  className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap"
+                >
+                  {label}
+                </th>
+              ))}
               <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Actions</th>
             </tr>
           </thead>
@@ -64,6 +79,12 @@ export default function TeachersClient({ initialTeachers }: { initialTeachers: T
                     <span className="font-medium text-slate-900">{teacher.name}</span>
                   </div>
                 </td>
+                {teacher.monthHours.map((col) => (
+                  <td key={col.label} className="py-4 px-6 text-sm tabular-nums text-slate-700">
+                    {col.hoursDisplay}
+                    <span className="text-slate-400 ml-0.5">h</span>
+                  </td>
+                ))}
                 <td className="py-4 px-6">
                   <Link 
                     href={`/teachers/${teacher.id}`}
@@ -77,7 +98,7 @@ export default function TeachersClient({ initialTeachers }: { initialTeachers: T
             ))}
             {filteredTeachers.length === 0 && (
               <tr>
-                <td colSpan={2} className="py-12 text-center text-slate-500">
+                <td colSpan={2 + monthColumnLabels.length} className="py-12 text-center text-slate-500">
                   <div className="flex flex-col items-center justify-center">
                     <span className="material-symbols-outlined text-4xl mb-3 text-slate-300">search_off</span>
                     <p>No teachers found matching "{search}"</p>
