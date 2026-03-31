@@ -774,6 +774,7 @@ async function syncOneCourseSheet(
   colorAttendance: AttendanceFromColor[][] | undefined,
   studentCache: Map<string, string>,
   skippedPreviewRows: ReadonlySet<number>,
+  skippedAttendanceCells: ReadonlySet<string>,
   sheetUrl: string | null,
   options?: { dedupeFolienRows?: boolean },
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
@@ -1041,6 +1042,7 @@ async function syncOneCourseSheet(
     const attendanceDesired: { student_id: string; status: 'Present' | 'Absent'; feedback: string }[] =
       [];
     for (const col of uniqueStudentCols) {
+      if (skippedAttendanceCells.has(`${sIdx}:${col.name}`)) continue;
       const sid = studentMap[col.name];
       if (!sid) continue;
       const status = pickFirstAttendanceStatus(attRow, col.indices);
@@ -1145,6 +1147,8 @@ export type SyncGoogleSheetResult =
 
 /** Key format: `${visibleOrderIndex}:${sheetTitle}`; value: preview row indices to skip. */
 export type SkippedRowsBySheet = Record<string, number[]>;
+/** Key format: `${visibleOrderIndex}:${sheetTitle}`; value: `${previewRowIndex}:${studentName}` tokens. */
+export type SkippedAttendanceCellsBySheet = Record<string, string[]>;
 
 export function columnIndexToA1Letter(index: number): string {
   let letter = '';
@@ -1961,6 +1965,7 @@ export async function runGoogleSheetSync(
   options?: {
     onProgress?: (event: SyncProgressEvent) => void | Promise<void>;
     skippedRowsBySheet?: SkippedRowsBySheet;
+    skippedAttendanceCellsBySheet?: SkippedAttendanceCellsBySheet;
     teacherAliasResolutions?: TeacherAliasResolution[];
     /** When workbook title does not contain Online_DE / Online_VN / Offline, pass the user’s choice from Review Import. */
     workbookClassType?: unknown;
@@ -1968,6 +1973,7 @@ export async function runGoogleSheetSync(
 ): Promise<SyncGoogleSheetResult> {
   const onProgress = options?.onProgress;
   const skippedRowsBySheet = options?.skippedRowsBySheet ?? {};
+  const skippedAttendanceCellsBySheet = options?.skippedAttendanceCellsBySheet ?? {};
   const teacherAliasResolutions = options?.teacherAliasResolutions;
   const supabase = getSupabaseAdmin();
   try {
@@ -2160,6 +2166,7 @@ export async function runGoogleSheetSync(
         item.colorAttendance,
         studentCache,
         new Set(skippedRowsBySheet[`${item.slotIndex}:${item.title}`] ?? []),
+        new Set(skippedAttendanceCellsBySheet[`${item.slotIndex}:${item.title}`] ?? []),
         item.sheetUrl,
         { dedupeFolienRows },
         onProgress

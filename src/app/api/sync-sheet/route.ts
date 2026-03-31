@@ -1,5 +1,9 @@
 import { runGoogleSheetSync } from '@/lib/sync/googleSheetSync';
-import type { SkippedRowsBySheet, TeacherAliasResolution } from '@/lib/sync/googleSheetSync';
+import type {
+  SkippedAttendanceCellsBySheet,
+  SkippedRowsBySheet,
+  TeacherAliasResolution,
+} from '@/lib/sync/googleSheetSync';
 
 export const runtime = 'nodejs';
 
@@ -20,6 +24,7 @@ function parseTeacherAliasResolutions(raw: unknown): TeacherAliasResolution[] | 
 export async function POST(request: Request) {
   let source: string | { fileName: string; bytes: Uint8Array } | null = null;
   let skippedRowsBySheet: SkippedRowsBySheet = {};
+  let skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet = {};
   let teacherAliasResolutions: TeacherAliasResolution[] | undefined;
   let workbookClassType: unknown;
   try {
@@ -28,6 +33,7 @@ export async function POST(request: Request) {
       const formData = await request.formData();
       const file = formData.get('file');
       const skippedRaw = formData.get('skippedRowsBySheet');
+      const skippedAttendanceRaw = formData.get('skippedAttendanceCellsBySheet');
       const aliasRaw = formData.get('teacherAliasResolutions');
       const classTypeRaw = formData.get('workbookClassType');
       if (typeof classTypeRaw === 'string' && classTypeRaw.trim()) {
@@ -46,6 +52,12 @@ export async function POST(request: Request) {
           skippedRowsBySheet = parsed as SkippedRowsBySheet;
         }
       }
+      if (typeof skippedAttendanceRaw === 'string' && skippedAttendanceRaw.trim()) {
+        const parsed = JSON.parse(skippedAttendanceRaw) as unknown;
+        if (parsed && typeof parsed === 'object') {
+          skippedAttendanceCellsBySheet = parsed as SkippedAttendanceCellsBySheet;
+        }
+      }
       if (typeof aliasRaw === 'string' && aliasRaw.trim()) {
         teacherAliasResolutions = parseTeacherAliasResolutions(JSON.parse(aliasRaw) as unknown);
       }
@@ -53,6 +65,7 @@ export async function POST(request: Request) {
       const body = (await request.json()) as {
         url?: string;
         skippedRowsBySheet?: unknown;
+        skippedAttendanceCellsBySheet?: unknown;
         teacherAliasResolutions?: unknown;
         workbookClassType?: unknown;
       };
@@ -60,6 +73,9 @@ export async function POST(request: Request) {
       if (url) source = url;
       if (body.skippedRowsBySheet && typeof body.skippedRowsBySheet === 'object') {
         skippedRowsBySheet = body.skippedRowsBySheet as SkippedRowsBySheet;
+      }
+      if (body.skippedAttendanceCellsBySheet && typeof body.skippedAttendanceCellsBySheet === 'object') {
+        skippedAttendanceCellsBySheet = body.skippedAttendanceCellsBySheet as SkippedAttendanceCellsBySheet;
       }
       teacherAliasResolutions = parseTeacherAliasResolutions(body.teacherAliasResolutions);
       if (body.workbookClassType != null && body.workbookClassType !== '') {
@@ -85,6 +101,7 @@ export async function POST(request: Request) {
       try {
         const result = await runGoogleSheetSync(source, {
           skippedRowsBySheet,
+          skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
           workbookClassType,
           onProgress: (event) => {

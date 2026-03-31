@@ -4,6 +4,7 @@ import { useState } from 'react';
 import ScanPreviewModal from './ScanPreviewModal';
 import type {
   ScanGoogleSheetResult,
+  SkippedAttendanceCellsBySheet,
   SkippedRowsBySheet,
   TeacherAliasResolution,
   WorkbookClassType,
@@ -191,6 +192,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
 
   const handleImport = async (
     skippedRowsBySheet: SkippedRowsBySheet,
+    skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
     workbookClassType?: WorkbookClassType
   ) => {
@@ -208,6 +210,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
               const formData = new FormData();
               formData.set('file', file);
               formData.set('skippedRowsBySheet', JSON.stringify(skippedRowsBySheet));
+              formData.set('skippedAttendanceCellsBySheet', JSON.stringify(skippedAttendanceCellsBySheet));
               if (teacherAliasResolutions.length > 0) {
                 formData.set('teacherAliasResolutions', JSON.stringify(teacherAliasResolutions));
               }
@@ -222,6 +225,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
               body: JSON.stringify({
                 url,
                 skippedRowsBySheet,
+                skippedAttendanceCellsBySheet,
                 teacherAliasResolutions,
                 ...(workbookClassType != null ? { workbookClassType } : {}),
               }),

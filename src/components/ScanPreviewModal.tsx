@@ -6,6 +6,7 @@ import type {
   ScanGoogleSheetResult,
   ScannedSampleRow,
   ScannedSheet,
+  SkippedAttendanceCellsBySheet,
   SkippedRowsBySheet,
   TeacherAliasResolution,
   WorkbookClassType,
@@ -225,6 +226,7 @@ function datumChronoInReimportScope(sheet: ScannedSheet, rowIdx: number): boolea
 function countSheetValidationIssues(
   sheet: ScannedSheet,
   skippedRows: ReadonlySet<number>,
+  skippedAttendanceCells: ReadonlySet<string>,
   maxValidationRowIndex: number | null,
   now: Date
 ): number {
@@ -245,6 +247,7 @@ function countSheetValidationIssues(
     }
     for (const s of sheet.headers.students) {
       if (!validationInReimportScope(sheet, rIdx, s.name)) continue;
+      if (skippedAttendanceCells.has(`${rIdx}:${s.name}`)) continue;
       if (isStudentEmptyViolation(sampleRows, rIdx, s.name, skippedRows, maxValidationRowIndex, now)) n++;
     }
   });
@@ -270,6 +273,25 @@ function reimportChangeHintText(sheet: ScannedSheet, rowIdx: number, colKey: str
   return sheet.reimportDiff?.changeHintsByRow[rowIdx]?.[colKey];
 }
 
+function formatDiffColumnLabel(columnKey: string): string {
+  if (columnKey === 'Folien') return 'Folien';
+  if (columnKey === 'Datum') return 'Datum';
+  if (columnKey === 'von') return 'Start';
+  if (columnKey === 'bis') return 'End';
+  if (columnKey === 'Lehrer') return 'Teacher';
+  return columnKey;
+}
+
+function rowDiffSummary(sheet: ScannedSheet, rowIdx: number): string | null {
+  const diff = sheet.reimportDiff;
+  if (!diff) return null;
+  if (diff.newSessionRowIndices.includes(rowIdx)) return 'New session row';
+  const changed = diff.changedCellsByRow[rowIdx] ?? [];
+  if (changed.length === 0) return null;
+  const labels = changed.map(formatDiffColumnLabel);
+  return `Changed: ${labels.join(', ')}`;
+}
+
 function studentAttendanceCellClass(
   text: string,
   colorStatus: 'Present' | 'Absent' | null | undefined
@@ -292,6 +314,7 @@ type ScanPreviewModalProps = {
   onClose: () => void;
   onConfirm: (
     skippedRowsBySheet: SkippedRowsBySheet,
+    skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
     /** Sent to the server only when the workbook title did not imply a class type. */
     workbookClassType?: WorkbookClassType
@@ -326,6 +349,9 @@ export default function ScanPreviewModal({
   const [activeTab, setActiveTab] = useState(0);
   const [mounted, setMounted] = useState(false);
   const [skippedRowsBySheet, setSkippedRowsBySheet] = useState<SkippedRowsBySheet>({});
+  const [skippedAttendanceCellsBySheet, setSkippedAttendanceCellsBySheet] = useState<SkippedAttendanceCellsBySheet>(
+    {}
+  );
   const [openRowActionIndex, setOpenRowActionIndex] = useState<number | null>(null);
   const [hoverHint, setHoverHint] = useState<HoverHint>(null);
   /** normalized teacher name key → existing teacher id when user maps a sheet name to a known teacher */
@@ -353,6 +379,7 @@ export default function ScanPreviewModal({
     );
     setActiveTab(firstImportable >= 0 ? firstImportable : 0);
     setSkippedRowsBySheet({});
+    setSkippedAttendanceCellsBySheet({});
     setOpenRowActionIndex(null);
     setTeacherMergeByKey({});
     setManualWorkbookClassType('');
@@ -391,13 +418,14 @@ export default function ScanPreviewModal({
     return scanResult.sheets.map((s) => {
       if (cutoff !== null && s.visibleOrderIndex > cutoff) return 0;
       const skipped = new Set(skippedRowsBySheet[makeSheetKey(s)] ?? []);
+      const skippedAttendance = new Set(skippedAttendanceCellsBySheet[makeSheetKey(s)] ?? []);
       const maxValidationRowIndex =
         cutoff !== null && s.visibleOrderIndex === cutoff
           ? findLastTaughtSessionRowIndex(s.sampleRows, now)
           : null;
-      return countSheetValidationIssues(s, skipped, maxValidationRowIndex, now);
+      return countSheetValidationIssues(s, skipped, skippedAttendance, maxValidationRowIndex, now);
     });
-  }, [isOpen, scanResult, mounted, skippedRowsBySheet]);
+  }, [isOpen, scanResult, mounted, skippedRowsBySheet, skippedAttendanceCellsBySheet]);
 
   const currentCourseVisibleIndex = scanResult?.currentCourseVisibleIndex ?? null;
 
@@ -418,6 +446,13 @@ export default function ScanPreviewModal({
     });
   }, [isOpen, scanResult, mounted]);
 
+  /** User-made skip selections are intentional import changes even when sheet diff is empty. */
+  const hasManualImportSelections = useMemo(() => {
+    const hasSkippedRows = Object.values(skippedRowsBySheet).some((rows) => rows.length > 0);
+    if (hasSkippedRows) return true;
+    return Object.values(skippedAttendanceCellsBySheet).some((cells) => cells.length > 0);
+  }, [skippedRowsBySheet, skippedAttendanceCellsBySheet]);
+
   /** Same rule as import: substring on workbook title (not each tab). */
   const hasUnknownWorkbookClassType = scanResult?.workbookClassType == null;
 
@@ -425,7 +460,9 @@ export default function ScanPreviewModal({
     scanResult?.workbookClassType ?? (manualWorkbookClassType === '' ? null : manualWorkbookClassType);
 
   const confirmImportBlocked =
-    hasImportBlockingSheetIssues || resolvedWorkbookClassType === null || hasNoDetectedImportChanges;
+    hasImportBlockingSheetIssues ||
+    resolvedWorkbookClassType === null ||
+    (hasNoDetectedImportChanges && !hasManualImportSelections);
 
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
   const busy = isImporting || isResyncing;
@@ -453,6 +490,9 @@ export default function ScanPreviewModal({
     activeSheet.visibleOrderIndex > currentCourseVisibleIndex;
 
   const activeSkippedRows = activeSheet ? new Set(skippedRowsBySheet[makeSheetKey(activeSheet)] ?? []) : new Set<number>();
+  const activeSkippedAttendanceCells = activeSheet
+    ? new Set(skippedAttendanceCellsBySheet[makeSheetKey(activeSheet)] ?? [])
+    : new Set<string>();
   const previewValidationNow = new Date();
   const activeMaxValidationRowIndex =
     activeSheet && currentCourseVisibleIndex !== null && activeSheet.visibleOrderIndex === currentCourseVisibleIndex
@@ -470,7 +510,29 @@ export default function ScanPreviewModal({
       else next[key] = [...before].sort((a, b) => a - b);
       return next;
     });
+    setSkippedAttendanceCellsBySheet((prev) => {
+      const before = new Set(prev[key] ?? []);
+      const nextCells = [...before].filter((token) => !token.startsWith(`${rowIndex}:`));
+      const next: SkippedAttendanceCellsBySheet = { ...prev };
+      if (nextCells.length === 0) delete next[key];
+      else next[key] = nextCells;
+      return next;
+    });
     setOpenRowActionIndex(null);
+  };
+
+  const toggleSkipAttendanceCell = (sheet: ScannedSheet, rowIndex: number, studentName: string) => {
+    const key = makeSheetKey(sheet);
+    const token = `${rowIndex}:${studentName}`;
+    setSkippedAttendanceCellsBySheet((prev) => {
+      const before = new Set(prev[key] ?? []);
+      if (before.has(token)) before.delete(token);
+      else before.add(token);
+      const next: SkippedAttendanceCellsBySheet = { ...prev };
+      if (before.size === 0) delete next[key];
+      else next[key] = [...before].sort((a, b) => a.localeCompare(b));
+      return next;
+    });
   };
 
   return createPortal(
@@ -560,7 +622,7 @@ export default function ScanPreviewModal({
                     className="inline-flex shrink-0 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-semibold text-sky-950 ring-1 ring-sky-300/80"
                     aria-hidden
                   >
-                    Δ
+                    <span className="material-symbols-outlined text-sm leading-none">difference</span>
                   </span>
                 ) : null}
                 {tabIssues > 0 && (
@@ -800,6 +862,9 @@ export default function ScanPreviewModal({
                       const isNewReimportSession = Boolean(
                         activeSheet.reimportDiff?.newSessionRowIndices.includes(rIdx)
                       );
+                      const changedCells = activeSheet.reimportDiff?.changedCellsByRow[rIdx] ?? [];
+                      const hasRowReimportDiff = isNewReimportSession || changedCells.length > 0;
+                      const rowDiffText = rowDiffSummary(activeSheet, rIdx);
                       const warnFolien =
                         !rowIsSkipped &&
                         !rowOutsideValidation &&
@@ -836,12 +901,26 @@ export default function ScanPreviewModal({
                       <tr
                         key={rIdx}
                         className={`hover:bg-gray-50 ${rowIsSkipped ? 'bg-gray-50/70 text-gray-400' : ''} ${
-                          !rowIsSkipped && isNewReimportSession && activeSheet.reimportDiff
-                            ? 'bg-sky-50/45'
+                          !rowIsSkipped && hasRowReimportDiff && activeSheet.reimportDiff
+                            ? 'bg-sky-50/70'
                             : ''
                         }`}
                       >
-                        <td className="px-3 py-2 border-r border-gray-200 relative">
+                        <td
+                          className={`px-3 py-2 border-r border-gray-200 relative ${
+                            !rowIsSkipped && hasRowReimportDiff && activeSheet.reimportDiff
+                              ? 'border-l-4 border-l-sky-500 bg-sky-50/60'
+                              : ''
+                          }`}
+                        >
+                          {!rowIsSkipped && rowDiffText ? (
+                            <div
+                              className="mb-1 inline-flex max-w-full items-center rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-950 ring-1 ring-sky-300/80"
+                              title={rowDiffText}
+                            >
+                              <span className="truncate">{rowDiffText}</span>
+                            </div>
+                          ) : null}
                           <button
                             type="button"
                             onClick={() =>
@@ -963,8 +1042,10 @@ export default function ScanPreviewModal({
                         </td>
                         {activeSheet.headers.students.map((student, cIdx) => {
                           const cellText = normalizeDisplayCellText(row.values[student.name]);
+                          const isCellSkipped = activeSkippedAttendanceCells.has(`${rIdx}:${student.name}`);
                           const studentInScope = validationInReimportScope(activeSheet, rIdx, student.name);
                           const warnEmpty =
+                            !isCellSkipped &&
                             studentInScope &&
                             isStudentEmptyViolation(
                               rows,
@@ -982,20 +1063,29 @@ export default function ScanPreviewModal({
                           );
                           const tone = warnEmpty
                             ? CELL_WARN_CLASS
+                            : isCellSkipped
+                              ? 'bg-gray-100 text-gray-500 border-r border-gray-200'
                             : updateCell
                               ? CELL_UPDATE_CLASS
                               : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
+                          const canToggleCellSkip = !rowIsSkipped && (isCellSkipped || warnEmpty);
                           return (
                             <td
                               key={cIdx}
-                              className={`px-4 py-2 ${rowIsSkipped ? 'border-r border-gray-200' : tone}`}
+                              className={`px-4 py-2 ${rowIsSkipped ? 'border-r border-gray-200' : tone} ${canToggleCellSkip ? 'cursor-pointer select-none' : ''}`}
+                              onClick={() => {
+                                if (busy || !canToggleCellSkip) return;
+                                toggleSkipAttendanceCell(activeSheet, rIdx, student.name);
+                              }}
                               {...hintHandlers(
-                                !rowIsSkipped && warnEmpty
+                                !rowIsSkipped && isCellSkipped
+                                  ? `This attendance cell will be skipped for ${student.name} in this session. Click to include it again.`
+                                  : !rowIsSkipped && warnEmpty
                                   ? hintStudentAfterFirstSession(student.name)
                                   : reimportChangeHintText(activeSheet, rIdx, student.name)
                               )}
                             >
-                              {cellText}
+                              {isCellSkipped ? '' : cellText}
                             </td>
                           );
                         })}
@@ -1061,7 +1151,12 @@ export default function ScanPreviewModal({
               }
               const workbookClassTypeForApi =
                 scanResult.workbookClassType == null ? resolvedWorkbookClassType ?? undefined : undefined;
-              onConfirm(skippedRowsBySheet, teacherAliasResolutions, workbookClassTypeForApi);
+              onConfirm(
+                skippedRowsBySheet,
+                skippedAttendanceCellsBySheet,
+                teacherAliasResolutions,
+                workbookClassTypeForApi
+              );
             }}
             disabled={busy || confirmImportBlocked}
             title={
