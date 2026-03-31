@@ -471,8 +471,8 @@ export default function ScanPreviewModal({
   const resolvedWorkbookClassType: WorkbookClassType | null =
     scanResult?.workbookClassType ?? (manualWorkbookClassType === '' ? null : manualWorkbookClassType);
 
-  /** Show warning only while class type is still missing. */
-  const hasUnknownWorkbookClassType = resolvedWorkbookClassType === null;
+  /** Keep class-type picker visible whenever workbook title does not imply a class type. */
+  const requiresManualWorkbookClassType = scanResult?.workbookClassType == null;
 
   const confirmImportBlocked =
     hasImportBlockingSheetIssues ||
@@ -714,7 +714,7 @@ export default function ScanPreviewModal({
 
         {/* Body */}
         <div className="flex-1 overflow-auto p-6 bg-white">
-          {hasUnknownWorkbookClassType ? (
+          {requiresManualWorkbookClassType ? (
             <section
               className="mb-4 rounded-md border border-amber-300 bg-amber-50/90 px-4 py-3"
               role="alert"
