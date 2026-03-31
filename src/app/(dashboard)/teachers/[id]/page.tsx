@@ -120,7 +120,6 @@ export default async function TeacherDetailsPage({
         date,
         start_time,
         end_time,
-        content,
         slide_id,
         teacher,
         attendance_records (

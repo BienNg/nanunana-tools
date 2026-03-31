@@ -830,7 +830,6 @@ async function syncOneCourseSheet(
       .insert({
         course_id: courseId,
         slide_id: folien ? String(folien) : null,
-        content: inhalt ? String(inhalt) : null,
         date: parsedDate,
         start_time: startTime,
         end_time: endTime,

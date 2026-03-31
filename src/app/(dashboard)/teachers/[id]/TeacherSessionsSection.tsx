@@ -9,7 +9,6 @@ type SessionRow = {
   date: string | null;
   start_time?: string | null;
   end_time?: string | null;
-  content?: string | null;
   calculatedDurationMinutes?: number;
   courses?: { name?: string } | null;
   attendance_records?: { status: string }[] | null;
@@ -73,13 +72,7 @@ function SessionsTable({ sessions }: { sessions: SessionRow[] }) {
                     </div>
                   </td>
                   <td className="py-5 pr-4">
-                    <p className="font-bold text-on-surface mb-0.5">{session.courses?.name}</p>
-                    <p
-                      className="text-xs text-on-surface-variant max-w-xs truncate"
-                      title={session.content || 'No content specified'}
-                    >
-                      {session.content || 'No content specified'}
-                    </p>
+                    <p className="font-bold text-on-surface">{session.courses?.name ?? '—'}</p>
                   </td>
                   <td className="py-5 pr-4">{totalCount > 0 ? `${presentCount} / ${totalCount}` : '-'}</td>
                   <td className="py-5 pr-4">{durationHrs} hrs</td>

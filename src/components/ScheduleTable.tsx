@@ -13,7 +13,6 @@ type AttendanceRecord = {
 type Lesson = {
   id: string;
   slide_id: string;
-  content: string;
   date: string;
   start_time: string;
   end_time: string;
@@ -39,7 +38,7 @@ function compareLessonsByCourseColumn(a: Lesson, b: Lesson): number {
   if (labelCmp !== 0) return labelCmp;
   const slideCmp = a.slide_id.localeCompare(b.slide_id, undefined, { numeric: true, sensitivity: 'base' });
   if (slideCmp !== 0) return slideCmp;
-  return a.content.localeCompare(b.content, undefined, { sensitivity: 'base' });
+  return a.id.localeCompare(b.id);
 }
 
 export default function ScheduleTable({ courseId }: { courseId?: string } = {}) {
@@ -132,7 +131,7 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
           <thead>
             <tr className="bg-surface-container-low/50">
               <th className="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70 sticky left-0 bg-surface-container-low/50 z-10">
-                Kurs / Folien &amp; Inhalt
+                Kurs / Folien
               </th>
               <th className="px-6 py-5 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant/70 whitespace-nowrap">
                 Datum &amp; Zeit
@@ -165,7 +164,6 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
                         </span>
                       )}
                       <span className="font-bold text-sm block">{lesson.slide_id}</span>
-                      <span className="text-xs text-on-surface-variant block">{lesson.content}</span>
                     </div>
                   </div>
                 </td>
