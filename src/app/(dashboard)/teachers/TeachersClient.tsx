@@ -1,13 +1,100 @@
 'use client';
 
-import { useState } from 'react';
 import Link from 'next/link';
+import { useEffect, useRef, useState } from 'react';
 
 type Teacher = {
   id: string;
   name: string;
+  status: 'active' | 'inactive';
   monthHours: { label: string; hoursDisplay: string }[];
 };
+
+type StatusFilter = 'active' | 'all' | 'inactive';
+
+const STATUS_FILTER_OPTIONS: { value: StatusFilter; label: string; description: string }[] = [
+  { value: 'active', label: 'Active only', description: 'Hide inactive teachers' },
+  { value: 'all', label: 'All teachers', description: 'Include inactive' },
+  { value: 'inactive', label: 'Inactive only', description: 'Former / inactive only' },
+];
+
+function StatusFilterMenu({
+  value,
+  onChange,
+}: {
+  value: StatusFilter;
+  onChange: (v: StatusFilter) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const currentLabel = STATUS_FILTER_OPTIONS.find((o) => o.value === value)?.label ?? 'Filter';
+
+  return (
+    <div className="relative shrink-0" ref={rootRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-2 pl-3 pr-3 py-2.5 bg-white border border-slate-200 rounded-lg shadow-sm text-sm font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label="Filter teachers by status"
+      >
+        <span className="material-symbols-outlined text-[20px] text-slate-500" aria-hidden>
+          filter_list
+        </span>
+        <span className="whitespace-nowrap">{currentLabel}</span>
+        <span className="material-symbols-outlined text-[18px] text-slate-400" aria-hidden>
+          {open ? 'expand_less' : 'expand_more'}
+        </span>
+      </button>
+      {open ? (
+        <div
+          className="absolute right-0 mt-1 min-w-[240px] rounded-lg border border-slate-200 bg-white py-1 shadow-lg z-50"
+          role="menu"
+        >
+          {STATUS_FILTER_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                onChange(opt.value);
+                setOpen(false);
+              }}
+              className={`w-full text-left px-3 py-2.5 text-sm transition-colors ${
+                opt.value === value
+                  ? 'bg-primary/10 text-primary font-bold'
+                  : 'text-slate-800 hover:bg-slate-50 font-medium'
+              }`}
+            >
+              <span className="block">{opt.label}</span>
+              <span className="block text-xs font-normal text-slate-500 mt-0.5">{opt.description}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export default function TeachersClient({
   initialTeachers,
@@ -17,10 +104,13 @@ export default function TeachersClient({
   monthColumnLabels: string[];
 }) {
   const [search, setSearch] = useState('');
-  
-  const filteredTeachers = initialTeachers.filter((teacher) =>
-    teacher.name.toLowerCase().includes(search.toLowerCase())
-  );
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
+
+  const filteredTeachers = initialTeachers.filter((teacher) => {
+    if (statusFilter === 'active' && teacher.status !== 'active') return false;
+    if (statusFilter === 'inactive' && teacher.status !== 'inactive') return false;
+    return teacher.name.toLowerCase().includes(search.toLowerCase());
+  });
 
   return (
     <div className="pt-24 px-10 pb-12 animate-fade-up">
@@ -34,18 +124,21 @@ export default function TeachersClient({
           </p>
         </div>
         
-        {/* Search Bar - HubSpot CRM style */}
-        <div className="relative w-full md:w-80">
-          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-            search
-          </span>
-          <input
-            type="text"
-            placeholder="Search teachers..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-sm"
-          />
+        <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto md:items-center md:justify-end">
+          <StatusFilterMenu value={statusFilter} onChange={setStatusFilter} />
+          {/* Search Bar - HubSpot CRM style */}
+          <div className="relative w-full sm:flex-1 md:w-80 md:flex-none">
+            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+              search
+            </span>
+            <input
+              type="text"
+              placeholder="Search teachers..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-sm"
+            />
+          </div>
         </div>
       </div>
 
@@ -77,6 +170,11 @@ export default function TeachersClient({
                       {teacher.name.charAt(0).toUpperCase()}
                     </div>
                     <span className="font-medium text-slate-900">{teacher.name}</span>
+                    {teacher.status === 'inactive' ? (
+                      <span className="ml-1 inline-flex items-center rounded-full bg-slate-200/80 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-600">
+                        Inactive
+                      </span>
+                    ) : null}
                   </div>
                 </td>
                 {teacher.monthHours.map((col) => (
@@ -101,7 +199,15 @@ export default function TeachersClient({
                 <td colSpan={2 + monthColumnLabels.length} className="py-12 text-center text-slate-500">
                   <div className="flex flex-col items-center justify-center">
                     <span className="material-symbols-outlined text-4xl mb-3 text-slate-300">search_off</span>
-                    <p>No teachers found matching "{search}"</p>
+                    <p>
+                      {search.trim()
+                        ? `No teachers found matching "${search}"`
+                        : statusFilter === 'active'
+                          ? 'No active teachers to show. Try "All teachers" to include inactive.'
+                          : statusFilter === 'inactive'
+                            ? 'No inactive teachers.'
+                            : 'No teachers yet.'}
+                    </p>
                   </div>
                 </td>
               </tr>

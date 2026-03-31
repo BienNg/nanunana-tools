@@ -1,7 +1,9 @@
 import Link from 'next/link';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { lessonDurationMinutes, normalizeGroupClassType } from '@/lib/courseDuration';
+import type { TeacherStatus } from '@/app/actions/updateTeacherStatus';
 import TeacherMonthDropdown from './TeacherMonthDropdown';
+import TeacherSettingsDropdown from './TeacherSettingsDropdown';
 import TeacherSessionsSection from './TeacherSessionsSection';
 import { buildTeacherLessonMatchKeys, lessonMatchesAnyTeacherKey } from '@/lib/teacherLessonMatch';
 
@@ -58,7 +60,7 @@ export default async function TeacherDetailsPage({
   // 1. Fetch teacher details
   const { data: teacher } = await supabase
     .from('teachers')
-    .select('id, name')
+    .select('id, name, status')
     .eq('id', id)
     .single();
 
@@ -73,6 +75,9 @@ export default async function TeacherDetailsPage({
       </div>
     );
   }
+
+  const teacherStatus: TeacherStatus =
+    (teacher as { status?: string }).status === 'inactive' ? 'inactive' : 'active';
 
   // 2. Fetch courses taught by this teacher
   const { data: courseTeachers } = await supabase
@@ -389,37 +394,45 @@ export default async function TeacherDetailsPage({
                 <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight text-on-surface font-headline">
                   {teacher.name}
                 </h2>
-                <p className="text-on-surface-variant font-medium mt-1">
-                  Faculty metrics & performance overview
+                <p className="text-on-surface-variant font-medium mt-1 flex flex-wrap items-center gap-2">
+                  <span>Faculty metrics & performance overview</span>
+                  {teacherStatus === 'inactive' ? (
+                    <span className="inline-flex items-center rounded-full bg-on-surface/10 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-on-surface-variant">
+                      Inactive
+                    </span>
+                  ) : null}
                 </p>
               </div>
             </div>
             
-            {/* Filter Toggle */}
-            <div className="flex items-center bg-surface-container-lowest shadow-sm p-1 rounded-xl border border-outline-variant/10">
-              <Link 
-                href={`/teachers/${id}?filter=all`}
-                className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${filter === 'all' ? 'bg-primary text-on-primary' : 'text-on-surface-variant hover:bg-surface-container-low'}`}
-              >
-                All Time
-              </Link>
-              <Link 
-                href={`/teachers/${id}`}
-                className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${filter === 'monthly' ? 'bg-primary text-on-primary' : 'text-on-surface-variant hover:bg-surface-container-low'}`}
-              >
-                Monthly
-              </Link>
-              {filter === 'monthly' && (
-                <>
-                  <div className="h-6 w-px bg-outline-variant/30 mx-2"></div>
-                  <TeacherMonthDropdown
-                    teacherId={id}
-                    months={monthOptions}
-                    selectedValue={selectedYearMonth}
-                    selectedLabel={selectedMonthLabel}
-                  />
-                </>
-              )}
+            <div className="flex items-center gap-2">
+              <TeacherSettingsDropdown teacherId={id} status={teacherStatus} />
+              {/* Filter Toggle */}
+              <div className="flex items-center bg-surface-container-lowest shadow-sm p-1 rounded-xl border border-outline-variant/10">
+                <Link 
+                  href={`/teachers/${id}?filter=all`}
+                  className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${filter === 'all' ? 'bg-primary text-on-primary' : 'text-on-surface-variant hover:bg-surface-container-low'}`}
+                >
+                  All Time
+                </Link>
+                <Link 
+                  href={`/teachers/${id}`}
+                  className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${filter === 'monthly' ? 'bg-primary text-on-primary' : 'text-on-surface-variant hover:bg-surface-container-low'}`}
+                >
+                  Monthly
+                </Link>
+                {filter === 'monthly' && (
+                  <>
+                    <div className="h-6 w-px bg-outline-variant/30 mx-2"></div>
+                    <TeacherMonthDropdown
+                      teacherId={id}
+                      months={monthOptions}
+                      selectedValue={selectedYearMonth}
+                      selectedLabel={selectedMonthLabel}
+                    />
+                  </>
+                )}
+              </div>
             </div>
           </div>
         </div>

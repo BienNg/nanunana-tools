@@ -180,7 +180,7 @@ async function fetchAllLessonsForCourses(supabase: SupabaseClient, courseIds: st
 
 export default async function TeachersPage() {
   const supabase = getSupabaseAdmin();
-  const { data: teachers, error } = await supabase.from('teachers').select('id, name').order('name');
+  const { data: teachers, error } = await supabase.from('teachers').select('id, name, status').order('name');
 
   if (error) {
     console.error('Error fetching teachers:', error);
@@ -284,9 +284,12 @@ export default async function TeachersPage() {
       label: ym,
       hoursDisplay: hoursDisplayFromMinutes(minutesByYm[ym] ?? 0),
     }));
+    const rawStatus = (teacher as { status?: string }).status;
+    const status = rawStatus === 'inactive' ? ('inactive' as const) : ('active' as const);
     return {
       id: teacher.id,
       name: teacher.name,
+      status,
       monthHours,
     };
   });
