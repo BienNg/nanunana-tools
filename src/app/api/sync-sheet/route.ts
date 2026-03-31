@@ -21,6 +21,7 @@ export async function POST(request: Request) {
   let source: string | { fileName: string; bytes: Uint8Array } | null = null;
   let skippedRowsBySheet: SkippedRowsBySheet = {};
   let teacherAliasResolutions: TeacherAliasResolution[] | undefined;
+  let workbookClassType: unknown;
   try {
     const contentType = request.headers.get('content-type') ?? '';
     if (contentType.includes('multipart/form-data')) {
@@ -28,6 +29,10 @@ export async function POST(request: Request) {
       const file = formData.get('file');
       const skippedRaw = formData.get('skippedRowsBySheet');
       const aliasRaw = formData.get('teacherAliasResolutions');
+      const classTypeRaw = formData.get('workbookClassType');
+      if (typeof classTypeRaw === 'string' && classTypeRaw.trim()) {
+        workbookClassType = classTypeRaw.trim();
+      }
       if (file instanceof File) {
         if (!file.name.toLowerCase().endsWith('.xlsx')) {
           return Response.json({ error: 'Only .xlsx files are supported for file import' }, { status: 400 });
@@ -49,6 +54,7 @@ export async function POST(request: Request) {
         url?: string;
         skippedRowsBySheet?: unknown;
         teacherAliasResolutions?: unknown;
+        workbookClassType?: unknown;
       };
       const url = typeof body.url === 'string' ? body.url.trim() : '';
       if (url) source = url;
@@ -56,6 +62,9 @@ export async function POST(request: Request) {
         skippedRowsBySheet = body.skippedRowsBySheet as SkippedRowsBySheet;
       }
       teacherAliasResolutions = parseTeacherAliasResolutions(body.teacherAliasResolutions);
+      if (body.workbookClassType != null && body.workbookClassType !== '') {
+        workbookClassType = body.workbookClassType;
+      }
     }
   } catch {
     return Response.json({ error: 'Invalid request body' }, { status: 400 });
@@ -77,6 +86,7 @@ export async function POST(request: Request) {
         const result = await runGoogleSheetSync(source, {
           skippedRowsBySheet,
           teacherAliasResolutions,
+          workbookClassType,
           onProgress: (event) => {
             send({ event: 'progress', ...event });
           },

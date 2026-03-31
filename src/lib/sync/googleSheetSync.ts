@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { findCurrentCourseVisibleIndex, isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
+import type { GroupClassType } from '@/lib/courseDuration';
+import { parseWorkbookClassTypeInput } from '@/lib/courseDuration';
 
 type AttendanceFromColor = 'Present' | 'Absent' | null;
 type SheetRow = string[];
@@ -302,13 +304,19 @@ function parseSheetDate(raw: string | undefined | null): string | null {
   return null;
 }
 
-type ClassType = 'Online_DE' | 'Online_VN' | 'Offline';
+export type WorkbookClassType = GroupClassType;
 
-function detectClassType(title: string): ClassType | null {
+function detectClassType(title: string): WorkbookClassType | null {
   if (title.includes('Online_DE')) return 'Online_DE';
   if (title.includes('Online_VN')) return 'Online_VN';
   if (title.includes('Offline')) return 'Offline';
   return null;
+}
+
+function resolveClassTypeForSync(workbookTitle: string, rawOverride: unknown): WorkbookClassType | null {
+  const fromOverride = parseWorkbookClassTypeInput(rawOverride);
+  if (fromOverride) return fromOverride;
+  return detectClassType(workbookTitle);
 }
 
 function findHeaderRowIndex(rows: SheetRow[]): number {
@@ -1066,6 +1074,8 @@ export type ScanGoogleSheetResult =
   | {
       success: true;
       workbookTitle: string;
+      /** From workbook title: Online_DE, Online_VN, Offline substring match; null if none. */
+      workbookClassType: WorkbookClassType | null;
       sheets: ScannedSheet[];
       /** Visible-tab index of the current course, or null if none qualifies. Sheets after this are not imported. */
       currentCourseVisibleIndex: number | null;
@@ -1302,6 +1312,7 @@ export async function scanGoogleSheet(
     return {
       success: true,
       workbookTitle,
+      workbookClassType: detectClassType(workbookTitle),
       sheets: scannedSheets,
       currentCourseVisibleIndex,
       detectedNewTeachers,
@@ -1320,6 +1331,8 @@ export async function runGoogleSheetSync(
     onProgress?: (event: SyncProgressEvent) => void | Promise<void>;
     skippedRowsBySheet?: SkippedRowsBySheet;
     teacherAliasResolutions?: TeacherAliasResolution[];
+    /** When workbook title does not contain Online_DE / Online_VN / Offline, pass the user’s choice from Review Import. */
+    workbookClassType?: unknown;
   }
 ): Promise<SyncGoogleSheetResult> {
   const onProgress = options?.onProgress;
@@ -1336,6 +1349,15 @@ export async function runGoogleSheetSync(
       message: `Workbook: ${workbookTitle}`,
     });
 
+    const classType = resolveClassTypeForSync(workbookTitle, options?.workbookClassType);
+    if (classType === null) {
+      return {
+        success: false,
+        error:
+          'Class type is required: pick Online_DE, Online_VN, Offline, M, A, or P in Review Import, or add a token to the workbook title.',
+      };
+    }
+
     await onProgress?.({ type: 'db', message: 'teachers — load cache + aliases' });
     const { teacherCache, validTeacherIds, canonicalTeacherNameById } =
       await loadTeacherResolutionData(supabase);
@@ -1346,8 +1368,6 @@ export async function runGoogleSheetSync(
       validTeacherIds,
       onProgress
     );
-
-    const classType = detectClassType(workbookTitle);
 
     await onProgress?.({ type: 'db', message: 'groups — select by spreadsheet_id' });
     const { data: existingGroup, error: groupSelectError } = await supabase

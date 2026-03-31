@@ -6,6 +6,7 @@ import type {
   ScanGoogleSheetResult,
   SkippedRowsBySheet,
   TeacherAliasResolution,
+  WorkbookClassType,
 } from '@/lib/sync/googleSheetSync';
 
 type SyncResult = { success: true; message: string } | { success: false; error: string };
@@ -190,7 +191,8 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
 
   const handleImport = async (
     skippedRowsBySheet: SkippedRowsBySheet,
-    teacherAliasResolutions: TeacherAliasResolution[]
+    teacherAliasResolutions: TeacherAliasResolution[],
+    workbookClassType?: WorkbookClassType
   ) => {
     if (!url && !file) return;
     setIsImporting(true);
@@ -209,12 +211,20 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
               if (teacherAliasResolutions.length > 0) {
                 formData.set('teacherAliasResolutions', JSON.stringify(teacherAliasResolutions));
               }
+              if (workbookClassType != null) {
+                formData.set('workbookClassType', workbookClassType);
+              }
               return { method: 'POST', body: formData } as const;
             })()
           : {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url, skippedRowsBySheet, teacherAliasResolutions }),
+              body: JSON.stringify({
+                url,
+                skippedRowsBySheet,
+                teacherAliasResolutions,
+                ...(workbookClassType != null ? { workbookClassType } : {}),
+              }),
             };
       const res = await fetch('/api/sync-sheet', req);
 

@@ -8,7 +8,9 @@ import type {
   ScannedSheet,
   SkippedRowsBySheet,
   TeacherAliasResolution,
+  WorkbookClassType,
 } from '@/lib/sync/googleSheetSync';
+import { GROUP_CLASS_TYPE_OPTIONS } from '@/lib/courseDuration';
 import {
   findLastTaughtSessionRowIndex,
   isSheetDatumStrictlyAfterToday,
@@ -247,7 +249,12 @@ type ScanPreviewModalProps = {
   isOpen: boolean;
   scanResult: Extract<ScanGoogleSheetResult, { success: true }> | null;
   onClose: () => void;
-  onConfirm: (skippedRowsBySheet: SkippedRowsBySheet, teacherAliasResolutions: TeacherAliasResolution[]) => void;
+  onConfirm: (
+    skippedRowsBySheet: SkippedRowsBySheet,
+    teacherAliasResolutions: TeacherAliasResolution[],
+    /** Sent to the server only when the workbook title did not imply a class type. */
+    workbookClassType?: WorkbookClassType
+  ) => void;
   isImporting: boolean;
   /** Latest non-database import step (spreadsheet load, tab fetch, etc.). */
   importProgressMessage?: string;
@@ -282,6 +289,8 @@ export default function ScanPreviewModal({
   const [hoverHint, setHoverHint] = useState<HoverHint>(null);
   /** normalized teacher name key → existing teacher id when user maps a sheet name to a known teacher */
   const [teacherMergeByKey, setTeacherMergeByKey] = useState<Record<string, string>>({});
+  /** When scan did not detect a class type from the workbook title, user must pick one. */
+  const [manualWorkbookClassType, setManualWorkbookClassType] = useState<'' | WorkbookClassType>('');
   const importLogScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -305,6 +314,7 @@ export default function ScanPreviewModal({
     setSkippedRowsBySheet({});
     setOpenRowActionIndex(null);
     setTeacherMergeByKey({});
+    setManualWorkbookClassType('');
   }, [isOpen, scanResult]);
 
   useEffect(() => {
@@ -354,6 +364,14 @@ export default function ScanPreviewModal({
     if (!isOpen || !scanResult || !mounted) return false;
     return sheetIssueCounts.some((c) => c > 0);
   }, [isOpen, scanResult, mounted, sheetIssueCounts]);
+
+  /** Same rule as import: substring on workbook title (not each tab). */
+  const hasUnknownWorkbookClassType = scanResult?.workbookClassType == null;
+
+  const resolvedWorkbookClassType: WorkbookClassType | null =
+    scanResult?.workbookClassType ?? (manualWorkbookClassType === '' ? null : manualWorkbookClassType);
+
+  const confirmImportBlocked = hasImportBlockingSheetIssues || resolvedWorkbookClassType === null;
 
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
   const busy = isImporting || isResyncing;
@@ -497,6 +515,44 @@ export default function ScanPreviewModal({
 
         {/* Body */}
         <div className="flex-1 overflow-auto p-6 bg-white">
+          {hasUnknownWorkbookClassType ? (
+            <section
+              className="mb-4 rounded-md border border-amber-300 bg-amber-50/90 px-4 py-3"
+              role="alert"
+              aria-live="polite"
+            >
+              <h3 className="text-sm font-semibold text-amber-950">Unknown class type</h3>
+              <p className="mt-1 text-xs text-amber-900">
+                The workbook title &ldquo;{scanResult.workbookTitle}&rdquo; does not contain{' '}
+                <strong>Online_DE</strong>, <strong>Online_VN</strong>, or <strong>Offline</strong> (substring match).
+                Choose a class type below for this import, or rename the spreadsheet / .xlsx and use{' '}
+                <strong>Resync</strong>.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <label htmlFor="manual-workbook-class-type" className="text-xs font-medium text-amber-950">
+                  Class type
+                </label>
+                <select
+                  id="manual-workbook-class-type"
+                  value={manualWorkbookClassType}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setManualWorkbookClassType(v === '' ? '' : (v as WorkbookClassType));
+                  }}
+                  disabled={busy}
+                  className="min-w-[12rem] rounded border border-amber-400/90 bg-white px-2 py-1.5 text-sm font-medium text-gray-900 shadow-sm focus:border-amber-600 focus:outline-none focus:ring-1 focus:ring-amber-500 disabled:opacity-50"
+                  aria-label="Class type for this workbook"
+                >
+                  <option value="">Choose class type…</option>
+                  {GROUP_CLASS_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </section>
+          ) : null}
           {detectedNewTeachers.length > 0 ? (
             <section className="mb-4 rounded-md border border-emerald-200 bg-emerald-50/70 px-4 py-3">
               <h3 className="text-sm font-semibold text-emerald-900">New teacher names</h3>
@@ -836,13 +892,17 @@ export default function ScanPreviewModal({
                 const tid = teacherMergeByKey[normalizePersonNameKey(name)];
                 if (tid) teacherAliasResolutions.push({ aliasName: name, teacherId: tid });
               }
-              onConfirm(skippedRowsBySheet, teacherAliasResolutions);
+              const workbookClassTypeForApi =
+                scanResult.workbookClassType == null ? resolvedWorkbookClassType ?? undefined : undefined;
+              onConfirm(skippedRowsBySheet, teacherAliasResolutions, workbookClassTypeForApi);
             }}
-            disabled={busy || hasImportBlockingSheetIssues}
+            disabled={busy || confirmImportBlocked}
             title={
-              hasImportBlockingSheetIssues && !busy
-                ? 'Resolve validation issues on every sheet through the current course before importing.'
-                : undefined
+              !busy && resolvedWorkbookClassType === null
+                ? 'Select a class type (or fix the workbook title and resync).'
+                : !busy && hasImportBlockingSheetIssues
+                  ? 'Resolve validation issues on every sheet through the current course before importing.'
+                  : undefined
             }
             className="px-6 py-2 text-sm font-medium text-white bg-[#ff7a59] rounded hover:bg-[#ff8f73] focus:ring-2 focus:ring-offset-2 focus:ring-[#ff7a59] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
           >

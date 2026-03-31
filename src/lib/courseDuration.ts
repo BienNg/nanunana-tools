@@ -1,10 +1,20 @@
 /**
  * Scheduled course duration from lesson rows + group class type.
  * Rules: Online_DE/VN → 1.5h per session; first session → 2h if actual span > 1h50m.
- * Offline → 2.5h per session. Unknown class type → sum of actual start/end times.
+ * Offline → 2.5h per session. M, A, P and unknown → sum of actual start/end times.
  */
 
-export type GroupClassType = 'Online_DE' | 'Online_VN' | 'Offline';
+export type GroupClassType = 'Online_DE' | 'Online_VN' | 'Offline' | 'M' | 'A' | 'P';
+
+/** Values shown when class type must be chosen manually (e.g. workbook title has no token). */
+export const GROUP_CLASS_TYPE_OPTIONS: readonly GroupClassType[] = [
+  'Online_DE',
+  'Online_VN',
+  'Offline',
+  'M',
+  'A',
+  'P',
+];
 
 export type LessonForDuration = {
   start_time?: string | null;
@@ -18,7 +28,19 @@ export function normalizeGroupClassType(raw: string | null | undefined): GroupCl
   if (t === 'Online_DE' || t.toLowerCase() === 'online_de') return 'Online_DE';
   if (t === 'Online_VN' || t.toLowerCase() === 'online_vn') return 'Online_VN';
   if (t === 'Offline' || t.toLowerCase() === 'offline') return 'Offline';
+  if (t === 'M' || t === 'm') return 'M';
+  if (t === 'A' || t === 'a') return 'A';
+  if (t === 'P' || t === 'p') return 'P';
   return null;
+}
+
+/** Parse API / form input into a stored class type. */
+export function parseWorkbookClassTypeInput(raw: unknown): GroupClassType | null {
+  if (raw == null) return null;
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim();
+  if (!t) return null;
+  return normalizeGroupClassType(t);
 }
 
 /** Positive minutes between schedule start/end (HH:MM or HH:MM:SS), or null if invalid. */
