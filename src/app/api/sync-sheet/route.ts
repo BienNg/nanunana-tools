@@ -1,95 +1,33 @@
-import { runGoogleSheetSync } from '@/lib/sync/googleSheetSync';
+import { parseReviewedSnapshotImportPayload, runReviewedSnapshotSync } from '@/lib/sync/googleSheetSync';
 import { revalidatePath } from 'next/cache';
-import type {
-  SkippedAttendanceCellsBySheet,
-  SkippedRowsBySheet,
-  TeacherAliasResolution,
-} from '@/lib/sync/googleSheetSync';
 
 export const runtime = 'nodejs';
 
-function parseTeacherAliasResolutions(raw: unknown): TeacherAliasResolution[] | undefined {
-  if (!raw || !Array.isArray(raw)) return undefined;
-  const out: TeacherAliasResolution[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const o = item as Record<string, unknown>;
-    const aliasName = typeof o.aliasName === 'string' ? o.aliasName.trim() : '';
-    const teacherId = typeof o.teacherId === 'string' ? o.teacherId.trim() : '';
-    if (!aliasName || !teacherId) continue;
-    out.push({ aliasName, teacherId });
-  }
-  return out.length ? out : undefined;
-}
-
 export async function POST(request: Request) {
-  let source: string | { fileName: string; bytes: Uint8Array } | null = null;
-  let skippedRowsBySheet: SkippedRowsBySheet = {};
-  let skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet = {};
-  let teacherAliasResolutions: TeacherAliasResolution[] | undefined;
-  let workbookClassType: unknown;
-  try {
-    const contentType = request.headers.get('content-type') ?? '';
-    if (contentType.includes('multipart/form-data')) {
-      const formData = await request.formData();
-      const file = formData.get('file');
-      const skippedRaw = formData.get('skippedRowsBySheet');
-      const skippedAttendanceRaw = formData.get('skippedAttendanceCellsBySheet');
-      const aliasRaw = formData.get('teacherAliasResolutions');
-      const classTypeRaw = formData.get('workbookClassType');
-      if (typeof classTypeRaw === 'string' && classTypeRaw.trim()) {
-        workbookClassType = classTypeRaw.trim();
-      }
-      if (file instanceof File) {
-        if (!file.name.toLowerCase().endsWith('.xlsx')) {
-          return Response.json({ error: 'Only .xlsx files are supported for file import' }, { status: 400 });
-        }
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        source = { fileName: file.name, bytes };
-      }
-      if (typeof skippedRaw === 'string' && skippedRaw.trim()) {
-        const parsed = JSON.parse(skippedRaw) as unknown;
-        if (parsed && typeof parsed === 'object') {
-          skippedRowsBySheet = parsed as SkippedRowsBySheet;
-        }
-      }
-      if (typeof skippedAttendanceRaw === 'string' && skippedAttendanceRaw.trim()) {
-        const parsed = JSON.parse(skippedAttendanceRaw) as unknown;
-        if (parsed && typeof parsed === 'object') {
-          skippedAttendanceCellsBySheet = parsed as SkippedAttendanceCellsBySheet;
-        }
-      }
-      if (typeof aliasRaw === 'string' && aliasRaw.trim()) {
-        teacherAliasResolutions = parseTeacherAliasResolutions(JSON.parse(aliasRaw) as unknown);
-      }
-    } else {
-      const body = (await request.json()) as {
-        url?: string;
-        skippedRowsBySheet?: unknown;
-        skippedAttendanceCellsBySheet?: unknown;
-        teacherAliasResolutions?: unknown;
-        workbookClassType?: unknown;
-      };
-      const url = typeof body.url === 'string' ? body.url.trim() : '';
-      if (url) source = url;
-      if (body.skippedRowsBySheet && typeof body.skippedRowsBySheet === 'object') {
-        skippedRowsBySheet = body.skippedRowsBySheet as SkippedRowsBySheet;
-      }
-      if (body.skippedAttendanceCellsBySheet && typeof body.skippedAttendanceCellsBySheet === 'object') {
-        skippedAttendanceCellsBySheet = body.skippedAttendanceCellsBySheet as SkippedAttendanceCellsBySheet;
-      }
-      teacherAliasResolutions = parseTeacherAliasResolutions(body.teacherAliasResolutions);
-      if (body.workbookClassType != null && body.workbookClassType !== '') {
-        workbookClassType = body.workbookClassType;
-      }
+  let parsedPayload: ReturnType<typeof parseReviewedSnapshotImportPayload> | null = null;
+  const contentLengthHeader = request.headers.get('content-length');
+  if (contentLengthHeader) {
+    const bytes = Number(contentLengthHeader);
+    // Keep a conservative guard so huge snapshot payloads fail with a clear message.
+    if (Number.isFinite(bytes) && bytes > 8 * 1024 * 1024) {
+      return Response.json(
+        { error: 'Import payload is too large. Resync and import fewer tabs at once.' },
+        { status: 413 }
+      );
     }
+  }
+  try {
+    const body = (await request.json()) as unknown;
+    parsedPayload = parseReviewedSnapshotImportPayload(body);
   } catch {
     return Response.json({ error: 'Invalid request body' }, { status: 400 });
   }
 
-  if (!source) {
-    return Response.json({ error: 'Missing source (Google Sheets URL or .xlsx file)' }, { status: 400 });
+  if (!parsedPayload || !parsedPayload.ok) {
+    return Response.json({ error: parsedPayload?.error ?? 'Invalid request body' }, { status: 400 });
   }
+  const { reviewSnapshot, skippedRowsBySheet, skippedAttendanceCellsBySheet, teacherAliasResolutions, workbookClassType } =
+    parsedPayload.value;
 
   const encoder = new TextEncoder();
 
@@ -100,7 +38,7 @@ export async function POST(request: Request) {
       };
 
       try {
-        const result = await runGoogleSheetSync(source, {
+        const result = await runReviewedSnapshotSync(reviewSnapshot, {
           skippedRowsBySheet,
           skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
