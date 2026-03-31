@@ -406,13 +406,26 @@ export default function ScanPreviewModal({
     return sheetIssueCounts.some((c) => c > 0);
   }, [isOpen, scanResult, mounted, sheetIssueCounts]);
 
+  /** Block no-op reimports: every importable matched sheet has no structural changes. */
+  const hasNoDetectedImportChanges = useMemo(() => {
+    if (!isOpen || !scanResult || !mounted) return false;
+    const cutoff = scanResult.currentCourseVisibleIndex;
+    const importable = scanResult.sheets.filter((s) => cutoff === null || s.visibleOrderIndex <= cutoff);
+    if (importable.length === 0) return true;
+    return !importable.some((s) => {
+      if (!s.reimportDiff) return true;
+      return s.reimportDiff.hasStructuralChanges || Boolean(s.reimportDiff.pendingCompletionSync);
+    });
+  }, [isOpen, scanResult, mounted]);
+
   /** Same rule as import: substring on workbook title (not each tab). */
   const hasUnknownWorkbookClassType = scanResult?.workbookClassType == null;
 
   const resolvedWorkbookClassType: WorkbookClassType | null =
     scanResult?.workbookClassType ?? (manualWorkbookClassType === '' ? null : manualWorkbookClassType);
 
-  const confirmImportBlocked = hasImportBlockingSheetIssues || resolvedWorkbookClassType === null;
+  const confirmImportBlocked =
+    hasImportBlockingSheetIssues || resolvedWorkbookClassType === null || hasNoDetectedImportChanges;
 
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
   const busy = isImporting || isResyncing;
@@ -679,6 +692,15 @@ export default function ScanPreviewModal({
             <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-950" role="alert">
               {resyncError}
             </div>
+          ) : null}
+          {hasNoDetectedImportChanges && !isImporting && !isResyncing ? (
+            <section className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3" role="status" aria-live="polite">
+              <h3 className="text-sm font-semibold text-sky-950">No updates detected</h3>
+              <p className="mt-1 text-xs text-sky-900">
+                This import matches what is already in the database for the importable tabs. There is nothing new to
+                apply, so import is disabled.
+              </p>
+            </section>
           ) : null}
           {isImporting ? (
             <div className="mb-4 space-y-3" role="status" aria-live="polite">
@@ -1045,6 +1067,8 @@ export default function ScanPreviewModal({
             title={
               !busy && resolvedWorkbookClassType === null
                 ? 'Select a class type (or fix the workbook title and resync).'
+                : !busy && hasNoDetectedImportChanges
+                  ? 'No updates were found for importable tabs. Change the sheet and resync first.'
                 : !busy && hasImportBlockingSheetIssues
                   ? 'Resolve validation issues on every sheet through the current course before importing.'
                   : undefined

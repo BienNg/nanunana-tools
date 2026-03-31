@@ -926,6 +926,7 @@ async function syncOneCourseSheet(
   const sessions: SheetParsedSession[] = [];
   let previewRowIndex = -1;
   let skippedSessionRows = 0;
+  let userSkippedSessionRows = 0;
   const seenFolien = new Set<string>();
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
@@ -944,6 +945,7 @@ async function syncOneCourseSheet(
     previewRowIndex += 1;
     if (skippedPreviewRows.has(previewRowIndex)) {
       skippedSessionRows += 1;
+      userSkippedSessionRows += 1;
       continue;
     }
 
@@ -1121,10 +1123,10 @@ async function syncOneCourseSheet(
     onProgress
   );
 
-  const courseSyncCompleted = skippedSessionRows === 0;
+  const courseSyncCompleted = userSkippedSessionRows === 0;
   await onProgress?.({
     type: 'db',
-    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted}`,
+    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (user_skipped=${userSkippedSessionRows}, total_skipped=${skippedSessionRows})`,
   });
   const { error: courseSyncFlagErr } = await supabase
     .from('courses')
@@ -1134,7 +1136,7 @@ async function syncOneCourseSheet(
     throw new Error(courseSyncFlagErr.message);
   }
 
-  return { ok: true, hadSkippedSessions: skippedSessionRows > 0 };
+  return { ok: true, hadSkippedSessions: userSkippedSessionRows > 0 };
 }
 
 export type SyncGoogleSheetResult =
@@ -1169,6 +1171,8 @@ export type ScannedSheetReimportDiff = {
   changedCellsByRow: Record<number, string[]>;
   /** Tooltip copy for each cell in `changedCellsByRow` (same keys). */
   changeHintsByRow: Record<number, Record<string, string>>;
+  /** Existing DB course is not completed yet; allow re-import to refresh completion flags even without content diffs. */
+  pendingCompletionSync?: boolean;
   /** Import-eligible rows with no paired existing lesson (positional), treated as new sessions. */
   newSessionRowIndices: number[];
   hasStructuralChanges: boolean;
@@ -1883,7 +1887,7 @@ export async function scanGoogleSheet(
         .maybeSingle();
       if (!grpErr && grp?.id) {
         const [cRes, sRes] = await Promise.all([
-          supabase.from('courses').select('id, name, sheet_url').eq('group_id', grp.id),
+          supabase.from('courses').select('id, name, sheet_url, sync_completed').eq('group_id', grp.id),
           supabase.from('students').select('id, name').eq('group_id', grp.id),
         ]);
         const courses = cRes.data ?? [];
@@ -1914,7 +1918,12 @@ export async function scanGoogleSheet(
             if (!cid) continue;
             const snaps = snapshotsMap.get(cid) ?? [];
             if (snaps.length > 0) {
-              sh.reimportDiff = buildReimportDiffForSheet(sh, cid, snaps, now);
+              const diff = buildReimportDiffForSheet(sh, cid, snaps, now);
+              const matched = courses.find((c) => c.id === cid);
+              if (matched && !Boolean(matched.sync_completed)) {
+                diff.pendingCompletionSync = true;
+              }
+              sh.reimportDiff = diff;
             }
           }
         }
@@ -2095,6 +2104,7 @@ export async function runGoogleSheetSync(
     let skipped = 0;
     let skippedAfterCurrentCourse = 0;
     let anyCourseHadSkippedSessions = false;
+    const importedCourseIds: string[] = [];
     let visibleIndex = 0;
     let visibleSlotIndex = 0;
     const visibleSlots: { sampleRows: ScannedSampleRow[] }[] = [];
@@ -2157,10 +2167,32 @@ export async function runGoogleSheetSync(
       if (result.ok) {
         synced++;
         if (result.hadSkippedSessions) anyCourseHadSkippedSessions = true;
+        const { data: c } = await supabase
+          .from('courses')
+          .select('id')
+          .eq('group_id', group.id)
+          .eq('name', item.title)
+          .maybeSingle();
+        if (c?.id) importedCourseIds.push(c.id);
       } else skipped++;
     }
 
-    const groupSyncCompleted = skippedAfterCurrentCourse === 0 && !anyCourseHadSkippedSessions;
+    let allImportedCoursesCompleted = importedCourseIds.length > 0;
+    if (importedCourseIds.length > 0) {
+      const { data: completionRows, error: completionErr } = await supabase
+        .from('courses')
+        .select('id, sync_completed')
+        .in('id', importedCourseIds);
+      if (completionErr && !isSupabaseMissingColumnError(completionErr.message, 'sync_completed')) {
+        throw new Error(completionErr.message);
+      }
+      if (completionRows) {
+        allImportedCoursesCompleted = completionRows.every((r) => Boolean(r.sync_completed));
+      }
+    }
+
+    const groupSyncCompleted =
+      skippedAfterCurrentCourse === 0 && !anyCourseHadSkippedSessions && allImportedCoursesCompleted;
     await onProgress?.({
       type: 'db',
       message: `groups — sync_completed=${groupSyncCompleted}`,
