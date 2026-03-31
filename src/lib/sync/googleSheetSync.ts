@@ -629,7 +629,7 @@ async function syncOneCourseSheet(
   sheetUrl: string | null,
   options?: { dedupeFolienRows?: boolean },
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<{ ok: boolean; reason?: string; hadSkippedSessions?: boolean }> {
   const sheetLabel = `[${sheetTitle}]`;
   if (!rows || rows.length < 4) return { ok: false, reason: 'too_few_rows' };
 
@@ -769,6 +769,7 @@ async function syncOneCourseSheet(
 
   let lessonSeq = 0;
   let previewRowIndex = -1;
+  let skippedSessionRows = 0;
   const seenFolien = new Set<string>();
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
@@ -785,11 +786,17 @@ async function syncOneCourseSheet(
       }
     }
     previewRowIndex += 1;
-    if (skippedPreviewRows.has(previewRowIndex)) continue;
+    if (skippedPreviewRows.has(previewRowIndex)) {
+      skippedSessionRows += 1;
+      continue;
+    }
 
     const rawDate = colIndices.datum !== -1 ? row[colIndices.datum] : '';
     const parsedDate = parseSheetDate(rawDate != null ? String(rawDate) : null);
-    if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, new Date())) continue;
+    if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, new Date())) {
+      skippedSessionRows += 1;
+      continue;
+    }
 
     const startTime = normalizeTimeForDb(colIndices.von !== -1 ? row[colIndices.von] : null);
     const endTime = normalizeTimeForDb(colIndices.bis !== -1 ? row[colIndices.bis] : null);
@@ -813,7 +820,10 @@ async function syncOneCourseSheet(
     const teacherCell =
       canonicalLessonLabels.length > 0 ? [...new Set(canonicalLessonLabels)].join(', ') : null;
 
-    if (colIndices.datum !== -1 && !parsedDate) continue;
+    if (colIndices.datum !== -1 && !parsedDate) {
+      skippedSessionRows += 1;
+      continue;
+    }
 
     lessonSeq += 1;
     const lessonHint = parsedDate
@@ -840,6 +850,7 @@ async function syncOneCourseSheet(
 
     if (lessonError || !lesson) {
       console.error('Error inserting lesson:', lessonError);
+      skippedSessionRows += 1;
       continue;
     }
 
@@ -883,7 +894,21 @@ async function syncOneCourseSheet(
     sheetLabel,
     onProgress
   );
-  return { ok: true };
+
+  const courseSyncCompleted = skippedSessionRows === 0;
+  await onProgress?.({
+    type: 'db',
+    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted}`,
+  });
+  const { error: courseSyncFlagErr } = await supabase
+    .from('courses')
+    .update({ sync_completed: courseSyncCompleted })
+    .eq('id', courseId);
+  if (courseSyncFlagErr && !isSupabaseMissingColumnError(courseSyncFlagErr.message, 'sync_completed')) {
+    throw new Error(courseSyncFlagErr.message);
+  }
+
+  return { ok: true, hadSkippedSessions: skippedSessionRows > 0 };
 }
 
 export type SyncGoogleSheetResult =
@@ -1448,6 +1473,7 @@ export async function runGoogleSheetSync(
     let synced = 0;
     let skipped = 0;
     let skippedAfterCurrentCourse = 0;
+    let anyCourseHadSkippedSessions = false;
     let visibleIndex = 0;
     let visibleSlotIndex = 0;
     const visibleSlots: { sampleRows: ScannedSampleRow[] }[] = [];
@@ -1507,8 +1533,23 @@ export async function runGoogleSheetSync(
         { dedupeFolienRows },
         onProgress
       );
-      if (result.ok) synced++;
-      else skipped++;
+      if (result.ok) {
+        synced++;
+        if (result.hadSkippedSessions) anyCourseHadSkippedSessions = true;
+      } else skipped++;
+    }
+
+    const groupSyncCompleted = skippedAfterCurrentCourse === 0 && !anyCourseHadSkippedSessions;
+    await onProgress?.({
+      type: 'db',
+      message: `groups — sync_completed=${groupSyncCompleted}`,
+    });
+    const { error: groupSyncFlagErr } = await supabase
+      .from('groups')
+      .update({ sync_completed: groupSyncCompleted })
+      .eq('id', group.id);
+    if (groupSyncFlagErr && !isSupabaseMissingColumnError(groupSyncFlagErr.message, 'sync_completed')) {
+      throw new Error(groupSyncFlagErr.message);
     }
 
     const skipHint =

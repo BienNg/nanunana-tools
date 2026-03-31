@@ -7,7 +7,7 @@ export default async function GroupsPage() {
   const supabase = getSupabaseAdmin();
   const { data: groups, error } = await supabase
     .from('groups')
-    .select('id, name, spreadsheet_url')
+    .select('id, name, spreadsheet_url, sync_completed')
     .order('name', { ascending: false });
 
   if (error) {
@@ -32,6 +32,7 @@ export default async function GroupsPage() {
             id={group.id}
             name={group.name}
             spreadsheetUrl={group.spreadsheet_url}
+            syncCompleted={group.sync_completed ?? false}
           />
         ))}
         {(!groups || groups.length === 0) && (

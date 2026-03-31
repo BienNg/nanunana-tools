@@ -1,5 +1,6 @@
 import { Fragment } from 'react';
 import Link from 'next/link';
+import { SyncCompletionPill } from '@/components/SyncCompletionPill';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
 export const dynamic = 'force-dynamic';
@@ -20,8 +21,9 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
   const { data: courses } = await supabase
     .from('courses')
     .select(`
-      id, 
+      id,
       name,
+      sync_completed,
       course_teachers (
         teachers ( id, name )
       )
@@ -87,12 +89,15 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
                     <span className="material-symbols-outlined text-[20px]">class</span>
                   </div>
                   <div className="min-w-0">
-                    <Link
-                      href={`/courses/${course.id}`}
-                      className="font-bold text-on-surface text-lg mb-1 block hover:text-primary transition-colors"
-                    >
-                      {course.name}
-                    </Link>
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      <Link
+                        href={`/courses/${course.id}`}
+                        className="font-bold text-on-surface text-lg hover:text-primary transition-colors"
+                      >
+                        {course.name}
+                      </Link>
+                      <SyncCompletionPill completed={course.sync_completed ?? false} />
+                    </div>
                     <p className="text-sm text-on-surface-variant flex flex-wrap items-center gap-x-1 gap-y-0.5 font-medium">
                       <span className="material-symbols-outlined text-[16px] shrink-0">person</span>
                       {teacherList.length === 0 ? (
@@ -116,7 +121,7 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
                 <Link
                   href={`/courses/${course.id}`}
                   className="text-primary opacity-0 group-hover:opacity-100 transition-opacity shrink-0 self-end sm:self-center p-1 -m-1 rounded-full hover:bg-primary/5"
-                  aria-label={`Open course ${course.name}`}
+                  aria-label={`Open course ${course.name}, ${course.sync_completed ? 'import completed' : 'import not completed'}`}
                 >
                   <span className="material-symbols-outlined">chevron_right</span>
                 </Link>

@@ -4,15 +4,18 @@ import { useEffect, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { deleteGroupAndRelatedData } from '@/app/actions/deleteGroup';
 import { GoogleSheetsLogo } from '@/components/icons/GoogleSheetsLogo';
+import { SyncCompletionPill } from '@/components/SyncCompletionPill';
 
 export default function GroupCard({
   id,
   name,
   spreadsheetUrl,
+  syncCompleted,
 }: {
   id: string;
   name: string;
   spreadsheetUrl: string | null;
+  syncCompleted: boolean;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -68,14 +71,17 @@ export default function GroupCard({
       }}
       role="link"
       tabIndex={0}
-      aria-label={`Open group ${name}`}
+      aria-label={`Open group ${name}, ${syncCompleted ? 'import completed' : 'import not completed'}`}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1 pr-2">
           <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center mb-4 text-primary group-hover:bg-primary group-hover:text-white transition-colors">
             <span className="material-symbols-outlined">workspaces</span>
           </div>
-          <h3 className="text-xl font-bold text-on-surface mb-2">{name}</h3>
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <h3 className="text-xl font-bold text-on-surface">{name}</h3>
+            <SyncCompletionPill completed={syncCompleted} />
+          </div>
           {spreadsheetUrl ? (
             <a
               href={spreadsheetUrl}
