@@ -2,7 +2,11 @@
 
 import { useState } from 'react';
 import ScanPreviewModal from './ScanPreviewModal';
-import type { ScanGoogleSheetResult, SkippedRowsBySheet } from '@/lib/sync/googleSheetSync';
+import type {
+  ScanGoogleSheetResult,
+  SkippedRowsBySheet,
+  TeacherAliasResolution,
+} from '@/lib/sync/googleSheetSync';
 
 type SyncResult = { success: true; message: string } | { success: false; error: string };
 
@@ -184,7 +188,10 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     }
   };
 
-  const handleImport = async (skippedRowsBySheet: SkippedRowsBySheet) => {
+  const handleImport = async (
+    skippedRowsBySheet: SkippedRowsBySheet,
+    teacherAliasResolutions: TeacherAliasResolution[]
+  ) => {
     if (!url && !file) return;
     setIsImporting(true);
     setError('');
@@ -199,12 +206,15 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
               const formData = new FormData();
               formData.set('file', file);
               formData.set('skippedRowsBySheet', JSON.stringify(skippedRowsBySheet));
+              if (teacherAliasResolutions.length > 0) {
+                formData.set('teacherAliasResolutions', JSON.stringify(teacherAliasResolutions));
+              }
               return { method: 'POST', body: formData } as const;
             })()
           : {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url, skippedRowsBySheet }),
+              body: JSON.stringify({ url, skippedRowsBySheet, teacherAliasResolutions }),
             };
       const res = await fetch('/api/sync-sheet', req);
 

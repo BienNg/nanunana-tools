@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import Link from 'next/link';
 import {
   formatDurationHoursMinutes,
@@ -22,7 +23,7 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
       name,
       group_id,
       course_teachers (
-        teachers ( name )
+        teachers ( id, name )
       )
     `)
     .eq('id', id)
@@ -65,10 +66,10 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
 
   const group = groupRow ?? null;
 
-  const teachers = course.course_teachers
-    ?.map((ct: any) => ct.teachers?.name)
-    .filter(Boolean)
-    .join(', ') || 'No teachers assigned';
+  const teacherList =
+    course.course_teachers
+      ?.map((ct: any) => ct.teachers as { id: string; name: string } | null | undefined)
+      .filter((t): t is { id: string; name: string } => Boolean(t?.id && t?.name)) ?? [];
 
   const classType = normalizeGroupClassType(group?.class_type);
   const totalDurationMinutes = totalCourseDurationMinutes(lessons ?? [], classType);
@@ -117,9 +118,23 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
             <h2 className="text-4xl font-extrabold text-on-surface tracking-tight font-headline">
               {course.name}
             </h2>
-            <p className="text-on-surface-variant mt-1 font-medium flex items-center gap-1.5">
-              <span className="material-symbols-outlined text-[18px]">person</span>
-              {teachers}
+            <p className="text-on-surface-variant mt-1 font-medium flex flex-wrap items-center gap-x-1 gap-y-0.5">
+              <span className="material-symbols-outlined text-[18px] shrink-0">person</span>
+              {teacherList.length === 0 ? (
+                <span>No teachers assigned</span>
+              ) : (
+                teacherList.map((teacher, index) => (
+                  <Fragment key={teacher.id}>
+                    {index > 0 ? ', ' : null}
+                    <Link
+                      href={`/teachers/${teacher.id}`}
+                      className="text-primary hover:underline underline-offset-2"
+                    >
+                      {teacher.name}
+                    </Link>
+                  </Fragment>
+                ))
+              )}
             </p>
           </div>
         </div>
@@ -163,7 +178,23 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
             <span className="material-symbols-outlined text-orange-500 text-xl bg-orange-500/10 p-1.5 rounded-lg">person</span>
             <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Teachers</span>
           </div>
-          <div className="text-sm font-bold text-on-surface font-headline leading-tight line-clamp-2">{teachers}</div>
+          <div className="text-sm font-bold leading-tight line-clamp-2 flex flex-wrap items-baseline gap-x-1">
+            {teacherList.length === 0 ? (
+              <span className="text-on-surface-variant font-medium">No teachers assigned</span>
+            ) : (
+              teacherList.map((teacher, index) => (
+                <Fragment key={teacher.id}>
+                  {index > 0 ? ', ' : null}
+                  <Link
+                    href={`/teachers/${teacher.id}`}
+                    className="text-primary hover:underline underline-offset-2 font-headline"
+                  >
+                    {teacher.name}
+                  </Link>
+                </Fragment>
+              ))
+            )}
+          </div>
         </div>
 
         <div className="bg-surface-container-lowest p-5 rounded-2xl shadow-sm border border-outline-variant/10 flex flex-col justify-between group hover:translate-y-[-2px] transition-transform">

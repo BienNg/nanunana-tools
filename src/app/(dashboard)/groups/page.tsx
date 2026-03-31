@@ -8,7 +8,7 @@ export default async function GroupsPage() {
   const { data: groups, error } = await supabase
     .from('groups')
     .select('id, name')
-    .order('name');
+    .order('name', { ascending: false });
 
   if (error) {
     console.error('Error fetching groups:', error);

@@ -3,7 +3,7 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { lessonDurationMinutes, normalizeGroupClassType } from '@/lib/courseDuration';
 import TeacherMonthDropdown from './TeacherMonthDropdown';
 import TeacherSessionsSection from './TeacherSessionsSection';
-import { normalizePersonNameKey } from '@/lib/normalizePersonName';
+import { buildTeacherLessonMatchKeys, lessonMatchesAnyTeacherKey } from '@/lib/teacherLessonMatch';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,23 +24,6 @@ function extractClassType(value: unknown): string | null {
     return typeof maybeObj.class_type === 'string' ? maybeObj.class_type : null;
   }
   return null;
-}
-
-/** Split one or more teacher names from a cell (comma, slash, semicolon, newline, German "und"). Matches sheet import in `googleSheetSync`. */
-function parseTeacherNames(raw: string | undefined | null): string[] {
-  if (raw == null || raw === '') return [];
-  const s = String(raw).trim();
-  if (!s) return [];
-  return s
-    .split(/[/,;\n]+|\s+und\s+/i)
-    .map((t) => t.trim())
-    .filter(Boolean);
-}
-
-function lessonIncludesTeacher(lessonTeacher: unknown, selectedTeacherKey: string): boolean {
-  if (!selectedTeacherKey) return false;
-  const names = parseTeacherNames(typeof lessonTeacher === 'string' ? lessonTeacher : undefined);
-  return names.some((n) => normalizePersonNameKey(n) === selectedTeacherKey);
 }
 
 function hoursDisplayFromMinutes(minutes: number): string {
@@ -107,7 +90,17 @@ export default async function TeacherDetailsPage({
   const courses = courseTeachers?.map((ct: any) => ct.courses).filter(Boolean).sort((a: any, b: any) => a.name.localeCompare(b.name)) || [];
   const courseIds = courses.map((c: any) => c.id);
 
-  const selectedTeacherKey = normalizePersonNameKey(teacher.name);
+  const { data: aliasRows } = await supabase
+    .from('teacher_aliases')
+    .select('normalized_key')
+    .eq('teacher_id', id);
+
+  const lessonMatchKeys = buildTeacherLessonMatchKeys(
+    teacher.name,
+    (aliasRows ?? [])
+      .map((r: { normalized_key: string | null }) => String(r.normalized_key ?? '').trim())
+      .filter(Boolean)
+  );
 
   // 3. Fetch lessons with attendance records
   let allLessons: any[] = [];
@@ -143,7 +136,7 @@ export default async function TeacherDetailsPage({
       .in('course_id', courseIds);
       
     allLessons = (lessonsData || []).filter((lesson: { teacher?: unknown }) =>
-      lessonIncludesTeacher(lesson.teacher, selectedTeacherKey),
+      lessonMatchesAnyTeacherKey(lesson.teacher, lessonMatchKeys),
     );
   }
 

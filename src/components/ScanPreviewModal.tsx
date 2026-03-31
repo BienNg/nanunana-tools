@@ -7,6 +7,7 @@ import type {
   ScannedSampleRow,
   ScannedSheet,
   SkippedRowsBySheet,
+  TeacherAliasResolution,
 } from '@/lib/sync/googleSheetSync';
 import {
   findLastTaughtSessionRowIndex,
@@ -246,7 +247,7 @@ type ScanPreviewModalProps = {
   isOpen: boolean;
   scanResult: Extract<ScanGoogleSheetResult, { success: true }> | null;
   onClose: () => void;
-  onConfirm: (skippedRowsBySheet: SkippedRowsBySheet) => void;
+  onConfirm: (skippedRowsBySheet: SkippedRowsBySheet, teacherAliasResolutions: TeacherAliasResolution[]) => void;
   isImporting: boolean;
   /** Latest non-database import step (spreadsheet load, tab fetch, etc.). */
   importProgressMessage?: string;
@@ -279,6 +280,8 @@ export default function ScanPreviewModal({
   const [skippedRowsBySheet, setSkippedRowsBySheet] = useState<SkippedRowsBySheet>({});
   const [openRowActionIndex, setOpenRowActionIndex] = useState<number | null>(null);
   const [hoverHint, setHoverHint] = useState<HoverHint>(null);
+  /** normalized teacher name key → existing teacher id when user maps a sheet name to a known teacher */
+  const [teacherMergeByKey, setTeacherMergeByKey] = useState<Record<string, string>>({});
   const importLogScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -301,6 +304,7 @@ export default function ScanPreviewModal({
     setActiveTab(firstImportable >= 0 ? firstImportable : 0);
     setSkippedRowsBySheet({});
     setOpenRowActionIndex(null);
+    setTeacherMergeByKey({});
   }, [isOpen, scanResult]);
 
   useEffect(() => {
@@ -364,6 +368,8 @@ export default function ScanPreviewModal({
     }
     return [...byKey.values()].sort((a, b) => a.localeCompare(b));
   }, [scanResult?.detectedNewTeachers]);
+
+  const existingTeachersForPicker = scanResult?.existingTeachersForPicker ?? [];
 
   if (!isOpen || !scanResult || !mounted) return null;
 
@@ -493,19 +499,56 @@ export default function ScanPreviewModal({
         <div className="flex-1 overflow-auto p-6 bg-white">
           {detectedNewTeachers.length > 0 ? (
             <section className="mb-4 rounded-md border border-emerald-200 bg-emerald-50/70 px-4 py-3">
-              <h3 className="text-sm font-semibold text-emerald-900">New teachers detected</h3>
+              <h3 className="text-sm font-semibold text-emerald-900">New teacher names</h3>
               <p className="mt-1 text-xs text-emerald-800">
-                These names were found in this workbook and will be created during import.
+                These spellings are not matched yet (canonical name or saved alias). Choose an existing teacher to
+                treat a name as an alias—it is stored and used on future imports. Otherwise a new teacher is
+                created.
               </p>
-              <ul className="mt-2 flex flex-wrap gap-2" aria-label="Detected new teachers">
-                {detectedNewTeachers.map((teacherName) => (
-                  <li
-                    key={normalizePersonNameKey(teacherName)}
-                    className="rounded-full border border-emerald-300/80 bg-white px-2.5 py-1 text-xs font-medium text-emerald-950"
-                  >
-                    {teacherName}
-                  </li>
-                ))}
+              <ul className="mt-3 space-y-2" aria-label="Map new teacher names">
+                {detectedNewTeachers.map((teacherName) => {
+                  const nk = normalizePersonNameKey(teacherName);
+                  const mergedId = teacherMergeByKey[nk];
+                  const mergedLabel = mergedId
+                    ? existingTeachersForPicker.find((t) => t.id === mergedId)?.name
+                    : undefined;
+                  return (
+                    <li
+                      key={nk}
+                      className="flex flex-wrap items-center gap-2 rounded-md border border-emerald-200/80 bg-white/90 px-3 py-2 text-sm text-emerald-950"
+                    >
+                      <span className="min-w-[6rem] font-medium">{teacherName}</span>
+                      <span className="text-xs text-emerald-800">→</span>
+                      <select
+                        value={mergedId ?? ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setTeacherMergeByKey((prev) => {
+                            const next = { ...prev };
+                            if (!v) delete next[nk];
+                            else next[nk] = v;
+                            return next;
+                          });
+                        }}
+                        disabled={busy}
+                        className="min-w-[12rem] max-w-[min(100%,20rem)] rounded border border-emerald-300/80 bg-white px-2 py-1 text-xs font-medium text-gray-900 shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-50"
+                        aria-label={`Link sheet name ${teacherName} to existing teacher`}
+                      >
+                        <option value="">Create new teacher</option>
+                        {existingTeachersForPicker.map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.name}
+                          </option>
+                        ))}
+                      </select>
+                      {mergedLabel ? (
+                        <span className="text-xs text-emerald-800">
+                          Saved as alias for {mergedLabel} on import.
+                        </span>
+                      ) : null}
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           ) : null}
@@ -787,7 +830,14 @@ export default function ScanPreviewModal({
           ) : null}
           <button
             type="button"
-            onClick={() => onConfirm(skippedRowsBySheet)}
+            onClick={() => {
+              const teacherAliasResolutions: TeacherAliasResolution[] = [];
+              for (const name of detectedNewTeachers) {
+                const tid = teacherMergeByKey[normalizePersonNameKey(name)];
+                if (tid) teacherAliasResolutions.push({ aliasName: name, teacherId: tid });
+              }
+              onConfirm(skippedRowsBySheet, teacherAliasResolutions);
+            }}
             disabled={busy || hasImportBlockingSheetIssues}
             title={
               hasImportBlockingSheetIssues && !busy

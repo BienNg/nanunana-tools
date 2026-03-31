@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import Link from 'next/link';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
@@ -22,7 +23,7 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
       id, 
       name,
       course_teachers (
-        teachers ( name )
+        teachers ( id, name )
       )
     `)
     .eq('group_id', id)
@@ -71,29 +72,55 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
         </div>
         <div className="divide-y divide-outline-variant/10">
           {courses?.map((course) => {
-            const teachers = course.course_teachers
-              ?.map((ct: any) => ct.teachers?.name)
-              .filter(Boolean)
-              .join(', ') || 'No teachers assigned';
-              
+            const teacherList =
+              course.course_teachers
+                ?.map((ct: any) => ct.teachers as { id: string; name: string } | null | undefined)
+                .filter((t): t is { id: string; name: string } => Boolean(t?.id && t?.name)) ?? [];
+
             return (
-              <Link href={`/courses/${course.id}`} key={course.id} className="p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-surface-container-low/30 transition-colors cursor-pointer group">
-                <div className="flex items-start gap-4">
+              <div
+                key={course.id}
+                className="p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-surface-container-low/30 transition-colors group"
+              >
+                <div className="flex items-start gap-4 min-w-0">
                   <div className="w-10 h-10 rounded-full bg-secondary-container text-on-secondary-container flex items-center justify-center shrink-0 mt-1">
                     <span className="material-symbols-outlined text-[20px]">class</span>
                   </div>
-                  <div>
-                    <h4 className="font-bold text-on-surface text-lg mb-1">{course.name}</h4>
-                    <p className="text-sm text-on-surface-variant flex items-center gap-1.5 font-medium">
-                      <span className="material-symbols-outlined text-[16px]">person</span>
-                      {teachers}
+                  <div className="min-w-0">
+                    <Link
+                      href={`/courses/${course.id}`}
+                      className="font-bold text-on-surface text-lg mb-1 block hover:text-primary transition-colors"
+                    >
+                      {course.name}
+                    </Link>
+                    <p className="text-sm text-on-surface-variant flex flex-wrap items-center gap-x-1 gap-y-0.5 font-medium">
+                      <span className="material-symbols-outlined text-[16px] shrink-0">person</span>
+                      {teacherList.length === 0 ? (
+                        <span>No teachers assigned</span>
+                      ) : (
+                        teacherList.map((teacher, index) => (
+                          <Fragment key={teacher.id}>
+                            {index > 0 ? ', ' : null}
+                            <Link
+                              href={`/teachers/${teacher.id}`}
+                              className="text-primary hover:underline underline-offset-2"
+                            >
+                              {teacher.name}
+                            </Link>
+                          </Fragment>
+                        ))
+                      )}
                     </p>
                   </div>
                 </div>
-                <div className="text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                <Link
+                  href={`/courses/${course.id}`}
+                  className="text-primary opacity-0 group-hover:opacity-100 transition-opacity shrink-0 self-end sm:self-center p-1 -m-1 rounded-full hover:bg-primary/5"
+                  aria-label={`Open course ${course.name}`}
+                >
                   <span className="material-symbols-outlined">chevron_right</span>
-                </div>
-              </Link>
+                </Link>
+              </div>
             );
           })}
           {(!courses || courses.length === 0) && (

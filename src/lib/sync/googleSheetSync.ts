@@ -12,13 +12,33 @@ type LoadedVisibleSheet = {
   title: string;
   rows: SheetRow[];
   colorAttendance: AttendanceFromColor[][];
+  /** Per-tab Google Sheets URL (`…/edit#gid=…`); null when not available (e.g. .xlsx import). */
+  sheetUrl: string | null;
 };
 
 type LoadedWorkbook = {
   sourceKey: string;
   workbookTitle: string;
+  /** Workbook URL (`…/spreadsheets/d/{id}/edit`); null for file-only imports. */
+  spreadsheetUrl: string | null;
   visibleSheets: LoadedVisibleSheet[];
 };
+
+function canonicalGoogleSpreadsheetUrl(spreadsheetId: string): string {
+  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+}
+
+function googleSheetTabUrl(spreadsheetId: string, sheetId: number): string {
+  return `${canonicalGoogleSpreadsheetUrl(spreadsheetId)}#gid=${sheetId}`;
+}
+
+/** PostgREST when the column was never migrated / not in schema cache yet. */
+function isSupabaseMissingColumnError(message: string | undefined, column: string): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+  const col = column.toLowerCase();
+  return m.includes(col) && (m.includes('schema cache') || m.includes('could not find'));
+}
 
 function rgbFromCellFormat(fmt: sheets_v4.Schema$CellFormat | null | undefined): { r: number; g: number; b: number } | null {
   if (!fmt) return null;
@@ -442,11 +462,88 @@ function normalizeFolienKey(value: string | undefined | null): string {
   return String(value ?? '').trim().toLowerCase();
 }
 
+/** Map a sheet spelling to an existing teacher during import; persisted as `teacher_aliases`. */
+export type TeacherAliasResolution = { aliasName: string; teacherId: string };
+
 export type SyncProgressEvent =
   | { type: 'status'; message: string }
   | { type: 'sheet'; title: string; current: number; total: number }
   /** One completed Supabase round-trip (or explicit batch) during import */
   | { type: 'db'; message: string };
+
+async function loadTeacherResolutionData(supabase: ReturnType<typeof getSupabaseAdmin>): Promise<{
+  teacherCache: Map<string, string>;
+  existingTeachersForPicker: { id: string; name: string }[];
+  validTeacherIds: Set<string>;
+  /** Canonical `teachers.name` for display on imported lessons (id → name). */
+  canonicalTeacherNameById: Map<string, string>;
+}> {
+  const { data: allTeachers, error: teachersError } = await supabase.from('teachers').select('id, name');
+  if (teachersError) throw new Error(teachersError.message);
+
+  const canonicalTeacherNameById = new Map<string, string>();
+  const teacherCache = new Map<string, string>();
+  for (const t of allTeachers ?? []) {
+    canonicalTeacherNameById.set(t.id, t.name);
+    const key = normalizePersonNameKey(t.name);
+    if (key) teacherCache.set(key, t.id);
+  }
+
+  const { data: aliasRows, error: aliasesError } = await supabase
+    .from('teacher_aliases')
+    .select('teacher_id, normalized_key');
+  if (aliasesError) throw new Error(aliasesError.message);
+
+  for (const row of aliasRows ?? []) {
+    const nk = String(row.normalized_key ?? '').trim();
+    const tid = row.teacher_id as string | undefined;
+    if (!nk || !tid) continue;
+    const existing = teacherCache.get(nk);
+    if (existing && existing !== tid) {
+      console.warn(
+        `[sync] teacher_aliases normalized_key "${nk}" maps to ${tid} but cache already had ${existing}; skipping alias row`
+      );
+      continue;
+    }
+    teacherCache.set(nk, tid);
+  }
+
+  const existingTeachersForPicker = [...(allTeachers ?? [])]
+    .map((t: { id: string; name: string }) => ({ id: t.id, name: t.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const validTeacherIds = new Set((allTeachers ?? []).map((t: { id: string }) => t.id));
+
+  return { teacherCache, existingTeachersForPicker, validTeacherIds, canonicalTeacherNameById };
+}
+
+async function applyTeacherAliasResolutions(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  teacherCache: Map<string, string>,
+  resolutions: TeacherAliasResolution[] | undefined,
+  validTeacherIds: Set<string>,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+) {
+  if (!resolutions?.length) return;
+  for (const { aliasName, teacherId } of resolutions) {
+    if (!validTeacherIds.has(teacherId)) {
+      throw new Error(`Unknown teacher for alias "${aliasName}"`);
+    }
+    const trimmed = String(aliasName).trim();
+    const nk = normalizePersonNameKey(trimmed);
+    if (!nk) continue;
+    await onProgress?.({
+      type: 'db',
+      message: `teacher_aliases — upsert "${trimmed}"`,
+    });
+    const { error } = await supabase.from('teacher_aliases').upsert(
+      { teacher_id: teacherId, alias: trimmed, normalized_key: nk },
+      { onConflict: 'normalized_key' }
+    );
+    if (error) throw new Error(error.message);
+    teacherCache.set(nk, teacherId);
+  }
+}
 
 /**
  * Sync teachers for one course using an in-memory cache to avoid per-row DB calls.
@@ -458,6 +555,7 @@ async function syncCourseTeachers(
   courseId: string,
   teacherNames: Set<string>,
   teacherCache: Map<string, string>,
+  canonicalTeacherNameById: Map<string, string>,
   sheetLabel: string,
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ) {
@@ -493,6 +591,7 @@ async function syncCourseTeachers(
       const key = normalizePersonNameKey(t.name);
       if (!key) return;
       teacherCache.set(key, t.id);
+      canonicalTeacherNameById.set(t.id, t.name);
     });
   }
 
@@ -515,9 +614,11 @@ async function syncOneCourseSheet(
   sheetTitle: string,
   rows: SheetRow[] | undefined,
   teacherCache: Map<string, string>,
+  canonicalTeacherNameById: Map<string, string>,
   colorAttendance: AttendanceFromColor[][] | undefined,
   studentCache: Map<string, string>,
   skippedPreviewRows: ReadonlySet<number>,
+  sheetUrl: string | null,
   options?: { dedupeFolienRows?: boolean },
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ): Promise<{ ok: boolean; reason?: string }> {
@@ -571,20 +672,42 @@ async function syncOneCourseSheet(
   let courseId: string;
   if (existing?.id) {
     courseId = existing.id;
+    if (sheetUrl) {
+      await onProgress?.({
+        type: 'db',
+        message: `${sheetLabel} courses — update sheet_url`,
+      });
+      const { error: sheetUrlErr } = await supabase
+        .from('courses')
+        .update({ sheet_url: sheetUrl })
+        .eq('id', courseId);
+      if (sheetUrlErr && !isSupabaseMissingColumnError(sheetUrlErr.message, 'sheet_url')) {
+        throw new Error(`Failed to update course sheet_url "${sheetTitle}": ${sheetUrlErr.message}`);
+      }
+    }
   } else {
     await onProgress?.({
       type: 'db',
       message: `${sheetLabel} courses — insert`,
     });
-    const { data: newCourse, error: createError } = await supabase
+    let row: { id: string } | null = null;
+    let createError = null as { message: string } | null;
+    ({ data: row, error: createError } = await supabase
       .from('courses')
-      .insert({ name: sheetTitle, group_id: groupId })
+      .insert({ name: sheetTitle, group_id: groupId, sheet_url: sheetUrl })
       .select('id')
-      .single();
-    if (createError || !newCourse) {
+      .single());
+    if (createError && isSupabaseMissingColumnError(createError.message, 'sheet_url')) {
+      ({ data: row, error: createError } = await supabase
+        .from('courses')
+        .insert({ name: sheetTitle, group_id: groupId })
+        .select('id')
+        .single());
+    }
+    if (createError || !row) {
       throw new Error(`Failed to create course "${sheetTitle}": ${createError?.message ?? 'unknown'}`);
     }
-    courseId = newCourse.id;
+    courseId = row.id;
   }
 
   for (const col of uniqueStudentCols) {
@@ -672,7 +795,15 @@ async function syncOneCourseSheet(
       teacherParts.push(...parseTeacherNames(row[idx]));
     }
     teacherParts.forEach((n) => teachersForCourse.add(n));
-    const teacherCell = teacherParts.length > 0 ? teacherParts.join(', ') : null;
+    const canonicalLessonLabels: string[] = [];
+    for (const part of teacherParts) {
+      const nk = normalizePersonNameKey(part);
+      const tid = nk ? teacherCache.get(nk) : undefined;
+      const label = tid ? canonicalTeacherNameById.get(tid) ?? part : part;
+      canonicalLessonLabels.push(label);
+    }
+    const teacherCell =
+      canonicalLessonLabels.length > 0 ? [...new Set(canonicalLessonLabels)].join(', ') : null;
 
     if (colIndices.datum !== -1 && !parsedDate) continue;
 
@@ -736,7 +867,15 @@ async function syncOneCourseSheet(
     }
   }
 
-  await syncCourseTeachers(supabase, courseId, teachersForCourse, teacherCache, sheetLabel, onProgress);
+  await syncCourseTeachers(
+    supabase,
+    courseId,
+    teachersForCourse,
+    teacherCache,
+    canonicalTeacherNameById,
+    sheetLabel,
+    onProgress
+  );
   return { ok: true };
 }
 
@@ -930,8 +1069,10 @@ export type ScanGoogleSheetResult =
       sheets: ScannedSheet[];
       /** Visible-tab index of the current course, or null if none qualifies. Sheets after this are not imported. */
       currentCourseVisibleIndex: number | null;
-      /** Teacher names found in workbook rows but not present in the teachers table. */
+      /** Teacher names found in workbook rows but not present in the teachers table (or aliases). */
       detectedNewTeachers: string[];
+      /** All teachers for linking sheet names as aliases in the preview modal. */
+      existingTeachersForPicker: { id: string; name: string }[];
     }
   | { success: false; error: string };
 
@@ -978,12 +1119,16 @@ async function loadWorkbookFromGoogleSheets(
     const sheetWithGrid = gridResponse.data.sheets?.find((sh) => sh.properties?.title === title);
     const rowData = sheetWithGrid?.data?.[0]?.rowData;
     const { rows, colorAttendance } = sheetGridToRowsAndColorAttendance(rowData);
-    visibleSheets.push({ title, rows, colorAttendance });
+    const gid = s.properties?.sheetId;
+    const sheetUrl =
+      typeof gid === 'number' ? googleSheetTabUrl(spreadsheetId, gid) : null;
+    visibleSheets.push({ title, rows, colorAttendance, sheetUrl });
   }
 
   return {
     sourceKey: spreadsheetId,
     workbookTitle,
+    spreadsheetUrl: canonicalGoogleSpreadsheetUrl(spreadsheetId),
     visibleSheets,
   };
 }
@@ -1014,10 +1159,10 @@ async function loadWorkbookFromXlsx(
       total: visibleWorksheets.length,
     });
     const { rows, colorAttendance } = sheetGridFromExcelWorksheet(ws);
-    visibleSheets.push({ title: ws.name, rows, colorAttendance });
+    visibleSheets.push({ title: ws.name, rows, colorAttendance, sheetUrl: null });
   }
 
-  return { sourceKey, workbookTitle, visibleSheets };
+  return { sourceKey, workbookTitle, spreadsheetUrl: null, visibleSheets };
 }
 
 async function loadWorkbookFromXlsxBytes(
@@ -1083,7 +1228,12 @@ async function loadWorkbookFromSource(
         });
         const exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=xlsx`;
         const downloaded = await fetchXlsxBytesFromUrl(exportUrl);
-        return loadWorkbookFromXlsxBytes(downloaded.fileName ?? `${spreadsheetId}.xlsx`, downloaded.bytes, onProgress);
+        const fromXlsx = await loadWorkbookFromXlsxBytes(
+          downloaded.fileName ?? `${spreadsheetId}.xlsx`,
+          downloaded.bytes,
+          onProgress
+        );
+        return { ...fromXlsx, spreadsheetUrl: canonicalGoogleSpreadsheetUrl(spreadsheetId) };
       }
     }
 
@@ -1140,12 +1290,9 @@ export async function scanGoogleSheet(
     }
 
     const currentCourseVisibleIndex = findCurrentCourseVisibleIndex(visibleSlots, new Date());
-    await onProgress?.({ type: 'db', message: 'teachers — select all names (scan preview)' });
-    const { data: allTeachers, error: teachersError } = await supabase.from('teachers').select('name');
-    if (teachersError) throw new Error(teachersError.message);
-    const existingTeacherNameKeys = new Set(
-      (allTeachers ?? []).map((teacher: { name: string | null }) => normalizePersonNameKey(teacher.name)).filter(Boolean)
-    );
+    await onProgress?.({ type: 'db', message: 'teachers — load names + aliases (scan preview)' });
+    const { teacherCache, existingTeachersForPicker } = await loadTeacherResolutionData(supabase);
+    const existingTeacherNameKeys = new Set(teacherCache.keys());
     const detectedNewTeachers = collectTeacherNamesFromScannedSheets(scannedSheets).filter(
       (teacherName) => !existingTeacherNameKeys.has(normalizePersonNameKey(teacherName))
     );
@@ -1158,6 +1305,7 @@ export async function scanGoogleSheet(
       sheets: scannedSheets,
       currentCourseVisibleIndex,
       detectedNewTeachers,
+      existingTeachersForPicker,
     };
   } catch (error: unknown) {
     console.error('Scan error:', error);
@@ -1171,10 +1319,12 @@ export async function runGoogleSheetSync(
   options?: {
     onProgress?: (event: SyncProgressEvent) => void | Promise<void>;
     skippedRowsBySheet?: SkippedRowsBySheet;
+    teacherAliasResolutions?: TeacherAliasResolution[];
   }
 ): Promise<SyncGoogleSheetResult> {
   const onProgress = options?.onProgress;
   const skippedRowsBySheet = options?.skippedRowsBySheet ?? {};
+  const teacherAliasResolutions = options?.teacherAliasResolutions;
   const supabase = getSupabaseAdmin();
   try {
     const loaded = await loadWorkbookFromSource(source, onProgress);
@@ -1186,13 +1336,15 @@ export async function runGoogleSheetSync(
       message: `Workbook: ${workbookTitle}`,
     });
 
-    // Load the full teachers table once so every per-course check is purely in-memory.
-    await onProgress?.({ type: 'db', message: 'teachers — select all (cache)' });
-    const { data: allTeachers } = await supabase.from('teachers').select('id, name');
-    const teacherCache = new Map<string, string>(
-      (allTeachers ?? [])
-        .map((t: { id: string; name: string }) => [normalizePersonNameKey(t.name), t.id] as const)
-        .filter(([key]) => Boolean(key))
+    await onProgress?.({ type: 'db', message: 'teachers — load cache + aliases' });
+    const { teacherCache, validTeacherIds, canonicalTeacherNameById } =
+      await loadTeacherResolutionData(supabase);
+    await applyTeacherAliasResolutions(
+      supabase,
+      teacherCache,
+      teacherAliasResolutions,
+      validTeacherIds,
+      onProgress
     );
 
     const classType = detectClassType(workbookTitle);
@@ -1209,21 +1361,54 @@ export async function runGoogleSheetSync(
 
     if (!group) {
       await onProgress?.({ type: 'db', message: 'groups — insert' });
-      const { data: inserted, error: insertErr } = await supabase
+      const baseGroup = {
+        name: workbookTitle,
+        spreadsheet_id: sourceKey,
+        class_type: classType,
+      };
+      let inserted: { id: string } | null = null;
+      let insertErr: { message: string } | null = null;
+      ({ data: inserted, error: insertErr } = await supabase
         .from('groups')
-        .insert({ name: workbookTitle, spreadsheet_id: sourceKey, class_type: classType })
+        .insert({ ...baseGroup, spreadsheet_url: loaded.spreadsheetUrl })
         .select('id')
-        .single();
+        .single());
+      if (insertErr && isSupabaseMissingColumnError(insertErr.message, 'spreadsheet_url')) {
+        ({ data: inserted, error: insertErr } = await supabase
+          .from('groups')
+          .insert(baseGroup)
+          .select('id')
+          .single());
+      }
       if (insertErr || !inserted) {
         throw new Error(`Failed to create group: ${insertErr?.message ?? 'unknown'}`);
       }
       group = inserted;
     } else {
-      await onProgress?.({ type: 'db', message: 'groups — update name and class_type' });
-      await supabase
-        .from('groups')
-        .update({ name: workbookTitle, class_type: classType })
-        .eq('id', group.id);
+      await onProgress?.({ type: 'db', message: 'groups — update name, class_type, spreadsheet_url' });
+      if (loaded.spreadsheetUrl) {
+        const { error: upErr } = await supabase
+          .from('groups')
+          .update({
+            name: workbookTitle,
+            class_type: classType,
+            spreadsheet_url: loaded.spreadsheetUrl,
+          })
+          .eq('id', group.id);
+        if (upErr && isSupabaseMissingColumnError(upErr.message, 'spreadsheet_url')) {
+          await supabase
+            .from('groups')
+            .update({ name: workbookTitle, class_type: classType })
+            .eq('id', group.id);
+        } else if (upErr) {
+          throw new Error(upErr.message);
+        }
+      } else {
+        await supabase
+          .from('groups')
+          .update({ name: workbookTitle, class_type: classType })
+          .eq('id', group.id);
+      }
     }
 
     await onProgress?.({ type: 'db', message: 'students — select by group_id (cache)' });
@@ -1252,6 +1437,7 @@ export async function runGoogleSheetSync(
       title: string;
       rows: SheetRow[];
       colorAttendance: AttendanceFromColor[][];
+      sheetUrl: string | null;
     }[] = [];
 
     for (const sheet of loaded.visibleSheets) {
@@ -1275,6 +1461,7 @@ export async function runGoogleSheetSync(
         title,
         rows: rows ?? [],
         colorAttendance: colorAttendance ?? [],
+        sheetUrl: sheet.sheetUrl ?? null,
       });
       visibleSlotIndex++;
     }
@@ -1293,9 +1480,11 @@ export async function runGoogleSheetSync(
         item.title,
         item.rows,
         teacherCache,
+        canonicalTeacherNameById,
         item.colorAttendance,
         studentCache,
         new Set(skippedRowsBySheet[`${item.slotIndex}:${item.title}`] ?? []),
+        item.sheetUrl,
         { dedupeFolienRows },
         onProgress
       );

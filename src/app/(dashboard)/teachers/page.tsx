@@ -1,6 +1,6 @@
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { lessonDurationMinutes, normalizeGroupClassType } from '@/lib/courseDuration';
-import { normalizePersonNameKey } from '@/lib/normalizePersonName';
+import { buildTeacherLessonMatchKeys, lessonMatchesAnyTeacherKey } from '@/lib/teacherLessonMatch';
 import TeachersClient from './TeachersClient';
 
 export const dynamic = 'force-dynamic';
@@ -37,22 +37,6 @@ function extractClassType(value: unknown): string | null {
     return typeof maybeObj.class_type === 'string' ? maybeObj.class_type : null;
   }
   return null;
-}
-
-function parseTeacherNames(raw: string | undefined | null): string[] {
-  if (raw == null || raw === '') return [];
-  const s = String(raw).trim();
-  if (!s) return [];
-  return s
-    .split(/[/,;\n]+|\s+und\s+/i)
-    .map((t) => t.trim())
-    .filter(Boolean);
-}
-
-function lessonIncludesTeacher(lessonTeacher: unknown, selectedTeacherKey: string): boolean {
-  if (!selectedTeacherKey) return false;
-  const names = parseTeacherNames(typeof lessonTeacher === 'string' ? lessonTeacher : undefined);
-  return names.some((n) => normalizePersonNameKey(n) === selectedTeacherKey);
 }
 
 function hoursDisplayFromMinutes(minutes: number): string {
@@ -98,6 +82,25 @@ export default async function TeachersPage() {
   }
 
   const courseIds = [...allCourseIds];
+
+  const { data: allAliasRows } =
+    teacherIds.length === 0
+      ? { data: [] as { teacher_id: string; normalized_key: string | null }[] }
+      : await supabase
+          .from('teacher_aliases')
+          .select('teacher_id, normalized_key')
+          .in('teacher_id', teacherIds);
+
+  const aliasKeysByTeacherId = new Map<string, string[]>();
+  for (const row of allAliasRows ?? []) {
+    if (!row.teacher_id) continue;
+    const nk = String(row.normalized_key ?? '').trim();
+    if (!nk) continue;
+    const list = aliasKeysByTeacherId.get(row.teacher_id) ?? [];
+    list.push(nk);
+    aliasKeysByTeacherId.set(row.teacher_id, list);
+  }
+
   let lessonsByCourseId: Record<string, LessonRow[]> = {};
   const classTypeByCourseId = new Map<string, ReturnType<typeof normalizeGroupClassType>>();
 
@@ -169,13 +172,13 @@ export default async function TeachersPage() {
   }
 
   const teachersWithHours = teacherList.map((teacher) => {
-    const key = normalizePersonNameKey(teacher.name);
+    const lessonMatchKeys = buildTeacherLessonMatchKeys(teacher.name, aliasKeysByTeacherId.get(teacher.id) ?? []);
     const courseIdsForTeacher = new Set(coursesByTeacherId.get(teacher.id) ?? []);
     const minutesByYm: Record<string, number> = {};
     for (const courseId of courseIdsForTeacher) {
       const courseLessons = lessonsByCourseId[courseId] ?? [];
       for (const lesson of courseLessons) {
-        if (!lessonIncludesTeacher(lesson.teacher, key)) continue;
+        if (!lessonMatchesAnyTeacherKey(lesson.teacher, lessonMatchKeys)) continue;
         const ym = yearMonthFromLessonDate(lesson.date);
         if (!ym) continue;
         const m = lesson.calculatedDurationMinutes ?? 0;
