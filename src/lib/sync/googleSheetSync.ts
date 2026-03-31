@@ -337,6 +337,23 @@ function classifySessionDateSkip(
   return null;
 }
 
+function isCourseSyncCompleted(
+  autoSkippedFutureRows: number,
+  autoSkippedInvalidDateRows: number
+): boolean {
+  // Completion is based only on future session skips.
+  // User-selected and invalid-date skips do not affect sync_completed.
+  void autoSkippedInvalidDateRows;
+  return autoSkippedFutureRows === 0;
+}
+
+function isGroupSyncCompleted(
+  skippedAfterCurrentCourse: number,
+  allImportedCoursesCompleted: boolean
+): boolean {
+  return skippedAfterCurrentCourse === 0 && allImportedCoursesCompleted;
+}
+
 function analyzeRawSheetSessionSkips(
   rows: SheetRow[] | undefined,
   options?: {
@@ -874,7 +891,6 @@ async function syncOneCourseSheet(
 ): Promise<{
   ok: boolean;
   reason?: string;
-  hadSkippedSessions?: boolean;
   courseId?: string;
   syncCompleted?: boolean;
 }> {
@@ -1242,7 +1258,7 @@ async function syncOneCourseSheet(
     onProgress
   );
 
-  const courseSyncCompleted = skippedSessionRows === 0;
+  const courseSyncCompleted = isCourseSyncCompleted(autoSkippedFutureRows, autoSkippedInvalidDateRows);
   await onProgress?.({
     type: 'db',
     message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
@@ -1270,7 +1286,6 @@ async function syncOneCourseSheet(
 
   return {
     ok: true,
-    hadSkippedSessions: skippedSessionRows > 0,
     courseId,
     syncCompleted: courseSyncCompleted,
   };
@@ -2123,7 +2138,10 @@ export async function scanGoogleSheet(
             const scannedSessionAnalysis = analyzeScannedSheetSessionsForImport(sh, now);
             if (matched) {
               const dbSyncCompleted = Boolean(matched.sync_completed);
-              const analyzedSyncCompleted = scannedSessionAnalysis.autoSkippedTotal === 0;
+              const analyzedSyncCompleted = isCourseSyncCompleted(
+                scannedSessionAnalysis.autoSkippedFutureRows,
+                scannedSessionAnalysis.autoSkippedInvalidDateRows
+              );
               diff.dbSyncCompleted = dbSyncCompleted;
               diff.analyzedSyncCompleted = analyzedSyncCompleted;
               if (dbSyncCompleted !== analyzedSyncCompleted) {
@@ -2326,7 +2344,6 @@ export async function runGoogleSheetSync(
     let synced = 0;
     let skipped = 0;
     let skippedAfterCurrentCourse = 0;
-    let anyCourseHadSkippedSessions = false;
     const importedCourseIds: string[] = [];
     let visibleIndex = 0;
     let visibleSlotIndex = 0;
@@ -2390,7 +2407,6 @@ export async function runGoogleSheetSync(
       );
       if (result.ok) {
         synced++;
-        if (result.hadSkippedSessions) anyCourseHadSkippedSessions = true;
         if (result.courseId) importedCourseIds.push(result.courseId);
       } else skipped++;
     }
@@ -2409,8 +2425,7 @@ export async function runGoogleSheetSync(
       }
     }
 
-    const groupSyncCompleted =
-      skippedAfterCurrentCourse === 0 && !anyCourseHadSkippedSessions && allImportedCoursesCompleted;
+    const groupSyncCompleted = isGroupSyncCompleted(skippedAfterCurrentCourse, allImportedCoursesCompleted);
     await onProgress?.({
       type: 'db',
       message: `groups — sync_completed=${groupSyncCompleted}`,
