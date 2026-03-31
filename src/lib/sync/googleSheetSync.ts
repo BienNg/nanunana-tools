@@ -1125,7 +1125,7 @@ async function syncOneCourseSheet(
     onProgress
   );
 
-  const courseSyncCompleted = userSkippedSessionRows === 0;
+  const courseSyncCompleted = skippedSessionRows === 0;
   await onProgress?.({
     type: 'db',
     message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (user_skipped=${userSkippedSessionRows}, total_skipped=${skippedSessionRows})`,
@@ -1138,7 +1138,7 @@ async function syncOneCourseSheet(
     throw new Error(courseSyncFlagErr.message);
   }
 
-  return { ok: true, hadSkippedSessions: userSkippedSessionRows > 0 };
+  return { ok: true, hadSkippedSessions: skippedSessionRows > 0 };
 }
 
 export type SyncGoogleSheetResult =

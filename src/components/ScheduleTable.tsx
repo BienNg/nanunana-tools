@@ -44,6 +44,8 @@ function compareLessonsByCourseColumn(a: Lesson, b: Lesson): number {
 export default function ScheduleTable({ courseId }: { courseId?: string } = {}) {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
+  const [openLessonActionId, setOpenLessonActionId] = useState<string | null>(null);
+  const [deletingLessonId, setDeletingLessonId] = useState<string | null>(null);
 
   const fetchData = async () => {
     let query = supabase
@@ -117,12 +119,47 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
     };
   }, [courseId]);
 
+  useEffect(() => {
+    const closeMenu = () => setOpenLessonActionId(null);
+    window.addEventListener('click', closeMenu);
+    return () => {
+      window.removeEventListener('click', closeMenu);
+    };
+  }, []);
+
   const getAttendance = (lesson: Lesson, studentId: string): AttendanceRecord | undefined =>
     lesson.attendance_records?.find((r) => r.student_id === studentId);
 
   const sortedLessons = useMemo(() => [...lessons].sort(compareLessonsByCourseColumn), [lessons]);
 
   const totalCols = 3 + students.length;
+
+  const deleteLesson = async (lesson: Lesson) => {
+    const confirmed = window.confirm(
+      `Delete this session?\n\n${lessonCourseLabel(lesson)} ${lesson.slide_id}\n${lesson.date || 'TBA'} ${lesson.start_time?.slice(0, 5) || ''}`.trim()
+    );
+    if (!confirmed) return;
+
+    setDeletingLessonId(lesson.id);
+    setOpenLessonActionId(null);
+
+    const { error: attendanceDeleteError } = await supabase.from('attendance_records').delete().eq('lesson_id', lesson.id);
+    if (attendanceDeleteError) {
+      window.alert(`Could not delete attendance records: ${attendanceDeleteError.message}`);
+      setDeletingLessonId(null);
+      return;
+    }
+
+    const { error: lessonDeleteError } = await supabase.from('lessons').delete().eq('id', lesson.id);
+    if (lessonDeleteError) {
+      window.alert(`Could not delete session: ${lessonDeleteError.message}`);
+      setDeletingLessonId(null);
+      return;
+    }
+
+    setDeletingLessonId(null);
+    fetchData();
+  };
 
   return (
     <div className="bg-surface-container-lowest rounded-[1rem] p-1 shadow-sm border border-outline-variant/5 overflow-hidden">
@@ -157,13 +194,47 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
                 <td className="px-6 py-6 sticky left-0 bg-surface-container-lowest group-hover:bg-surface-container-low transition-colors z-10">
                   <div className="flex items-center gap-3">
                     <div className="w-2 h-8 rounded-full group-hover:h-10 transition-all bg-secondary-container shrink-0"></div>
-                    <div>
+                    <div className="min-w-0 flex-1">
                       {courseLabel && (
                         <span className="text-[10px] font-bold uppercase tracking-wider text-primary block mb-0.5">
                           {courseLabel}
                         </span>
                       )}
                       <span className="font-bold text-sm block">{lesson.slide_id}</span>
+                    </div>
+                    <div className="relative">
+                      <button
+                        type="button"
+                        aria-haspopup="menu"
+                        aria-expanded={openLessonActionId === lesson.id}
+                        aria-label={`Session actions for ${lesson.slide_id}`}
+                        disabled={deletingLessonId === lesson.id}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenLessonActionId((prev) => (prev === lesson.id ? null : lesson.id));
+                        }}
+                        className="inline-flex items-center justify-center rounded-md border border-outline-variant/30 bg-surface-container-lowest p-1 text-on-surface-variant hover:bg-surface-container-high disabled:opacity-50"
+                      >
+                        <span className="material-symbols-outlined text-base leading-none">more_vert</span>
+                      </button>
+                      {openLessonActionId === lesson.id && (
+                        <div
+                          role="menu"
+                          onClick={(event) => event.stopPropagation()}
+                          className="absolute right-0 top-[calc(100%+0.25rem)] z-30 min-w-[9.5rem] rounded-md border border-outline-variant/20 bg-surface-container-lowest p-1 shadow-lg"
+                        >
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={deletingLessonId === lesson.id}
+                            onClick={() => deleteLesson(lesson)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs font-semibold text-error hover:bg-error/10 disabled:opacity-50"
+                          >
+                            <span className="material-symbols-outlined text-sm leading-none">delete</span>
+                            {deletingLessonId === lesson.id ? 'Deleting...' : 'Delete session'}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </td>

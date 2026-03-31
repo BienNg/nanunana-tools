@@ -453,11 +453,11 @@ export default function ScanPreviewModal({
     return Object.values(skippedAttendanceCellsBySheet).some((cells) => cells.length > 0);
   }, [skippedRowsBySheet, skippedAttendanceCellsBySheet]);
 
-  /** Same rule as import: substring on workbook title (not each tab). */
-  const hasUnknownWorkbookClassType = scanResult?.workbookClassType == null;
-
   const resolvedWorkbookClassType: WorkbookClassType | null =
     scanResult?.workbookClassType ?? (manualWorkbookClassType === '' ? null : manualWorkbookClassType);
+
+  /** Show warning only while class type is still missing. */
+  const hasUnknownWorkbookClassType = resolvedWorkbookClassType === null;
 
   const confirmImportBlocked =
     hasImportBlockingSheetIssues ||
