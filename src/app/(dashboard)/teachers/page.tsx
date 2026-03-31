@@ -1,9 +1,14 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
+
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { lessonDurationMinutes, normalizeGroupClassType } from '@/lib/courseDuration';
 import { buildTeacherLessonMatchKeys, lessonMatchesAnyTeacherKey } from '@/lib/teacherLessonMatch';
 import TeachersClient from './TeachersClient';
 
 export const dynamic = 'force-dynamic';
+
+/** PostgREST often caps responses at 1000 rows; paginate so list totals match per-teacher pages. */
+const ROW_PAGE = 1000;
 
 const MONTH_NAMES = [
   'January',
@@ -52,70 +57,94 @@ type LessonRow = {
   end_time?: string | null;
   teacher?: unknown;
   courses?: { groups?: unknown } | null;
-  calculatedDurationMinutes?: number;
 };
 
-export default async function TeachersPage() {
-  const supabase = getSupabaseAdmin();
-  const { data: teachers, error } = await supabase.from('teachers').select('id, name').order('name');
-
-  if (error) {
-    console.error('Error fetching teachers:', error);
+async function fetchAllCourseTeacherRows(
+  supabase: SupabaseClient,
+  teacherIds: string[],
+): Promise<{ teacher_id: string; course_id: string }[]> {
+  if (teacherIds.length === 0) return [];
+  const out: { teacher_id: string; course_id: string }[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from('course_teachers')
+      .select('teacher_id, course_id')
+      .in('teacher_id', teacherIds)
+      .order('teacher_id', { ascending: true })
+      .order('course_id', { ascending: true })
+      .range(from, from + ROW_PAGE - 1);
+    if (error) {
+      console.error('Error fetching course_teachers (paged):', error);
+      break;
+    }
+    const rows = data ?? [];
+    out.push(...rows);
+    if (rows.length < ROW_PAGE) break;
+    from += ROW_PAGE;
   }
+  return out;
+}
 
-  const teacherList = teachers ?? [];
-  const teacherIds = teacherList.map((t) => t.id);
-
-  const { data: courseTeacherRows } =
-    teacherIds.length === 0
-      ? { data: [] as { teacher_id: string; course_id: string }[] }
-      : await supabase.from('course_teachers').select('teacher_id, course_id').in('teacher_id', teacherIds);
-
-  const coursesByTeacherId = new Map<string, string[]>();
-  const allCourseIds = new Set<string>();
-  for (const row of courseTeacherRows ?? []) {
-    if (!row.teacher_id || !row.course_id) continue;
-    allCourseIds.add(row.course_id);
-    const list = coursesByTeacherId.get(row.teacher_id) ?? [];
-    list.push(row.course_id);
-    coursesByTeacherId.set(row.teacher_id, list);
+async function fetchAllTeacherAliasRows(
+  supabase: SupabaseClient,
+  teacherIds: string[],
+): Promise<{ teacher_id: string; normalized_key: string | null }[]> {
+  if (teacherIds.length === 0) return [];
+  const out: { teacher_id: string; normalized_key: string | null }[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from('teacher_aliases')
+      .select('teacher_id, normalized_key')
+      .in('teacher_id', teacherIds)
+      .order('teacher_id', { ascending: true })
+      .order('normalized_key', { ascending: true })
+      .range(from, from + ROW_PAGE - 1);
+    if (error) {
+      console.error('Error fetching teacher_aliases (paged):', error);
+      break;
+    }
+    const rows = data ?? [];
+    out.push(...rows);
+    if (rows.length < ROW_PAGE) break;
+    from += ROW_PAGE;
   }
+  return out;
+}
 
-  const courseIds = [...allCourseIds];
-
-  const { data: allAliasRows } =
-    teacherIds.length === 0
-      ? { data: [] as { teacher_id: string; normalized_key: string | null }[] }
-      : await supabase
-          .from('teacher_aliases')
-          .select('teacher_id, normalized_key')
-          .in('teacher_id', teacherIds);
-
-  const aliasKeysByTeacherId = new Map<string, string[]>();
-  for (const row of allAliasRows ?? []) {
-    if (!row.teacher_id) continue;
-    const nk = String(row.normalized_key ?? '').trim();
-    if (!nk) continue;
-    const list = aliasKeysByTeacherId.get(row.teacher_id) ?? [];
-    list.push(nk);
-    aliasKeysByTeacherId.set(row.teacher_id, list);
-  }
-
-  let lessonsByCourseId: Record<string, LessonRow[]> = {};
-  const classTypeByCourseId = new Map<string, ReturnType<typeof normalizeGroupClassType>>();
-
-  if (courseIds.length > 0) {
-    const { data: coursesMeta } = await supabase
+async function fetchAllCoursesMeta(
+  supabase: SupabaseClient,
+  courseIds: string[],
+): Promise<{ id: string; groups?: unknown }[]> {
+  if (courseIds.length === 0) return [];
+  const out: { id: string; groups?: unknown }[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
       .from('courses')
       .select('id, groups (class_type)')
-      .in('id', courseIds);
-    for (const c of coursesMeta ?? []) {
-      const row = c as { id: string; groups?: unknown };
-      const raw = extractClassType(row.groups);
-      classTypeByCourseId.set(row.id, normalizeGroupClassType(raw));
+      .in('id', courseIds)
+      .order('id', { ascending: true })
+      .range(from, from + ROW_PAGE - 1);
+    if (error) {
+      console.error('Error fetching courses meta (paged):', error);
+      break;
     }
+    const rows = (data ?? []) as { id: string; groups?: unknown }[];
+    out.push(...rows);
+    if (rows.length < ROW_PAGE) break;
+    from += ROW_PAGE;
+  }
+  return out;
+}
 
-    const { data: lessonsData } = await supabase
+async function fetchAllLessonsForCourses(supabase: SupabaseClient, courseIds: string[]): Promise<LessonRow[]> {
+  if (courseIds.length === 0) return [];
+  const out: LessonRow[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
       .from('lessons')
       .select(
         `
@@ -132,9 +161,71 @@ export default async function TeachersPage() {
         )
       `,
       )
-      .in('course_id', courseIds);
+      .in('course_id', courseIds)
+      .order('course_id', { ascending: true })
+      .order('date', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + ROW_PAGE - 1);
+    if (error) {
+      console.error('Error fetching lessons (paged):', error);
+      break;
+    }
+    const rows = (data ?? []) as LessonRow[];
+    out.push(...rows);
+    if (rows.length < ROW_PAGE) break;
+    from += ROW_PAGE;
+  }
+  return out;
+}
 
-    const lessons = (lessonsData ?? []) as LessonRow[];
+export default async function TeachersPage() {
+  const supabase = getSupabaseAdmin();
+  const { data: teachers, error } = await supabase.from('teachers').select('id, name').order('name');
+
+  if (error) {
+    console.error('Error fetching teachers:', error);
+  }
+
+  const teacherList = teachers ?? [];
+  const teacherIds = teacherList.map((t) => t.id);
+
+  const courseTeacherRows = await fetchAllCourseTeacherRows(supabase, teacherIds);
+
+  const coursesByTeacherId = new Map<string, string[]>();
+  const allCourseIds = new Set<string>();
+  for (const row of courseTeacherRows) {
+    if (!row.teacher_id || !row.course_id) continue;
+    allCourseIds.add(row.course_id);
+    const list = coursesByTeacherId.get(row.teacher_id) ?? [];
+    list.push(row.course_id);
+    coursesByTeacherId.set(row.teacher_id, list);
+  }
+
+  const courseIds = [...allCourseIds];
+
+  const allAliasRows = await fetchAllTeacherAliasRows(supabase, teacherIds);
+
+  const aliasKeysByTeacherId = new Map<string, string[]>();
+  for (const row of allAliasRows) {
+    if (!row.teacher_id) continue;
+    const nk = String(row.normalized_key ?? '').trim();
+    if (!nk) continue;
+    const list = aliasKeysByTeacherId.get(row.teacher_id) ?? [];
+    list.push(nk);
+    aliasKeysByTeacherId.set(row.teacher_id, list);
+  }
+
+  let lessonsByCourseId: Record<string, LessonRow[]> = {};
+  const classTypeByCourseId = new Map<string, ReturnType<typeof normalizeGroupClassType>>();
+
+  if (courseIds.length > 0) {
+    const coursesMeta = await fetchAllCoursesMeta(supabase, courseIds);
+    for (const row of coursesMeta) {
+      const raw = extractClassType(row.groups);
+      classTypeByCourseId.set(row.id, normalizeGroupClassType(raw));
+    }
+
+    const lessons = await fetchAllLessonsForCourses(supabase, courseIds);
     for (const lesson of lessons) {
       if (!lessonsByCourseId[lesson.course_id]) {
         lessonsByCourseId[lesson.course_id] = [];
@@ -147,12 +238,6 @@ export default async function TeachersPage() {
         const dateA = a.date ? new Date(a.date).getTime() : 0;
         const dateB = b.date ? new Date(b.date).getTime() : 0;
         return dateA - dateB;
-      });
-      courseLessons.forEach((lesson, index) => {
-        const lessonLevelClassType = normalizeGroupClassType(extractClassType(lesson.courses?.groups));
-        const classType = lessonLevelClassType ?? classTypeByCourseId.get(lesson.course_id) ?? null;
-        const duration = lessonDurationMinutes(lesson, index, classType);
-        lesson.calculatedDurationMinutes = duration;
       });
     });
   }
@@ -177,13 +262,23 @@ export default async function TeachersPage() {
     const minutesByYm: Record<string, number> = {};
     for (const courseId of courseIdsForTeacher) {
       const courseLessons = lessonsByCourseId[courseId] ?? [];
-      for (const lesson of courseLessons) {
-        if (!lessonMatchesAnyTeacherKey(lesson.teacher, lessonMatchKeys)) continue;
+      const matched = courseLessons.filter((lesson) =>
+        lessonMatchesAnyTeacherKey(lesson.teacher, lessonMatchKeys),
+      );
+      matched.sort((a, b) => {
+        const dateA = a.date ? new Date(a.date).getTime() : 0;
+        const dateB = b.date ? new Date(b.date).getTime() : 0;
+        return dateA - dateB;
+      });
+      const defaultClassType = classTypeByCourseId.get(courseId) ?? null;
+      matched.forEach((lesson, index) => {
+        const lessonLevelClassType = normalizeGroupClassType(extractClassType(lesson.courses?.groups));
+        const classType = lessonLevelClassType ?? defaultClassType ?? null;
+        const duration = lessonDurationMinutes(lesson, index, classType);
         const ym = yearMonthFromLessonDate(lesson.date);
-        if (!ym) continue;
-        const m = lesson.calculatedDurationMinutes ?? 0;
-        minutesByYm[ym] = (minutesByYm[ym] ?? 0) + m;
-      }
+        if (!ym) return;
+        minutesByYm[ym] = (minutesByYm[ym] ?? 0) + duration;
+      });
     }
     const monthHours = monthBuckets.map(({ ym }) => ({
       label: ym,

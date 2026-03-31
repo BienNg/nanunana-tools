@@ -280,9 +280,21 @@ export default async function TeacherDetailsPage({
   const totalLessons = allLessons.length;
 
   const courseMetaById = new Map(courses.map((course: any) => [course.id, course]));
+  type GroupCourseInPeriod = {
+    courseId: string;
+    name: string;
+    lessonsCount: number;
+    minutesTaught: number;
+  };
   const groupsInPeriodMap = new Map<
     string,
-    { groupId: string; name: string; lessonsCount: number; minutesTaught: number }
+    {
+      groupId: string;
+      name: string;
+      lessonsCount: number;
+      minutesTaught: number;
+      coursesMap: Map<string, GroupCourseInPeriod>;
+    }
   >();
   allLessons.forEach((lesson) => {
     const courseMeta = courseMetaById.get(lesson.course_id);
@@ -295,20 +307,45 @@ export default async function TeacherDetailsPage({
     if (existing) {
       existing.lessonsCount += 1;
       existing.minutesTaught += mins;
+      let courseRow = existing.coursesMap.get(lesson.course_id);
+      if (!courseRow) {
+        courseRow = {
+          courseId: lesson.course_id,
+          name: courseMeta?.name ?? 'Course',
+          lessonsCount: 0,
+          minutesTaught: 0,
+        };
+        existing.coursesMap.set(lesson.course_id, courseRow);
+      }
+      courseRow.lessonsCount += 1;
+      courseRow.minutesTaught += mins;
       return;
     }
 
+    const courseRow: GroupCourseInPeriod = {
+      courseId: lesson.course_id,
+      name: courseMeta?.name ?? 'Course',
+      lessonsCount: 1,
+      minutesTaught: mins,
+    };
     groupsInPeriodMap.set(groupId, {
       groupId,
       name: courseGroup?.name ?? 'Unknown group',
       lessonsCount: 1,
       minutesTaught: mins,
+      coursesMap: new Map([[lesson.course_id, courseRow]]),
     });
   });
 
-  const groupsInPeriod = Array.from(groupsInPeriodMap.values()).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
+  const groupsInPeriod = Array.from(groupsInPeriodMap.values())
+    .map((row) => ({
+      groupId: row.groupId,
+      name: row.name,
+      lessonsCount: row.lessonsCount,
+      minutesTaught: row.minutesTaught,
+      courses: Array.from(row.coursesMap.values()).sort((a, b) => a.name.localeCompare(b.name)),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   const periodGroupsSubtitle =
     filter === 'monthly' ? selectedMonthLabel : 'All time';
@@ -507,28 +544,51 @@ export default async function TeacherDetailsPage({
                 <ul className="space-y-2 overflow-y-auto flex-1 -mr-2 pr-2 max-h-[280px]">
                   {groupsInPeriod.map((row) => (
                     <li key={row.groupId}>
-                      <Link
-                        href={`/groups/${row.groupId}`}
-                        className="flex items-center gap-3 rounded-2xl border border-outline-variant/10 bg-surface-container-low/40 hover:bg-surface-container-low transition-colors px-4 py-3 group"
-                      >
-                        <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
-                          <span className="material-symbols-outlined text-xl">groups</span>
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="font-bold text-on-surface truncate">{row.name}</p>
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
-                            <span className="text-xs font-semibold text-on-surface-variant">
-                              {row.lessonsCount} lesson{row.lessonsCount === 1 ? '' : 's'}
-                            </span>
-                            <span className="text-xs font-semibold text-on-surface-variant">
-                              · {hoursDisplayFromMinutes(row.minutesTaught)} hrs
-                            </span>
+                      <div className="rounded-2xl border border-outline-variant/10 bg-surface-container-low/40 overflow-hidden">
+                        <Link
+                          href={`/groups/${row.groupId}`}
+                          className="flex items-center gap-3 hover:bg-surface-container-low transition-colors px-4 py-3 group"
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                            <span className="material-symbols-outlined text-xl">groups</span>
                           </div>
-                        </div>
-                        <span className="material-symbols-outlined text-outline group-hover:text-primary transition-colors shrink-0 text-lg">
-                          chevron_right
-                        </span>
-                      </Link>
+                          <div className="min-w-0 flex-1">
+                            <p className="font-bold text-on-surface truncate">{row.name}</p>
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
+                              <span className="text-xs font-semibold text-on-surface-variant">
+                                {row.lessonsCount} lesson{row.lessonsCount === 1 ? '' : 's'}
+                              </span>
+                              <span className="text-xs font-semibold text-on-surface-variant">
+                                · {hoursDisplayFromMinutes(row.minutesTaught)} hrs
+                              </span>
+                            </div>
+                          </div>
+                          <span className="material-symbols-outlined text-outline group-hover:text-primary transition-colors shrink-0 text-lg">
+                            chevron_right
+                          </span>
+                        </Link>
+                        {row.courses.length > 0 && (
+                          <ul className="border-t border-outline-variant/10 bg-surface-container-lowest/50 px-3 py-2 space-y-0.5">
+                            {row.courses.map((c) => (
+                              <li key={c.courseId}>
+                                <Link
+                                  href={`/courses/${c.courseId}`}
+                                  className="flex items-start justify-between gap-2 rounded-xl px-2 py-1.5 text-xs hover:bg-surface-container-low/80 transition-colors group/course"
+                                >
+                                  <span className="font-semibold text-on-surface truncate min-w-0">
+                                    {c.name}
+                                  </span>
+                                  <span className="shrink-0 tabular-nums text-on-surface-variant font-medium text-right">
+                                    {c.lessonsCount} lesson{c.lessonsCount === 1 ? '' : 's'}
+                                    <span className="mx-1 text-outline-variant">·</span>
+                                    {hoursDisplayFromMinutes(c.minutesTaught)} hrs
+                                  </span>
+                                </Link>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                     </li>
                   ))}
                 </ul>
