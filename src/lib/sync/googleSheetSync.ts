@@ -613,6 +613,20 @@ function normalizeFolienKey(value: string | undefined | null): string {
 /** Map a sheet spelling to an existing teacher during import; persisted as `teacher_aliases`. */
 export type TeacherAliasResolution = { aliasName: string; teacherId: string };
 
+function parseTeacherAliasResolutions(raw: unknown): TeacherAliasResolution[] | undefined {
+  if (!raw || !Array.isArray(raw)) return undefined;
+  const out: TeacherAliasResolution[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, unknown>;
+    const aliasName = typeof o.aliasName === 'string' ? o.aliasName.trim() : '';
+    const teacherId = typeof o.teacherId === 'string' ? o.teacherId.trim() : '';
+    if (!aliasName || !teacherId) continue;
+    out.push({ aliasName, teacherId });
+  }
+  return out.length ? out : undefined;
+}
+
 export type SyncProgressEvent =
   | { type: 'status'; message: string }
   | { type: 'sheet'; title: string; current: number; total: number }
@@ -1956,6 +1970,12 @@ function processVisibleSheetGrid(
 export type ScanGoogleSheetResult =
   | {
       success: true;
+      /** Stable source identity for import: spreadsheet id when available, else xlsx hash key. */
+      sourceKey: string;
+      /** Spreadsheet id for DB group lookup when tied to a Google file; null for file-only imports. */
+      groupSpreadsheetId: string | null;
+      /** Canonical workbook URL when known (Google), else null. */
+      spreadsheetUrl: string | null;
       workbookTitle: string;
       /** From workbook title: Online_DE, Online_VN, Offline substring match; null if none. */
       workbookClassType: WorkbookClassType | null;
@@ -1968,6 +1988,173 @@ export type ScanGoogleSheetResult =
       existingTeachersForPicker: { id: string; name: string }[];
     }
   | { success: false; error: string };
+
+export type ReviewedImportSnapshot = Extract<ScanGoogleSheetResult, { success: true }>;
+
+export type ReviewedSnapshotImportPayload = {
+  reviewSnapshot: ReviewedImportSnapshot;
+  skippedRowsBySheet?: unknown;
+  skippedAttendanceCellsBySheet?: unknown;
+  teacherAliasResolutions?: unknown;
+  workbookClassType?: unknown;
+};
+
+export type ParsedReviewedSnapshotImportPayload = {
+  reviewSnapshot: ReviewedImportSnapshot;
+  skippedRowsBySheet: SkippedRowsBySheet;
+  skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet;
+  teacherAliasResolutions?: TeacherAliasResolution[];
+  workbookClassType?: unknown;
+};
+
+function isWorkbookClassType(v: unknown): v is WorkbookClassType {
+  return (
+    v === 'Online_DE' ||
+    v === 'Online_VN' ||
+    v === 'Offline' ||
+    v === 'M' ||
+    v === 'A' ||
+    v === 'P'
+  );
+}
+
+function isScannedSampleRow(value: unknown): value is ScannedSampleRow {
+  if (!value || typeof value !== 'object') return false;
+  const row = value as Record<string, unknown>;
+  if (!row.values || typeof row.values !== 'object') return false;
+  if (!row.studentAttendance || typeof row.studentAttendance !== 'object') return false;
+  return true;
+}
+
+function isScannedSheet(value: unknown): value is ScannedSheet {
+  if (!value || typeof value !== 'object') return false;
+  const sheet = value as Record<string, unknown>;
+  if (typeof sheet.title !== 'string') return false;
+  if (typeof sheet.visibleOrderIndex !== 'number' || !Number.isInteger(sheet.visibleOrderIndex)) return false;
+  if (!(sheet.sheetUrl === null || typeof sheet.sheetUrl === 'string')) return false;
+  if (!sheet.headers || typeof sheet.headers !== 'object') return false;
+  if (!Array.isArray(sheet.sampleRows)) return false;
+  return sheet.sampleRows.every((r) => isScannedSampleRow(r));
+}
+
+function parseMaybeObjectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+}
+
+function sanitizeSkipMap(raw: unknown): SkippedRowsBySheet {
+  const obj = parseMaybeObjectRecord(raw);
+  if (!obj) return {};
+  const out: SkippedRowsBySheet = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (!Array.isArray(v)) continue;
+    const ints = [...new Set(v.filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0))];
+    if (ints.length > 0) out[k] = ints.sort((a, b) => a - b);
+  }
+  return out;
+}
+
+function sanitizeSkippedAttendanceMap(raw: unknown): SkippedAttendanceCellsBySheet {
+  const obj = parseMaybeObjectRecord(raw);
+  if (!obj) return {};
+  const out: SkippedAttendanceCellsBySheet = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (!Array.isArray(v)) continue;
+    const tokens = [...new Set(v.filter((s): s is string => typeof s === 'string' && s.includes(':')))];
+    if (tokens.length > 0) out[k] = tokens.sort((a, b) => a.localeCompare(b));
+  }
+  return out;
+}
+
+export function parseReviewedSnapshotImportPayload(raw: unknown): {
+  ok: true;
+  value: ParsedReviewedSnapshotImportPayload;
+} | {
+  ok: false;
+  error: string;
+} {
+  const body = parseMaybeObjectRecord(raw);
+  if (!body) return { ok: false, error: 'Invalid request body' };
+  const rs = body.reviewSnapshot;
+  const snap = parseMaybeObjectRecord(rs);
+  if (!snap) return { ok: false, error: 'Missing review snapshot' };
+  if (snap.success !== true) return { ok: false, error: 'Review snapshot must be a successful scan result' };
+  if (typeof snap.workbookTitle !== 'string' || snap.workbookTitle.trim() === '') {
+    return { ok: false, error: 'Review snapshot is missing workbookTitle' };
+  }
+  if (typeof snap.sourceKey !== 'string' || snap.sourceKey.trim() === '') {
+    return { ok: false, error: 'Review snapshot is missing sourceKey' };
+  }
+  if (!(snap.groupSpreadsheetId === null || typeof snap.groupSpreadsheetId === 'string')) {
+    return { ok: false, error: 'Review snapshot has invalid groupSpreadsheetId' };
+  }
+  if (!(snap.spreadsheetUrl === null || typeof snap.spreadsheetUrl === 'string')) {
+    return { ok: false, error: 'Review snapshot has invalid spreadsheetUrl' };
+  }
+  if (!(snap.workbookClassType === null || isWorkbookClassType(snap.workbookClassType))) {
+    return { ok: false, error: 'Review snapshot has invalid workbookClassType' };
+  }
+  if (!(snap.currentCourseVisibleIndex === null || Number.isInteger(snap.currentCourseVisibleIndex))) {
+    return { ok: false, error: 'Review snapshot has invalid currentCourseVisibleIndex' };
+  }
+  if (!Array.isArray(snap.sheets) || !snap.sheets.every((s) => isScannedSheet(s))) {
+    return { ok: false, error: 'Review snapshot has invalid sheets' };
+  }
+  const sheetKeyInfo = new Map<
+    string,
+    { rowCount: number; studentNames: Set<string> }
+  >();
+  for (const sheet of snap.sheets as ScannedSheet[]) {
+    const k = `${sheet.visibleOrderIndex}:${sheet.title}`;
+    sheetKeyInfo.set(k, {
+      rowCount: sheet.sampleRows.length,
+      studentNames: new Set(sheet.headers.students.map((s) => s.name)),
+    });
+  }
+
+  const skippedRowsBySheet = sanitizeSkipMap(body.skippedRowsBySheet);
+  for (const [key, rows] of Object.entries(skippedRowsBySheet)) {
+    const info = sheetKeyInfo.get(key);
+    if (!info) return { ok: false, error: `Unknown sheet key in skippedRowsBySheet: ${key}` };
+    if (rows.some((idx) => idx >= info.rowCount)) {
+      return { ok: false, error: `Out-of-range row index in skippedRowsBySheet for ${key}` };
+    }
+  }
+
+  const skippedAttendanceCellsBySheet = sanitizeSkippedAttendanceMap(body.skippedAttendanceCellsBySheet);
+  for (const [key, tokens] of Object.entries(skippedAttendanceCellsBySheet)) {
+    const info = sheetKeyInfo.get(key);
+    if (!info) return { ok: false, error: `Unknown sheet key in skippedAttendanceCellsBySheet: ${key}` };
+    for (const token of tokens) {
+      const sep = token.indexOf(':');
+      if (sep <= 0) return { ok: false, error: `Invalid attendance skip token "${token}" for ${key}` };
+      const rowIndex = Number(token.slice(0, sep));
+      const studentName = token.slice(sep + 1);
+      if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= info.rowCount) {
+        return { ok: false, error: `Out-of-range attendance row index "${token}" for ${key}` };
+      }
+      if (!info.studentNames.has(studentName)) {
+        return { ok: false, error: `Unknown student in attendance skip token "${token}" for ${key}` };
+      }
+    }
+  }
+
+  const teacherAliasRaw = body.teacherAliasResolutions;
+  if (teacherAliasRaw != null && !Array.isArray(teacherAliasRaw)) {
+    return { ok: false, error: 'teacherAliasResolutions must be a list of { aliasName, teacherId }' };
+  }
+  const teacherAliasResolutions = parseTeacherAliasResolutions(teacherAliasRaw);
+
+  return {
+    ok: true,
+    value: {
+      reviewSnapshot: snap as ReviewedImportSnapshot,
+      skippedRowsBySheet,
+      skippedAttendanceCellsBySheet,
+      teacherAliasResolutions,
+      workbookClassType: body.workbookClassType,
+    },
+  };
+}
 
 export type SheetSyncSource = string | { fileName: string; bytes: Uint8Array };
 
@@ -2273,6 +2460,9 @@ export async function scanGoogleSheet(
 
     return {
       success: true,
+      sourceKey: loaded.sourceKey,
+      groupSpreadsheetId: loaded.groupSpreadsheetId,
+      spreadsheetUrl: loaded.spreadsheetUrl,
       workbookTitle,
       workbookClassType: titleClassType ?? dbWorkbookClassType,
       sheets: scannedSheets,
@@ -2552,6 +2742,544 @@ export async function runGoogleSheetSync(
     };
   } catch (error: unknown) {
     console.error('Sync error:', error);
+    const errMsg = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, error: errMsg };
+  }
+}
+
+async function syncOneScannedCourseSheet(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  groupId: string,
+  scannedSheet: ScannedSheet,
+  teacherCache: Map<string, string>,
+  canonicalTeacherNameById: Map<string, string>,
+  studentCache: Map<string, string>,
+  skippedPreviewRows: ReadonlySet<number>,
+  skippedAttendanceCells: ReadonlySet<string>,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+): Promise<{
+  ok: boolean;
+  reason?: string;
+  courseId?: string;
+  syncCompleted?: boolean;
+}> {
+  const sheetTitle = scannedSheet.title;
+  const sheetLabel = `[${sheetTitle}]`;
+  const sheetUrl = scannedSheet.sheetUrl;
+  const uniqueStudentNames = [...new Set(scannedSheet.headers.students.map((s) => s.name.trim()).filter(Boolean))];
+
+  await onProgress?.({
+    type: 'db',
+    message: `${sheetLabel} courses — select by group + name`,
+  });
+  const { data: existingCourses, error: existingCoursesErr } = await supabase
+    .from('courses')
+    .select('id, sheet_url')
+    .eq('group_id', groupId)
+    .eq('name', sheetTitle);
+  if (existingCoursesErr) throw new Error(existingCoursesErr.message);
+
+  let courseId: string;
+  let existing: { id: string; sheet_url: string | null } | null = null;
+  if ((existingCourses ?? []).length === 1) {
+    existing = existingCourses![0] as { id: string; sheet_url: string | null };
+  } else if ((existingCourses ?? []).length > 1) {
+    const rows = (existingCourses ?? []) as { id: string; sheet_url: string | null }[];
+    if (sheetUrl) {
+      existing = rows.find((c) => courseDbUrlMatchesTabUrl(c.sheet_url, sheetUrl)) ?? null;
+    }
+    if (!existing) {
+      existing = rows.find((c) => !(c.sheet_url ?? '').trim()) ?? rows[0] ?? null;
+    }
+  }
+
+  if (existing?.id) {
+    courseId = existing.id;
+    const prevUrl = (existing.sheet_url ?? '').trim();
+    const nextUrl = (sheetUrl ?? '').trim();
+    if (sheetUrl && prevUrl !== nextUrl) {
+      await onProgress?.({
+        type: 'db',
+        message: `${sheetLabel} courses — update sheet_url`,
+      });
+      const { error: sheetUrlErr } = await supabase.from('courses').update({ sheet_url: sheetUrl }).eq('id', courseId);
+      if (sheetUrlErr && !isSupabaseMissingColumnError(sheetUrlErr.message, 'sheet_url')) {
+        throw new Error(`Failed to update course sheet_url "${sheetTitle}": ${sheetUrlErr.message}`);
+      }
+    }
+  } else {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} courses — insert`,
+    });
+    let row: { id: string } | null = null;
+    let createError = null as { message: string } | null;
+    ({ data: row, error: createError } = await supabase
+      .from('courses')
+      .insert({ name: sheetTitle, group_id: groupId, sheet_url: sheetUrl })
+      .select('id')
+      .single());
+    if (createError && isSupabaseMissingColumnError(createError.message, 'sheet_url')) {
+      ({ data: row, error: createError } = await supabase
+        .from('courses')
+        .insert({ name: sheetTitle, group_id: groupId })
+        .select('id')
+        .single());
+    }
+    if (createError || !row) {
+      throw new Error(`Failed to create course "${sheetTitle}": ${createError?.message ?? 'unknown'}`);
+    }
+    courseId = row.id;
+  }
+
+  const { data: existingEnrollRows, error: enrollSelErr } = await supabase
+    .from('course_students')
+    .select('student_id')
+    .eq('course_id', courseId);
+  if (enrollSelErr) throw new Error(enrollSelErr.message);
+  const enrolledStudentIds = new Set((existingEnrollRows ?? []).map((r) => r.student_id as string));
+
+  for (const name of uniqueStudentNames) {
+    let studentId = studentCache.get(name);
+    if (!studentId) {
+      await onProgress?.({
+        type: 'db',
+        message: `${sheetLabel} students — upsert "${name}"`,
+      });
+      const { data: row, error: studentUpsertError } = await supabase
+        .from('students')
+        .upsert({ group_id: groupId, name }, { onConflict: 'group_id,name' })
+        .select('id')
+        .single();
+      const newId = row?.id;
+      if (studentUpsertError || !newId) {
+        throw new Error(
+          `Failed to upsert student "${name}" in group: ${studentUpsertError?.message ?? 'unknown'}`
+        );
+      }
+      studentId = newId;
+      studentCache.set(name, newId);
+    }
+    if (!studentId) throw new Error(`Missing student id for "${name}" after upsert`);
+    if (!enrolledStudentIds.has(studentId)) {
+      await onProgress?.({
+        type: 'db',
+        message: `${sheetLabel} course_students — enroll "${name}"`,
+      });
+      const { error: enrollError } = await supabase
+        .from('course_students')
+        .upsert({ course_id: courseId, student_id: studentId }, { onConflict: 'course_id,student_id' });
+      if (enrollError) throw new Error(`Failed to enroll student "${name}" in course: ${enrollError.message}`);
+      enrolledStudentIds.add(studentId);
+    }
+  }
+
+  const studentMap: Record<string, string> = {};
+  for (const name of uniqueStudentNames) {
+    const sid = studentCache.get(name);
+    if (sid) studentMap[name] = sid;
+  }
+
+  const teachersForCourse = new Set<string>();
+  const sessions: SheetParsedSession[] = [];
+  let skippedSessionRows = 0;
+  let userSkippedSessionRows = 0;
+  let autoSkippedFutureRows = 0;
+  const autoSkippedInvalidDateRows = 0;
+  const hasDatumColumn = Boolean(scannedSheet.headers.datum);
+  for (let rowIndex = 0; rowIndex < scannedSheet.sampleRows.length; rowIndex++) {
+    const row = scannedSheet.sampleRows[rowIndex];
+    if (!row) continue;
+    if (skippedPreviewRows.has(rowIndex)) {
+      skippedSessionRows += 1;
+      userSkippedSessionRows += 1;
+      continue;
+    }
+    const parsedDate = parseSheetDate(String(row.values['Datum'] ?? ''));
+    const dateSkipReason = classifySessionDateSkip(parsedDate, hasDatumColumn, new Date());
+    if (dateSkipReason === 'future') {
+      skippedSessionRows += 1;
+      autoSkippedFutureRows += 1;
+      continue;
+    }
+    const teacherParts = parseTeacherNames(String(row.values['Lehrer'] ?? ''));
+    teacherParts.forEach((n) => teachersForCourse.add(n));
+    const canonicalLessonLabels: string[] = [];
+    for (const part of teacherParts) {
+      const nk = normalizePersonNameKey(part);
+      const tid = nk ? teacherCache.get(nk) : undefined;
+      const label = tid ? canonicalTeacherNameById.get(tid) ?? part : part;
+      canonicalLessonLabels.push(label);
+    }
+    const teacherCell = canonicalLessonLabels.length > 0 ? [...new Set(canonicalLessonLabels)].join(', ') : null;
+    sessions.push({
+      gridRowIndex: rowIndex,
+      folien: String(row.values['Folien'] ?? ''),
+      parsedDate,
+      startTime: normalizeTimeForDb(String(row.values['von'] ?? '')),
+      endTime: normalizeTimeForDb(String(row.values['bis'] ?? '')),
+      teacherCell,
+    });
+  }
+
+  await onProgress?.({
+    type: 'db',
+    message: `${sheetLabel} lessons — load ${sessions.length} reviewed session(s), merge with DB`,
+  });
+  const { data: dbLessonRows, error: lesErr } = await supabase
+    .from('lessons')
+    .select('id, slide_id, date, start_time, end_time, teacher')
+    .eq('course_id', courseId);
+  if (lesErr) throw new Error(lesErr.message);
+  const dbLessons = [...(dbLessonRows ?? [])] as {
+    id: string;
+    slide_id: string | null;
+    date: string | null;
+    start_time: string | null;
+    end_time: string | null;
+    teacher: string | null;
+  }[];
+  sortDbLessonsForSync(dbLessons);
+
+  if (dbLessons.length > sessions.length) {
+    const dropIds = dbLessons.slice(sessions.length).map((l) => l.id);
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} lessons — delete ${dropIds.length} row(s) past reviewed end`,
+    });
+    const { error: delLessErr } = await supabase.from('lessons').delete().in('id', dropIds);
+    if (delLessErr) throw new Error(delLessErr.message);
+    dbLessons.length = sessions.length;
+  }
+
+  for (let sIdx = 0; sIdx < sessions.length; sIdx++) {
+    const sess = sessions[sIdx];
+    const row = scannedSheet.sampleRows[sess.gridRowIndex];
+    if (!row) throw new Error(`${sheetLabel} lessons — internal row lookup failed for session index ${sIdx + 1}`);
+    const lessonHint = sess.parsedDate
+      ? `date ${sess.parsedDate}`
+      : sess.folien
+        ? `slide ${sess.folien.slice(0, 40)}`
+        : `row #${sIdx + 1}`;
+    const attendanceDesired: { student_id: string; status: 'Present' | 'Absent'; feedback: string }[] = [];
+    for (const name of uniqueStudentNames) {
+      if (skippedAttendanceCells.has(`${sess.gridRowIndex}:${name}`)) continue;
+      const sid = studentMap[name];
+      if (!sid) continue;
+      const status = sheetStudentStatusForCompare(row, name);
+      if (status === null) continue;
+      attendanceDesired.push({
+        student_id: sid,
+        status,
+        feedback: String(row.values[name] ?? '').trim(),
+      });
+    }
+
+    if (sIdx < dbLessons.length) {
+      const L = dbLessons[sIdx];
+      if (!storedLessonMatchesSheetSession(L, sess)) {
+        await onProgress?.({
+          type: 'db',
+          message: `${sheetLabel} lessons — update (${lessonHint})`,
+        });
+        const { error: upLesErr } = await supabase
+          .from('lessons')
+          .update({
+            slide_id: sess.folien ? String(sess.folien) : null,
+            date: sess.parsedDate,
+            start_time: sess.startTime,
+            end_time: sess.endTime,
+            teacher: sess.teacherCell,
+          })
+          .eq('id', L.id);
+        if (upLesErr) throw new Error(upLesErr.message);
+      }
+      await syncLessonAttendanceIncremental(supabase, L.id, attendanceDesired, sheetLabel, lessonHint, onProgress);
+    } else {
+      await onProgress?.({
+        type: 'db',
+        message: `${sheetLabel} lessons — insert (${lessonHint})`,
+      });
+      const { data: lesson, error: lessonError } = await supabase
+        .from('lessons')
+        .insert({
+          course_id: courseId,
+          slide_id: sess.folien ? String(sess.folien) : null,
+          date: sess.parsedDate,
+          start_time: sess.startTime,
+          end_time: sess.endTime,
+          teacher: sess.teacherCell,
+        })
+        .select('id')
+        .single();
+      if (lessonError || !lesson) {
+        throw new Error(
+          `${sheetLabel} lessons — insert failed (${lessonHint}): ${lessonError?.message ?? 'unknown error'}`
+        );
+      }
+      await syncLessonAttendanceIncremental(
+        supabase,
+        lesson.id,
+        attendanceDesired,
+        sheetLabel,
+        lessonHint,
+        onProgress
+      );
+    }
+  }
+
+  await syncCourseTeachers(
+    supabase,
+    courseId,
+    teachersForCourse,
+    teacherCache,
+    canonicalTeacherNameById,
+    sheetLabel,
+    onProgress
+  );
+
+  const courseSyncCompleted = isCourseSyncCompleted(autoSkippedFutureRows, autoSkippedInvalidDateRows);
+  await onProgress?.({
+    type: 'db',
+    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
+  });
+  const { error: courseSyncFlagErr } = await supabase
+    .from('courses')
+    .update({ sync_completed: courseSyncCompleted })
+    .eq('id', courseId);
+  if (courseSyncFlagErr && !isSupabaseMissingColumnError(courseSyncFlagErr.message, 'sync_completed')) {
+    throw new Error(courseSyncFlagErr.message);
+  }
+  const { data: verifyRow, error: verifyErr } = await supabase
+    .from('courses')
+    .select('id, sync_completed')
+    .eq('id', courseId)
+    .maybeSingle();
+  if (verifyErr && !isSupabaseMissingColumnError(verifyErr.message, 'sync_completed')) {
+    throw new Error(verifyErr.message);
+  }
+  if (verifyRow && Boolean(verifyRow.sync_completed) !== courseSyncCompleted) {
+    throw new Error(
+      `${sheetLabel} courses — sync_completed verification mismatch for ${courseId}: expected ${courseSyncCompleted}, got ${Boolean(verifyRow.sync_completed)}`
+    );
+  }
+
+  return {
+    ok: true,
+    courseId,
+    syncCompleted: courseSyncCompleted,
+  };
+}
+
+export async function runReviewedSnapshotSync(
+  snapshot: ReviewedImportSnapshot,
+  options?: {
+    onProgress?: (event: SyncProgressEvent) => void | Promise<void>;
+    skippedRowsBySheet?: SkippedRowsBySheet;
+    skippedAttendanceCellsBySheet?: SkippedAttendanceCellsBySheet;
+    teacherAliasResolutions?: TeacherAliasResolution[];
+    workbookClassType?: unknown;
+  }
+): Promise<SyncGoogleSheetResult> {
+  const onProgress = options?.onProgress;
+  const skippedRowsBySheet = options?.skippedRowsBySheet ?? {};
+  const skippedAttendanceCellsBySheet = options?.skippedAttendanceCellsBySheet ?? {};
+  const teacherAliasResolutions = options?.teacherAliasResolutions;
+  const supabase = getSupabaseAdmin();
+  try {
+    const workbookTitle = snapshot.workbookTitle;
+    const groupLookupId = snapshot.groupSpreadsheetId ?? snapshot.sourceKey;
+    let classType =
+      parseWorkbookClassTypeInput(options?.workbookClassType) ??
+      snapshot.workbookClassType ??
+      detectClassType(workbookTitle);
+    if (classType === null) {
+      const { data: existingGroupForClass, error: groupClassErr } = await supabase
+        .from('groups')
+        .select('class_type')
+        .eq('spreadsheet_id', groupLookupId)
+        .maybeSingle();
+      if (groupClassErr) throw new Error(groupClassErr.message);
+      classType = parseWorkbookClassTypeInput(existingGroupForClass?.class_type);
+    }
+    if (classType === null) {
+      return {
+        success: false,
+        error:
+          'Class type is required: pick Online_DE, Online_VN, Offline, M, A, or P in Review Import, or add a token to the workbook title.',
+      };
+    }
+
+    await onProgress?.({ type: 'db', message: 'teachers — load cache + aliases' });
+    const { teacherCache, validTeacherIds, canonicalTeacherNameById } = await loadTeacherResolutionData(supabase);
+    await applyTeacherAliasResolutions(
+      supabase,
+      teacherCache,
+      teacherAliasResolutions,
+      validTeacherIds,
+      onProgress
+    );
+
+    await onProgress?.({ type: 'db', message: 'groups — select by spreadsheet_id' });
+    const { data: existingGroup, error: groupSelectError } = await supabase
+      .from('groups')
+      .select('id, name, class_type, spreadsheet_url')
+      .eq('spreadsheet_id', groupLookupId)
+      .maybeSingle();
+    if (groupSelectError) throw new Error(groupSelectError.message);
+
+    let group: {
+      id: string;
+      name?: string | null;
+      class_type?: string | null;
+      spreadsheet_url?: string | null;
+    } | null = existingGroup;
+
+    if (!group) {
+      await onProgress?.({ type: 'db', message: 'groups — insert' });
+      const baseGroup = {
+        name: workbookTitle,
+        spreadsheet_id: groupLookupId,
+        class_type: classType,
+      };
+      let inserted: { id: string } | null = null;
+      let insertErr: { message: string } | null = null;
+      ({ data: inserted, error: insertErr } = await supabase
+        .from('groups')
+        .insert({ ...baseGroup, spreadsheet_url: snapshot.spreadsheetUrl })
+        .select('id')
+        .single());
+      if (insertErr && isSupabaseMissingColumnError(insertErr.message, 'spreadsheet_url')) {
+        ({ data: inserted, error: insertErr } = await supabase.from('groups').insert(baseGroup).select('id').single());
+      }
+      if (insertErr || !inserted) throw new Error(`Failed to create group: ${insertErr?.message ?? 'unknown'}`);
+      group = inserted;
+    } else {
+      const prevName = (existingGroup?.name ?? '').trim();
+      const prevClass = existingGroup?.class_type ?? null;
+      const prevUrl = (existingGroup?.spreadsheet_url ?? '').trim();
+      const nextUrl = (snapshot.spreadsheetUrl ?? '').trim();
+      const groupNeedsUpdate =
+        prevName !== workbookTitle.trim() ||
+        prevClass !== classType ||
+        (snapshot.spreadsheetUrl != null && prevUrl !== nextUrl);
+      if (groupNeedsUpdate) {
+        await onProgress?.({ type: 'db', message: 'groups — update changed fields' });
+        if (snapshot.spreadsheetUrl) {
+          const { error: upErr } = await supabase
+            .from('groups')
+            .update({
+              name: workbookTitle,
+              class_type: classType,
+              spreadsheet_url: snapshot.spreadsheetUrl,
+            })
+            .eq('id', group.id);
+          if (upErr && isSupabaseMissingColumnError(upErr.message, 'spreadsheet_url')) {
+            const { error: up2 } = await supabase
+              .from('groups')
+              .update({ name: workbookTitle, class_type: classType })
+              .eq('id', group.id);
+            if (up2) throw new Error(up2.message);
+          } else if (upErr) {
+            throw new Error(upErr.message);
+          }
+        } else {
+          const { error: upErr } = await supabase
+            .from('groups')
+            .update({ name: workbookTitle, class_type: classType })
+            .eq('id', group.id);
+          if (upErr) throw new Error(upErr.message);
+        }
+      }
+    }
+
+    if (!group) throw new Error('Internal error: group not resolved after insert/select');
+
+    await onProgress?.({ type: 'db', message: 'students — select by group_id (cache)' });
+    const { data: groupStudents } = await supabase.from('students').select('id, name').eq('group_id', group.id);
+    const studentCache = new Map<string, string>();
+    for (const s of groupStudents ?? []) studentCache.set(String(s.name).trim(), s.id);
+
+    const sheets = [...snapshot.sheets].sort((a, b) => a.visibleOrderIndex - b.visibleOrderIndex);
+    const total = sheets.length;
+    await onProgress?.({
+      type: 'status',
+      message: `Syncing ${total} reviewed tab${total === 1 ? '' : 's'}…`,
+    });
+
+    let synced = 0;
+    let skipped = 0;
+    let skippedAfterCurrentCourse = 0;
+    const importedCourseIds: string[] = [];
+    for (let i = 0; i < sheets.length; i++) {
+      const sheet = sheets[i];
+      await onProgress?.({
+        type: 'sheet',
+        title: sheet.title,
+        current: i + 1,
+        total,
+      });
+      const cutoff = snapshot.currentCourseVisibleIndex;
+      if (cutoff !== null && sheet.visibleOrderIndex > cutoff) {
+        skipped++;
+        skippedAfterCurrentCourse++;
+        continue;
+      }
+      const result = await syncOneScannedCourseSheet(
+        supabase,
+        group.id,
+        sheet,
+        teacherCache,
+        canonicalTeacherNameById,
+        studentCache,
+        new Set(skippedRowsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []),
+        new Set(skippedAttendanceCellsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []),
+        onProgress
+      );
+      if (result.ok) {
+        synced++;
+        if (result.courseId) importedCourseIds.push(result.courseId);
+      } else {
+        skipped++;
+      }
+    }
+
+    let allImportedCoursesCompleted = importedCourseIds.length > 0;
+    if (importedCourseIds.length > 0) {
+      const { data: completionRows, error: completionErr } = await supabase
+        .from('courses')
+        .select('id, sync_completed')
+        .in('id', importedCourseIds);
+      if (completionErr && !isSupabaseMissingColumnError(completionErr.message, 'sync_completed')) {
+        throw new Error(completionErr.message);
+      }
+      if (completionRows) {
+        allImportedCoursesCompleted = completionRows.every((r) => Boolean(r.sync_completed));
+      }
+    }
+
+    const groupSyncCompleted = isGroupSyncCompleted(skippedAfterCurrentCourse, allImportedCoursesCompleted);
+    await onProgress?.({
+      type: 'db',
+      message: `groups — sync_completed=${groupSyncCompleted}`,
+    });
+    const { error: groupSyncFlagErr } = await supabase
+      .from('groups')
+      .update({ sync_completed: groupSyncCompleted })
+      .eq('id', group.id);
+    if (groupSyncFlagErr && !isSupabaseMissingColumnError(groupSyncFlagErr.message, 'sync_completed')) {
+      throw new Error(groupSyncFlagErr.message);
+    }
+
+    const skipHint =
+      skippedAfterCurrentCourse > 0
+        ? ` (${skippedAfterCurrentCourse} after the current course, not imported)`
+        : '';
+    const message = `Sync completed: group "${workbookTitle}", ${synced} reviewed course tab(s) imported, ${skipped} skipped${skipHint}.`;
+    await onProgress?.({ type: 'status', message: 'Finishing…' });
+    return { success: true, message };
+  } catch (error: unknown) {
+    console.error('Reviewed snapshot sync error:', error);
     const errMsg = error instanceof Error ? error.message : 'Unknown error';
     return { success: false, error: errMsg };
   }

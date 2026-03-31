@@ -198,7 +198,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     teacherAliasResolutions: TeacherAliasResolution[],
     workbookClassType?: WorkbookClassType
   ) => {
-    if (!url && !file) return;
+    if (!scanResult) return;
     setIsImporting(true);
     setError('');
     setImportDbLog([]);
@@ -206,32 +206,21 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     let finalResult: SyncResult | null = null;
 
     try {
-      const req =
-        file != null
-          ? (() => {
-              const formData = new FormData();
-              formData.set('file', file);
-              formData.set('skippedRowsBySheet', JSON.stringify(skippedRowsBySheet));
-              formData.set('skippedAttendanceCellsBySheet', JSON.stringify(skippedAttendanceCellsBySheet));
-              if (teacherAliasResolutions.length > 0) {
-                formData.set('teacherAliasResolutions', JSON.stringify(teacherAliasResolutions));
-              }
-              if (workbookClassType != null) {
-                formData.set('workbookClassType', workbookClassType);
-              }
-              return { method: 'POST', body: formData } as const;
-            })()
-          : {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                url,
-                skippedRowsBySheet,
-                skippedAttendanceCellsBySheet,
-                teacherAliasResolutions,
-                ...(workbookClassType != null ? { workbookClassType } : {}),
-              }),
-            };
+      const reviewSnapshot =
+        typeof structuredClone === 'function'
+          ? structuredClone(scanResult)
+          : JSON.parse(JSON.stringify(scanResult));
+      const req = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reviewSnapshot,
+          skippedRowsBySheet,
+          skippedAttendanceCellsBySheet,
+          teacherAliasResolutions,
+          ...(workbookClassType != null ? { workbookClassType } : {}),
+        }),
+      };
       const res = await fetch('/api/sync-sheet', req);
 
       if (!res.ok) {
