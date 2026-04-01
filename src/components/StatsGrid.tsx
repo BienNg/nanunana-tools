@@ -1,12 +1,10 @@
 import { useEffect, useState } from 'react';
-import { localDateISO } from '@/lib/localDate';
 import { supabase } from '@/lib/supabase/client';
 
 export default function StatsGrid() {
   const [stats, setStats] = useState({
     totalStudents: 0,
     attendanceRate: 0,
-    upcomingClasses: 0,
     activeCourses: 0,
   });
 
@@ -27,19 +25,15 @@ export default function StatsGrid() {
         attendanceRate = Math.round((presentCount / attendance.length) * 1000) / 10;
       }
 
-      const { data: pendingLessons } = await supabase
-        .from('lessons')
-        .select('course_id')
-        .gte('date', localDateISO());
-      const pending = pendingLessons ?? [];
-      const upcomingClasses = pending.length;
-      const activeCourses = new Set(pending.map((l) => l.course_id).filter(Boolean)).size;
+      const { count: activeCourses } = await supabase
+        .from('courses')
+        .select('*', { count: 'exact', head: true })
+        .or('sync_completed.is.false,sync_completed.is.null');
 
       setStats({
         totalStudents: totalStudents || 0,
         attendanceRate,
-        upcomingClasses,
-        activeCourses,
+        activeCourses: activeCourses || 0,
       });
     }
 
@@ -59,7 +53,7 @@ export default function StatsGrid() {
   }, []);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6 mb-12 animate-fade-up">
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12 animate-fade-up">
       <div className="bg-surface-container-lowest p-6 rounded-[1rem] shadow-sm flex flex-col justify-between h-48 group hover:translate-y-[-4px] transition-transform">
         <div className="flex justify-between items-start">
           <span className="material-symbols-outlined text-primary bg-primary/10 p-2 rounded-lg">
@@ -88,18 +82,6 @@ export default function StatsGrid() {
         </div>
       </div>
 
-      <div className="bg-surface-container-lowest p-6 rounded-[1rem] shadow-sm flex flex-col justify-between h-48 group hover:translate-y-[-4px] transition-transform">
-        <div className="flex justify-between items-start">
-          <span className="material-symbols-outlined text-orange-500 bg-orange-500/10 p-2 rounded-lg">
-            event_upcoming
-          </span>
-        </div>
-        <div>
-          <div className="text-4xl font-black text-on-surface font-headline">{stats.upcomingClasses}</div>
-          <div className="text-sm font-medium text-on-surface-variant">Upcoming Classes</div>
-        </div>
-      </div>
-
       <div className="bg-gradient-to-br from-primary to-primary-container p-6 rounded-[1rem] shadow-md flex flex-col justify-between h-48 text-white group hover:scale-[1.02] transition-transform">
         <div className="flex justify-between items-start">
           <span className="material-symbols-outlined text-white/50">pending_actions</span>
@@ -107,7 +89,7 @@ export default function StatsGrid() {
         <div>
           <div className="text-4xl font-black font-headline leading-none">{stats.activeCourses}</div>
           <div className="text-sm font-medium opacity-90 mt-2">Active courses</div>
-          <div className="text-xs opacity-70 mt-1">With a lesson today or later</div>
+          <div className="text-xs opacity-70 mt-1">Courses not marked as completed</div>
         </div>
       </div>
     </div>

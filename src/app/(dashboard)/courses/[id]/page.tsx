@@ -3,6 +3,7 @@ import Link from 'next/link';
 import {
   formatDurationHoursMinutes,
   normalizeGroupClassType,
+  normalizeGroupDefaultLessonMinutes,
   totalCourseDurationMinutes,
 } from '@/lib/courseDuration';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
@@ -43,8 +44,14 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
 
   const groupQuery =
     course.group_id != null
-      ? supabase.from('groups').select('name, class_type').eq('id', course.group_id).maybeSingle()
-      : Promise.resolve({ data: null as { name: string; class_type: string | null } | null });
+      ? supabase
+          .from('groups')
+          .select('name, class_type, default_lesson_minutes')
+          .eq('id', course.group_id)
+          .maybeSingle()
+      : Promise.resolve({
+          data: null as { name: string; class_type: string | null; default_lesson_minutes: number | null } | null,
+        });
 
   const [{ count: studentCount }, { data: lessons }, { data: groupRow }] = await Promise.all([
     supabase.from('course_students').select('*', { count: 'exact', head: true }).eq('course_id', id),
@@ -72,7 +79,8 @@ export default async function CourseDetailsPage({ params }: { params: Promise<{ 
       .filter((t): t is { id: string; name: string } => Boolean(t?.id && t?.name)) ?? [];
 
   const classType = normalizeGroupClassType(group?.class_type);
-  const totalDurationMinutes = totalCourseDurationMinutes(lessons ?? [], classType);
+  const defaultLessonMinutes = normalizeGroupDefaultLessonMinutes(group?.default_lesson_minutes);
+  const totalDurationMinutes = totalCourseDurationMinutes(lessons ?? [], classType, defaultLessonMinutes);
   const totalDurationStr = formatDurationHoursMinutes(totalDurationMinutes);
 
   let totalAttendance = 0;

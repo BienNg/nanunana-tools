@@ -1,6 +1,10 @@
 import Link from 'next/link';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
-import { lessonDurationMinutes, normalizeGroupClassType } from '@/lib/courseDuration';
+import {
+  lessonDurationMinutes,
+  normalizeGroupClassType,
+  normalizeGroupDefaultLessonMinutes,
+} from '@/lib/courseDuration';
 import type { TeacherStatus } from '@/app/actions/updateTeacherStatus';
 import TeacherMonthDropdown from './TeacherMonthDropdown';
 import TeacherSettingsDropdown from './TeacherSettingsDropdown';
@@ -24,6 +28,19 @@ function extractClassType(value: unknown): string | null {
   if (typeof value === 'object') {
     const maybeObj = value as { class_type?: unknown };
     return typeof maybeObj.class_type === 'string' ? maybeObj.class_type : null;
+  }
+  return null;
+}
+
+function extractDefaultLessonMinutes(value: unknown): number | null {
+  if (!value) return null;
+  if (Array.isArray(value)) {
+    const first = value[0] as { default_lesson_minutes?: unknown } | undefined;
+    return normalizeGroupDefaultLessonMinutes(first?.default_lesson_minutes);
+  }
+  if (typeof value === 'object') {
+    const maybeObj = value as { default_lesson_minutes?: unknown };
+    return normalizeGroupDefaultLessonMinutes(maybeObj.default_lesson_minutes);
   }
   return null;
 }
@@ -100,7 +117,7 @@ export default async function TeacherDetailsPage({
       courses (
         id,
         name,
-        groups ( id, name, class_type )
+        groups ( id, name, class_type, default_lesson_minutes )
       )
     `)
     .eq('teacher_id', id);
@@ -216,9 +233,11 @@ export default async function TeacherDetailsPage({
   // Metrics Calculation
   const coursesTaught = new Set(allLessons.map((l: { course_id: string }) => l.course_id)).size;
   const classTypeByCourseId = new Map<string, ReturnType<typeof normalizeGroupClassType>>();
+  const defaultLessonMinutesByCourseId = new Map<string, number | null>();
   courses.forEach((course: any) => {
     const rawClassType = extractClassType(course?.groups);
     classTypeByCourseId.set(course.id, normalizeGroupClassType(rawClassType));
+    defaultLessonMinutesByCourseId.set(course.id, extractDefaultLessonMinutes(course?.groups));
   });
 
   const lessonsByCourseId: Record<string, any[]> = {};
@@ -239,7 +258,8 @@ export default async function TeacherDetailsPage({
     courseLessons.forEach((lesson, index) => {
       const lessonLevelClassType = normalizeGroupClassType(extractClassType(lesson.courses?.groups));
       const classType = lessonLevelClassType ?? classTypeByCourseId.get(lesson.course_id) ?? null;
-      const duration = lessonDurationMinutes(lesson, index, classType);
+      const defaultLessonMinutes = defaultLessonMinutesByCourseId.get(lesson.course_id) ?? null;
+      const duration = lessonDurationMinutes(lesson, index, classType, defaultLessonMinutes);
       lesson.calculatedDurationMinutes = duration;
     });
   });

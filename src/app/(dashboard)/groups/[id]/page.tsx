@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import Link from 'next/link';
 import { SyncCompletionPill } from '@/components/SyncCompletionPill';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import GroupCourseTypeEditor from './GroupCourseTypeEditor';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,7 +14,7 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
   // Fetch group details
   const { data: group } = await supabase
     .from('groups')
-    .select('id, name, sync_completed')
+    .select('id, name, sync_completed, class_type, default_lesson_minutes')
     .eq('id', id)
     .single();
 
@@ -74,6 +75,11 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
             <span className="material-symbols-outlined text-primary">book</span>
             Courses in {group.name}
           </h3>
+          <GroupCourseTypeEditor
+            groupId={group.id}
+            currentClassType={group.class_type ?? null}
+            currentDefaultLessonMinutes={group.default_lesson_minutes ?? null}
+          />
         </div>
         <div className="divide-y divide-outline-variant/10">
           {courses?.map((course) => {
@@ -99,6 +105,9 @@ export default async function GroupDetailsPage({ params }: { params: Promise<{ i
                       >
                         {course.name}
                       </Link>
+                      <span className="inline-flex items-center rounded-full bg-primary/10 text-primary px-2 py-0.5 text-xs font-semibold">
+                        {group.class_type ?? 'Not set'}
+                      </span>
                       <SyncCompletionPill completed={course.sync_completed ?? false} />
                     </div>
                     <p className="text-sm text-on-surface-variant flex flex-wrap items-center gap-x-1 gap-y-0.5 font-medium">

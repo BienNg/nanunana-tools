@@ -2,7 +2,6 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { localDateISO } from '@/lib/localDate';
 import { supabase } from '@/lib/supabase/client';
 import { SyncCompletionPill } from '@/components/SyncCompletionPill';
 
@@ -30,27 +29,6 @@ export default function ActiveCoursesPanel() {
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
-    const today = localDateISO();
-    const { data: pendingLessons, error: lessonsErr } = await supabase
-      .from('lessons')
-      .select('course_id')
-      .gte('date', today);
-
-    if (lessonsErr) {
-      console.error('Active courses — lessons', lessonsErr.message ?? lessonsErr);
-      setCourses([]);
-      setLoading(false);
-      return;
-    }
-
-    const ids = [...new Set((pendingLessons ?? []).map((l) => l.course_id).filter(Boolean))];
-
-    if (ids.length === 0) {
-      setCourses([]);
-      setLoading(false);
-      return;
-    }
-
     const { data: rows, error: coursesErr } = await supabase
       .from('courses')
       .select(
@@ -65,7 +43,7 @@ export default function ActiveCoursesPanel() {
         )
       `
       )
-      .in('id', ids);
+      .or('sync_completed.is.false,sync_completed.is.null');
 
     if (coursesErr) {
       console.error('Active courses — courses', coursesErr);
@@ -119,7 +97,7 @@ export default function ActiveCoursesPanel() {
             Active courses
           </h3>
           <p className="text-sm text-on-surface-variant mt-0.5">
-            Courses with at least one lesson scheduled today or later (local date).
+            Courses not marked as completed.
           </p>
         </div>
         {!loading ? (
@@ -137,7 +115,7 @@ export default function ActiveCoursesPanel() {
             <span className="material-symbols-outlined text-4xl text-outline mb-3">check_circle</span>
             <p className="text-on-surface-variant font-medium">No active courses.</p>
             <p className="text-sm text-outline mt-1">
-              No lessons dated today or later, or no dated lessons in the database yet.
+              All courses are marked as completed.
             </p>
           </div>
         ) : (
