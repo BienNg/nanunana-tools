@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, ReactNode } from 'react';
 import gsap from 'gsap';
 import ActiveCoursesPanel from './ActiveCoursesPanel';
 import SyncForm from './SyncForm';
 import StatsGrid from './StatsGrid';
 
-export default function DashboardContent() {
+export default function DashboardContent({ hoursTaughtChart }: { hoursTaughtChart?: ReactNode }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -45,6 +45,12 @@ export default function DashboardContent() {
 
       {/* Bento Stats Grid */}
       <StatsGrid />
+
+      {hoursTaughtChart && (
+        <div className="mt-8">
+          {hoursTaughtChart}
+        </div>
+      )}
 
       <div className="mt-8">
         <ActiveCoursesPanel />
