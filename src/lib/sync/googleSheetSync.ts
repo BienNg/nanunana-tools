@@ -1113,44 +1113,54 @@ async function syncOneCourseSheet(
   if (enrollSelErr) throw new Error(enrollSelErr.message);
   const enrolledStudentIds = new Set((existingEnrollRows ?? []).map((r) => r.student_id as string));
 
+  const missingStudentNames = [...new Set(uniqueStudentCols.map((c) => c.name).filter((name) => !studentCache.has(name)))];
+  if (missingStudentNames.length > 0) {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} students — upsert ${missingStudentNames.length} row(s)`,
+    });
+    const { error: studentUpsertError } = await supabase
+      .from('students')
+      .upsert(
+        missingStudentNames.map((name) => ({ group_id: groupId, name })),
+        { onConflict: 'group_id,name' }
+      );
+    if (studentUpsertError) {
+      throw new Error(`Failed to upsert students in group: ${studentUpsertError.message}`);
+    }
+    const { data: upsertedRows, error: upsertedSelErr } = await supabase
+      .from('students')
+      .select('id, name')
+      .eq('group_id', groupId)
+      .in('name', missingStudentNames);
+    if (upsertedSelErr) throw new Error(`Failed to load upserted student ids: ${upsertedSelErr.message}`);
+    for (const s of upsertedRows ?? []) {
+      const name = String(s.name ?? '').trim();
+      const id = String(s.id ?? '').trim();
+      if (name && id) studentCache.set(name, id);
+    }
+  }
+
+  const enrollRows: { course_id: string; student_id: string }[] = [];
   for (const col of uniqueStudentCols) {
     const name = col.name;
-    let studentId = studentCache.get(name);
-    if (!studentId) {
-      await onProgress?.({
-        type: 'db',
-        message: `${sheetLabel} students — upsert "${name}"`,
-      });
-      const { data: row, error: studentUpsertError } = await supabase
-        .from('students')
-        .upsert({ group_id: groupId, name }, { onConflict: 'group_id,name' })
-        .select('id')
-        .single();
-      const newId = row?.id;
-      if (studentUpsertError || !newId) {
-        throw new Error(
-          `Failed to upsert student "${name}" in group: ${studentUpsertError?.message ?? 'unknown'}`
-        );
-      }
-      studentId = newId;
-      studentCache.set(name, newId);
-    }
-    if (!studentId) {
-      throw new Error(`Missing student id for "${name}" after upsert`);
-    }
-
+    const studentId = studentCache.get(name);
+    if (!studentId) throw new Error(`Missing student id for "${name}" after upsert`);
     if (!enrolledStudentIds.has(studentId)) {
-      await onProgress?.({
-        type: 'db',
-        message: `${sheetLabel} course_students — enroll "${name}"`,
-      });
-      const { error: enrollError } = await supabase
-        .from('course_students')
-        .upsert({ course_id: courseId, student_id: studentId }, { onConflict: 'course_id,student_id' });
-      if (enrollError) {
-        throw new Error(`Failed to enroll student "${name}" in course: ${enrollError.message}`);
-      }
+      enrollRows.push({ course_id: courseId, student_id: studentId });
       enrolledStudentIds.add(studentId);
+    }
+  }
+  if (enrollRows.length > 0) {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} course_students — enroll ${enrollRows.length} row(s)`,
+    });
+    const { error: enrollError } = await supabase
+      .from('course_students')
+      .upsert(enrollRows, { onConflict: 'course_id,student_id' });
+    if (enrollError) {
+      throw new Error(`Failed to enroll students in course: ${enrollError.message}`);
     }
   }
 
@@ -1240,7 +1250,6 @@ async function syncOneCourseSheet(
   for (const sess of sessionDrafts) {
     if (autoSkippedNoDateTeacherPreviewRows.has(sess.previewRowIndex)) {
       skippedSessionRows += 1;
-      autoSkippedFutureRows += 1;
       continue;
     }
     const dateSkipReason = classifySessionDateSkip(sess.parsedDate, colIndices.datum !== -1, new Date());
@@ -1690,7 +1699,7 @@ function analyzeScannedSheetSessionsForImport(sheet: ScannedSheet, now: Date): S
   for (let rIdx = 0; rIdx < sheet.sampleRows.length; rIdx++) {
     const row = sheet.sampleRows[rIdx];
     if (autoSkippedNoDateTeacherRows.has(rIdx)) {
-      autoSkippedFutureRows += 1;
+      // Trailing template rows are not lesson rows and should not block completion.
       continue;
     }
     const parsedDate = parseSheetDate(row.values['Datum'] ?? '');
@@ -2986,39 +2995,50 @@ async function syncOneScannedCourseSheet(
   if (enrollSelErr) throw new Error(enrollSelErr.message);
   const enrolledStudentIds = new Set((existingEnrollRows ?? []).map((r) => r.student_id as string));
 
-  for (const name of uniqueStudentNames) {
-    let studentId = studentCache.get(name);
-    if (!studentId) {
-      await onProgress?.({
-        type: 'db',
-        message: `${sheetLabel} students — upsert "${name}"`,
-      });
-      const { data: row, error: studentUpsertError } = await supabase
-        .from('students')
-        .upsert({ group_id: groupId, name }, { onConflict: 'group_id,name' })
-        .select('id')
-        .single();
-      const newId = row?.id;
-      if (studentUpsertError || !newId) {
-        throw new Error(
-          `Failed to upsert student "${name}" in group: ${studentUpsertError?.message ?? 'unknown'}`
-        );
-      }
-      studentId = newId;
-      studentCache.set(name, newId);
+  const missingStudentNames = uniqueStudentNames.filter((name) => !studentCache.has(name));
+  if (missingStudentNames.length > 0) {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} students — upsert ${missingStudentNames.length} row(s)`,
+    });
+    const { error: studentUpsertError } = await supabase
+      .from('students')
+      .upsert(
+        missingStudentNames.map((name) => ({ group_id: groupId, name })),
+        { onConflict: 'group_id,name' }
+      );
+    if (studentUpsertError) throw new Error(`Failed to upsert students in group: ${studentUpsertError.message}`);
+    const { data: upsertedRows, error: upsertedSelErr } = await supabase
+      .from('students')
+      .select('id, name')
+      .eq('group_id', groupId)
+      .in('name', missingStudentNames);
+    if (upsertedSelErr) throw new Error(`Failed to load upserted student ids: ${upsertedSelErr.message}`);
+    for (const s of upsertedRows ?? []) {
+      const name = String(s.name ?? '').trim();
+      const id = String(s.id ?? '').trim();
+      if (name && id) studentCache.set(name, id);
     }
+  }
+
+  const enrollRows: { course_id: string; student_id: string }[] = [];
+  for (const name of uniqueStudentNames) {
+    const studentId = studentCache.get(name);
     if (!studentId) throw new Error(`Missing student id for "${name}" after upsert`);
     if (!enrolledStudentIds.has(studentId)) {
-      await onProgress?.({
-        type: 'db',
-        message: `${sheetLabel} course_students — enroll "${name}"`,
-      });
-      const { error: enrollError } = await supabase
-        .from('course_students')
-        .upsert({ course_id: courseId, student_id: studentId }, { onConflict: 'course_id,student_id' });
-      if (enrollError) throw new Error(`Failed to enroll student "${name}" in course: ${enrollError.message}`);
+      enrollRows.push({ course_id: courseId, student_id: studentId });
       enrolledStudentIds.add(studentId);
     }
+  }
+  if (enrollRows.length > 0) {
+    await onProgress?.({
+      type: 'db',
+      message: `${sheetLabel} course_students — enroll ${enrollRows.length} row(s)`,
+    });
+    const { error: enrollError } = await supabase
+      .from('course_students')
+      .upsert(enrollRows, { onConflict: 'course_id,student_id' });
+    if (enrollError) throw new Error(`Failed to enroll students in course: ${enrollError.message}`);
   }
 
   const studentMap: Record<string, string> = {};
@@ -3080,7 +3100,6 @@ async function syncOneScannedCourseSheet(
   for (const sess of sessionDrafts) {
     if (autoSkippedNoDateTeacherPreviewRows.has(sess.previewRowIndex)) {
       skippedSessionRows += 1;
-      autoSkippedFutureRows += 1;
       continue;
     }
     const dateSkipReason = classifySessionDateSkip(sess.parsedDate, hasDatumColumn, new Date());

@@ -493,6 +493,17 @@ export default function ScanPreviewModal({
   }, [isOpen, scanResult, mounted, skippedRowsBySheet, skippedAttendanceCellsBySheet]);
 
   const currentCourseVisibleIndex = scanResult?.currentCourseVisibleIndex ?? null;
+  const importableSheets = useMemo(
+    () =>
+      (scanResult?.sheets ?? []).filter(
+        (sheet) => currentCourseVisibleIndex === null || sheet.visibleOrderIndex <= currentCourseVisibleIndex
+      ),
+    [scanResult?.sheets, currentCourseVisibleIndex]
+  );
+  const isUpdatingExistingGroupCourses = useMemo(
+    () => importableSheets.some((sheet) => Boolean(sheet.reimportDiff)),
+    [importableSheets]
+  );
 
   const hasImportBlockingSheetIssues = useMemo(() => {
     if (!isOpen || !scanResult || !mounted) return false;
@@ -640,9 +651,22 @@ export default function ScanPreviewModal({
       <div className="bg-white rounded-lg shadow-2xl w-[min(96vw,1920px)] max-h-[92vh] flex flex-col font-sans overflow-hidden">
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center gap-4 bg-gray-50">
-          <h2 id="scan-preview-title" className="text-xl font-semibold text-gray-800 min-w-0 truncate">
-            Review Import: {scanResult.workbookTitle}
-          </h2>
+          <div className="min-w-0">
+            <h2 id="scan-preview-title" className="text-xl font-semibold text-gray-800 min-w-0 truncate">
+              Review Import: {scanResult.workbookTitle}
+            </h2>
+            <div className="mt-1">
+              <span
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ${
+                  isUpdatingExistingGroupCourses
+                    ? 'bg-sky-100 text-sky-950 ring-sky-300/80'
+                    : 'bg-emerald-100 text-emerald-900 ring-emerald-300/80'
+                }`}
+              >
+                {isUpdatingExistingGroupCourses ? 'Updating existing group & courses' : 'New sheet'}
+              </span>
+            </div>
+          </div>
           <div className="flex shrink-0 items-center gap-2">
             {emptyCellCount > 0 && (
               <span
