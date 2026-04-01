@@ -5,7 +5,116 @@ import { useRouter } from 'next/navigation';
 import { attachGroupSpreadsheet } from '@/app/actions/attachGroupSpreadsheet';
 import { deleteGroupAndRelatedData } from '@/app/actions/deleteGroup';
 import { GoogleSheetsLogo } from '@/components/icons/GoogleSheetsLogo';
+import ScanPreviewModal from '@/components/ScanPreviewModal';
 import { SyncCompletionPill } from '@/components/SyncCompletionPill';
+import type {
+  ScanGoogleSheetResult,
+  SkippedAttendanceCellsBySheet,
+  SkippedRowsBySheet,
+  TeacherAliasResolution,
+  WorkbookClassType,
+} from '@/lib/sync/googleSheetSync';
+
+type SyncResult = { success: true; message: string } | { success: false; error: string };
+
+type NdjsonLine =
+  | { kind: 'progress-status'; message: string }
+  | { kind: 'progress-sheet'; title: string; current: number; total: number }
+  | { kind: 'progress-db'; message: string }
+  | { kind: 'done'; result: ScanGoogleSheetResult | SyncResult }
+  | null;
+
+function parseSyncNdjsonLine(line: string): NdjsonLine {
+  if (!line) return null;
+  let msg: {
+    event?: string;
+    type?: string;
+    message?: string;
+    title?: string;
+    current?: number;
+    total?: number;
+    result?: unknown;
+  };
+  try {
+    msg = JSON.parse(line) as typeof msg;
+  } catch {
+    return null;
+  }
+  if (msg.event === 'progress' && msg.type === 'status' && msg.message) {
+    return { kind: 'progress-status', message: msg.message };
+  }
+  if (
+    msg.event === 'progress' &&
+    msg.type === 'sheet' &&
+    msg.title != null &&
+    msg.current != null &&
+    msg.total != null
+  ) {
+    return { kind: 'progress-sheet', title: msg.title, current: msg.current, total: msg.total };
+  }
+  if (msg.event === 'progress' && msg.type === 'db' && msg.message) {
+    return { kind: 'progress-db', message: msg.message };
+  }
+  if (msg.event === 'done' && msg.result) {
+    return { kind: 'done', result: msg.result as ScanGoogleSheetResult | SyncResult };
+  }
+  return null;
+}
+
+async function streamSheetScan(url: string, onProgress: (message: string) => void): Promise<ScanGoogleSheetResult | null> {
+  onProgress('Scanning starting…');
+  const res = await fetch('/api/sync-sheet/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) {
+    let errText = res.statusText;
+    try {
+      const j = (await res.json()) as { error?: string };
+      if (j.error) errText = j.error;
+    } catch {
+      // ignore parse fallback
+    }
+    throw new Error(errText);
+  }
+  if (!res.body) throw new Error('No response from server');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalResult: ScanGoogleSheetResult | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    for (;;) {
+      const nl = buffer.indexOf('\n');
+      if (nl < 0) break;
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      const parsed = parseSyncNdjsonLine(line);
+      if (!parsed) continue;
+      if (parsed.kind === 'progress-status') onProgress(parsed.message);
+      if (parsed.kind === 'progress-sheet') onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+      if (parsed.kind === 'done') finalResult = parsed.result as ScanGoogleSheetResult;
+    }
+  }
+
+  buffer += decoder.decode();
+  const tail = buffer.trim();
+  if (tail) {
+    const parsed = parseSyncNdjsonLine(tail);
+    if (parsed) {
+      if (parsed.kind === 'progress-status') onProgress(parsed.message);
+      if (parsed.kind === 'progress-sheet') onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+      if (parsed.kind === 'done') finalResult = parsed.result as ScanGoogleSheetResult;
+    }
+  }
+
+  return finalResult;
+}
 
 export default function GroupCard({
   id,
@@ -26,6 +135,15 @@ export default function GroupCard({
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [sheetMismatches, setSheetMismatches] = useState<string[]>([]);
   const [sheetPending, startSheetTransition] = useTransition();
+  const [isScanning, setIsScanning] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const [progressMessage, setProgressMessage] = useState('');
+  const [scanResult, setScanResult] = useState<Extract<ScanGoogleSheetResult, { success: true }> | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [previewScanError, setPreviewScanError] = useState('');
+  const [importDbLog, setImportDbLog] = useState<string[]>([]);
+  const [importRequiresResync, setImportRequiresResync] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -47,6 +165,7 @@ export default function GroupCard({
   }, [open]);
 
   const openDetails = () => {
+    if (isModalOpen) return;
     router.push(`/groups/${id}`);
   };
 
@@ -65,11 +184,167 @@ export default function GroupCard({
     });
   };
 
+  const scanFromGroupUrl = async () => {
+    const url = spreadsheetUrl?.trim();
+    if (!url) {
+      setActionError('This group has no linked Google Sheet URL yet.');
+      return;
+    }
+    setActionError('');
+    setPreviewScanError('');
+    setOpen(false);
+    setIsScanning(true);
+    try {
+      const finalResult = await streamSheetScan(url, setProgressMessage);
+      if (finalResult?.success) {
+        setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
+        setImportRequiresResync(false);
+        setIsModalOpen(true);
+      } else if (finalResult) {
+        setActionError((finalResult as { success: false; error: string }).error || 'Failed to scan');
+      } else {
+        setActionError('Scan finished without a result');
+      }
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Failed to scan');
+    } finally {
+      setIsScanning(false);
+      setProgressMessage('');
+    }
+  };
+
+  const handleResync = async () => {
+    const url = spreadsheetUrl?.trim();
+    if (!url) return;
+    setIsScanning(true);
+    setPreviewScanError('');
+    setActionError('');
+    try {
+      const finalResult = await streamSheetScan(url, setProgressMessage);
+      if (finalResult?.success) {
+        setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
+        setImportRequiresResync(false);
+      } else if (finalResult) {
+        setPreviewScanError((finalResult as { success: false; error: string }).error || 'Failed to scan');
+      } else {
+        setPreviewScanError('Scan finished without a result');
+      }
+    } catch (err: unknown) {
+      setPreviewScanError(err instanceof Error ? err.message : 'Failed to scan');
+    } finally {
+      setIsScanning(false);
+      setProgressMessage('');
+    }
+  };
+
+  const handleImport = async (
+    skippedRowsBySheet: SkippedRowsBySheet,
+    skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
+    teacherAliasResolutions: TeacherAliasResolution[],
+    workbookClassType?: WorkbookClassType
+  ) => {
+    if (!scanResult) return;
+    setIsImporting(true);
+    setActionError('');
+    setImportDbLog([]);
+    setProgressMessage('Importing starting…');
+    let finalResult: SyncResult | null = null;
+
+    try {
+      const reviewSnapshot =
+        typeof structuredClone === 'function'
+          ? structuredClone(scanResult)
+          : JSON.parse(JSON.stringify(scanResult));
+      const res = await fetch('/api/sync-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reviewSnapshot,
+          skippedRowsBySheet,
+          skippedAttendanceCellsBySheet,
+          teacherAliasResolutions,
+          ...(workbookClassType != null ? { workbookClassType } : {}),
+        }),
+      });
+      if (!res.ok) {
+        let errText = res.statusText;
+        try {
+          const j = (await res.json()) as { error?: string };
+          if (j.error) errText = j.error;
+        } catch {
+          // ignore parse fallback
+        }
+        setActionError(errText);
+        return;
+      }
+      if (!res.body) {
+        setActionError('No response from server');
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        for (;;) {
+          const nl = buffer.indexOf('\n');
+          if (nl < 0) break;
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          const parsed = parseSyncNdjsonLine(line);
+          if (!parsed) continue;
+          if (parsed.kind === 'progress-status') setProgressMessage(parsed.message);
+          if (parsed.kind === 'progress-sheet') {
+            setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+          }
+          if (parsed.kind === 'progress-db') {
+            setImportDbLog((prev) => [...prev, parsed.message]);
+          }
+          if (parsed.kind === 'done') finalResult = parsed.result as SyncResult;
+        }
+      }
+
+      buffer += decoder.decode();
+      const tail = buffer.trim();
+      if (tail) {
+        const parsed = parseSyncNdjsonLine(tail);
+        if (parsed) {
+          if (parsed.kind === 'progress-status') setProgressMessage(parsed.message);
+          if (parsed.kind === 'progress-sheet') {
+            setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+          }
+          if (parsed.kind === 'progress-db') {
+            setImportDbLog((prev) => [...prev, parsed.message]);
+          }
+          if (parsed.kind === 'done') finalResult = parsed.result as SyncResult;
+        }
+      }
+
+      if (finalResult?.success) {
+        setImportRequiresResync(true);
+        router.refresh();
+      } else if (finalResult) {
+        setActionError(finalResult.error || 'Failed to sync');
+      } else {
+        setActionError('Sync finished without a result');
+      }
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Failed to sync');
+    } finally {
+      setIsImporting(false);
+      setProgressMessage('');
+    }
+  };
+
   return (
     <div
       className="bg-surface-container-lowest border border-outline-variant/10 rounded-2xl p-6 shadow-sm hover:shadow-md transition-all hover:-translate-y-1 hover:border-primary/30 h-full flex flex-col justify-between group cursor-pointer"
       onClick={openDetails}
       onKeyDown={(event) => {
+        if (isModalOpen) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           openDetails();
@@ -227,8 +502,20 @@ export default function GroupCard({
             >
               <button
                 type="button"
+                onClick={() => {
+                  void scanFromGroupUrl();
+                }}
+                disabled={pending || isScanning || isImporting || !spreadsheetUrl}
+                className="w-full rounded-lg px-3 py-2 text-left text-sm font-semibold text-on-surface hover:bg-surface-container-low disabled:opacity-50 inline-flex items-center gap-2"
+                role="menuitem"
+              >
+                <span className="material-symbols-outlined text-[16px]">sync</span>
+                {isScanning ? 'Scanning…' : 'Resync group'}
+              </button>
+              <button
+                type="button"
                 onClick={onDelete}
-                disabled={pending}
+                disabled={pending || isScanning || isImporting}
                 className="w-full rounded-lg px-3 py-2 text-left text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50 inline-flex items-center gap-2"
                 role="menuitem"
               >
@@ -240,12 +527,36 @@ export default function GroupCard({
         </div>
       </div>
 
+      {actionError ? (
+        <p className="mt-3 text-xs font-semibold text-error" onClick={(event) => event.stopPropagation()}>
+          {actionError}
+        </p>
+      ) : null}
+
       <p className="text-sm text-primary font-medium flex items-center gap-1 mt-4">
         View Details
         <span className="material-symbols-outlined text-sm group-hover:translate-x-1 transition-transform">
           arrow_forward
         </span>
       </p>
+
+      <ScanPreviewModal
+        isOpen={isModalOpen}
+        scanResult={scanResult}
+        onClose={() => {
+          setPreviewScanError('');
+          setIsModalOpen(false);
+        }}
+        onConfirm={handleImport}
+        isImporting={isImporting}
+        importProgressMessage={isImporting ? progressMessage : ''}
+        importDbLog={importDbLog}
+        onResync={handleResync}
+        isResyncing={isScanning}
+        resyncProgressMessage={progressMessage}
+        resyncError={previewScanError}
+        importRequiresResync={importRequiresResync}
+      />
     </div>
   );
 }
