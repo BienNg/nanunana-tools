@@ -25,7 +25,6 @@ import {
   findExistingCourseForScannedTab,
   loadLessonSnapshotsMapForCourses,
   normalizeTeacherCellForCompare,
-  sheetStudentStatusForCompare,
 } from '@/lib/sync/googleSheetReimportDiff';
 import type { AttendanceFromColor, SheetRow, SheetSyncSource } from '@/lib/sync/googleSheetWorkbookSource';
 import type { ExistingCourseRow } from '@/lib/sync/googleSheetReimportDiff';
@@ -149,9 +148,11 @@ function isCourseSyncCompleted(
   openSessionRows: number
 ): boolean {
   // Completion is based only on future session skips.
-  // User-selected rows and date-quality warnings do not affect sync_completed.
+  // If at least one future session row is auto-skipped, the course is not completed.
   void autoSkippedInvalidDateRows;
-  return autoSkippedFutureRows === 0 && eligibleSessionRows > 0 && openSessionRows === 0;
+  void eligibleSessionRows;
+  void openSessionRows;
+  return autoSkippedFutureRows === 0;
 }
 
 function isGroupSyncCompleted(
@@ -784,14 +785,7 @@ async function syncOneCourseSheet(
           .eq('id', L.id);
         if (upLesErr) throw new Error(upLesErr.message);
       }
-      await syncLessonAttendanceIncremental(
-        supabase,
-        L.id,
-        attendanceDesired,
-        sheetLabel,
-        lessonHint,
-        onProgress
-      );
+      // Keep existing attendance for already-stored sessions on re-import.
     } else {
       await onProgress?.({
         type: 'db',
@@ -892,7 +886,7 @@ export type { ScannedSampleRow };
 /** When the tab matches an existing course (name + sheet URL), preview only flags updates vs the database. */
 export type ScannedSheetReimportDiff = {
   courseId: string;
-  /** Sample row index → column keys that differ from the stored lesson (Folien, Datum, von, bis, Lehrer, or student name). */
+  /** Sample row index → structural lesson column keys that differ from the stored lesson (Folien, Datum, von, bis, Lehrer). */
   changedCellsByRow: Record<number, string[]>;
   /** Tooltip copy for each cell in `changedCellsByRow` (same keys). */
   changeHintsByRow: Record<number, Record<string, string>>;
@@ -1184,14 +1178,11 @@ export async function scanGoogleSheet(
         dbWorkbookClassType = parseWorkbookClassTypeInput(grp?.class_type);
       }
       if (!grpErr && grp?.id) {
-        const [cRes, sRes] = await Promise.all([
-          supabase.from('courses').select('id, name, sheet_url, sync_completed').eq('group_id', grp.id),
-          supabase.from('students').select('id, name').eq('group_id', grp.id),
-        ]);
-        const courses = (cRes.data ?? []) as ExistingCourseRow[];
-        const studentIdToName = new Map(
-          (sRes.data ?? []).map((s) => [s.id as string, String(s.name)])
-        );
+        const { data: courseRows } = await supabase
+          .from('courses')
+          .select('id, name, sheet_url, sync_completed')
+          .eq('group_id', grp.id);
+        const courses = (courseRows ?? []) as ExistingCourseRow[];
         const courseIdBySheet = new Map<string, string>();
         const matchedCourseIds = new Set<string>();
         for (const sh of scannedSheets) {
@@ -1205,7 +1196,6 @@ export async function scanGoogleSheet(
           const snapshotsMap = await loadLessonSnapshotsMapForCourses(
             supabase,
             [...matchedCourseIds],
-            studentIdToName,
             onProgress
           );
           const now = new Date();

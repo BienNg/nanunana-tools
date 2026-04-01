@@ -27,7 +27,6 @@ export type LessonCompareSnapshot = {
   start_time: string | null;
   end_time: string | null;
   teacher: string | null;
-  attendanceByStudentName: Map<string, { status: string; feedback: string }>;
 };
 
 function parseTeacherNames(raw: string | undefined | null): string[] {
@@ -196,24 +195,9 @@ function reimportHintTimeCompare(comparable: string | null): string {
   return comparable;
 }
 
-function dbAttendanceStatusToken(status: string): 'Present' | 'Absent' | null {
-  if (status === 'Present' || status === 'Absent') return status;
-  return null;
-}
-
-function reimportAttendanceLine(status: 'Present' | 'Absent' | null, feedback: string): string {
-  const parts: string[] = [];
-  if (status === 'Present' || status === 'Absent') parts.push(status);
-  else parts.push('no mark');
-  const fb = feedback.trim();
-  if (fb) parts.push(`note "${fb}"`);
-  return parts.join(', ');
-}
-
 function reimportRowExactlyMatchesLesson(
   row: ScannedSampleRow,
-  lesson: LessonCompareSnapshot,
-  studentNames: string[]
+  lesson: LessonCompareSnapshot
 ): boolean {
   if (normalizeFolienKey(row.values['Folien']) !== normalizeFolienKey(lesson.slide_id)) return false;
 
@@ -232,19 +216,6 @@ function reimportRowExactlyMatchesLesson(
   const tSheet = normalizeTeacherCellForCompare(row.values['Lehrer']);
   const tDb = normalizeTeacherCellForCompare(lesson.teacher);
   if (tSheet !== tDb) return false;
-
-  for (const name of studentNames) {
-    const stSheet = sheetStudentStatusForCompare(row, name);
-    const fbSheet = String(row.values[name] ?? '').trim();
-    const dbRec = lesson.attendanceByStudentName.get(name);
-    if (!dbRec) {
-      if (stSheet !== null || fbSheet !== '') return false;
-      continue;
-    }
-    const dbSt = dbAttendanceStatusToken(dbRec.status);
-    if (stSheet !== dbSt) return false;
-    if (fbSheet !== (dbRec.feedback ?? '').trim()) return false;
-  }
 
   return true;
 }
@@ -306,7 +277,6 @@ export function analyzeScannedSheetSessionsForImport(sheet: ScannedSheet, now: D
 export async function loadLessonSnapshotsMapForCourses(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   courseIds: string[],
-  studentIdToName: Map<string, string>,
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ): Promise<Map<string, LessonCompareSnapshot[]>> {
   const out = new Map<string, LessonCompareSnapshot[]>();
@@ -338,27 +308,6 @@ export async function loadLessonSnapshotsMapForCourses(
     return String(a.id).localeCompare(String(b.id));
   });
 
-  const lessonIds = lessons.map((l) => l.id as string);
-  const { data: records, error: attErr } = await supabase
-    .from('attendance_records')
-    .select('lesson_id, student_id, status, feedback')
-    .in('lesson_id', lessonIds);
-  if (attErr) throw new Error(attErr.message);
-
-  const attByLesson = new Map<string, Map<string, { status: string; feedback: string }>>();
-  for (const r of records ?? []) {
-    const lid = r.lesson_id as string;
-    const sid = r.student_id as string;
-    const name = studentIdToName.get(sid);
-    if (!name) continue;
-    let m = attByLesson.get(lid);
-    if (!m) {
-      m = new Map();
-      attByLesson.set(lid, m);
-    }
-    m.set(name, { status: String(r.status), feedback: String(r.feedback ?? '') });
-  }
-
   for (const L of lessons) {
     const cid = L.course_id as string;
     const arr = out.get(cid);
@@ -369,7 +318,6 @@ export async function loadLessonSnapshotsMapForCourses(
       start_time: L.start_time != null ? String(L.start_time) : null,
       end_time: L.end_time != null ? String(L.end_time) : null,
       teacher: L.teacher != null ? String(L.teacher) : null,
-      attendanceByStudentName: attByLesson.get(L.id as string) ?? new Map(),
     });
   }
   return out;
@@ -386,7 +334,6 @@ export function buildReimportDiffForSheet(
   const changedCellsByRow: Record<number, string[]> = {};
   const changeHintsByRow: Record<number, Record<string, string>> = {};
   const newSessionRowIndices: number[] = [];
-  const studentNames = sheet.headers.students.map((s) => s.name);
 
   const pairedDbIndexByRow = new Map<number, number>();
   const remainingDbIndices = new Set<number>(dbLessons.map((_, idx) => idx));
@@ -395,7 +342,7 @@ export function buildReimportDiffForSheet(
     let hit: number | null = null;
     for (const dbIdx of remainingDbIndices) {
       const lesson = dbLessons[dbIdx];
-      if (lesson && reimportRowExactlyMatchesLesson(row, lesson, studentNames)) {
+      if (lesson && reimportRowExactlyMatchesLesson(row, lesson)) {
         hit = dbIdx;
         break;
       }
@@ -488,34 +435,6 @@ export function buildReimportDiffForSheet(
         'Lehrer',
         `Teacher: was "${reimportHintDisplayCell(lesson.teacher)}" — sheet now "${reimportHintDisplayCell(row.values['Lehrer'])}".`
       );
-    }
-
-    for (const st of sheet.headers.students) {
-      const name = st.name;
-      const stSheet = sheetStudentStatusForCompare(row, name);
-      const fbSheet = String(row.values[name] ?? '').trim();
-      const dbRec = lesson.attendanceByStudentName.get(name);
-      if (!dbRec) {
-        if (stSheet !== null || fbSheet !== '') {
-          track(
-            name,
-            `${name}: no attendance was stored — sheet now ${reimportAttendanceLine(stSheet, fbSheet)}.`
-          );
-        }
-      } else {
-        const dbSt = dbAttendanceStatusToken(dbRec.status);
-        if (stSheet !== dbSt) {
-          track(
-            name,
-            `${name}: was ${reimportAttendanceLine(dbSt, dbRec.feedback)} — sheet now ${reimportAttendanceLine(stSheet, fbSheet)}.`
-          );
-        } else if (fbSheet !== (dbRec.feedback ?? '').trim()) {
-          track(
-            name,
-            `${name}: note was "${reimportHintDisplayCell(dbRec.feedback)}" — sheet now "${reimportHintDisplayCell(fbSheet)}".`
-          );
-        }
-      }
     }
 
     if (changed.length > 0) {

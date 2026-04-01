@@ -528,7 +528,7 @@ export async function syncOneScannedCourseSheet(
           .eq('id', L.id);
         if (upLesErr) throw new Error(upLesErr.message);
       }
-      await syncLessonAttendanceIncremental(supabase, L.id, attendanceDesired, sheetLabel, lessonHint, onProgress);
+      // Keep existing attendance for already-stored sessions on re-import.
     } else {
       await onProgress?.({
         type: 'db',
