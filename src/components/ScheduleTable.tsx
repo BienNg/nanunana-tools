@@ -1,7 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { Fragment, useEffect, useMemo, useState } from 'react';
+import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import { supabase } from '@/lib/supabase/client';
+import { parseTeacherNamesForLesson } from '@/lib/teacherLessonMatch';
 
 type AttendanceRecord = {
   id: string;
@@ -29,6 +32,55 @@ type Student = {
   name: string;
 };
 
+type TeacherRow = { id: string; name: string };
+type TeacherAliasRow = { teacher_id: string; normalized_key: string };
+
+function buildTeacherIdByNormalizedKey(teachers: TeacherRow[], aliases: TeacherAliasRow[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const t of teachers) {
+    const k = normalizePersonNameKey(t.name);
+    if (k && !m.has(k)) m.set(k, t.id);
+  }
+  for (const a of aliases) {
+    const k = String(a.normalized_key ?? '').trim();
+    if (k) m.set(k, a.teacher_id);
+  }
+  return m;
+}
+
+function LessonTeacherNames({
+  lessonId,
+  teacherRaw,
+  lookup,
+}: {
+  lessonId: string;
+  teacherRaw: string | null | undefined;
+  lookup: Map<string, string>;
+}) {
+  const raw = teacherRaw?.trim();
+  if (!raw) {
+    return <span>TBA</span>;
+  }
+  const segments = parseTeacherNamesForLesson(raw);
+  const parts = segments.length > 0 ? segments : [raw];
+  return parts.map((seg, i) => {
+    const nk = normalizePersonNameKey(seg);
+    const tid = nk ? lookup.get(nk) : undefined;
+    return (
+      <Fragment key={`${lessonId}-${i}-${seg}`}>
+        {i > 0 ? <span className="text-on-surface-variant font-normal">/</span> : null}
+        {tid ? (
+          <Link href={`/teachers/${tid}`} className="text-primary hover:underline underline-offset-2">
+            {seg}
+          </Link>
+        ) : (
+          <span>{seg}</span>
+        )}
+      </Fragment>
+    );
+  });
+}
+
 function lessonCourseLabel(lesson: Lesson): string {
   return [lesson.courses?.groups?.name, lesson.courses?.name].filter(Boolean).join(' · ');
 }
@@ -44,8 +96,15 @@ function compareLessonsByCourseColumn(a: Lesson, b: Lesson): number {
 export default function ScheduleTable({ courseId }: { courseId?: string } = {}) {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
+  const [teachersForMatch, setTeachersForMatch] = useState<TeacherRow[]>([]);
+  const [teacherAliasRows, setTeacherAliasRows] = useState<TeacherAliasRow[]>([]);
   const [openLessonActionId, setOpenLessonActionId] = useState<string | null>(null);
   const [deletingLessonId, setDeletingLessonId] = useState<string | null>(null);
+
+  const teacherIdByNormalizedKey = useMemo(
+    () => buildTeacherIdByNormalizedKey(teachersForMatch, teacherAliasRows),
+    [teachersForMatch, teacherAliasRows]
+  );
 
   const fetchData = async () => {
     let query = supabase
@@ -68,11 +127,15 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
       query = query.eq('course_id', courseId);
     }
 
-    const { data: lessonsData } = await query
-      .order('date', { ascending: true })
-      .order('start_time', { ascending: true });
+    const [{ data: lessonsData }, { data: teachersData }, { data: aliasesData }] = await Promise.all([
+      query.order('date', { ascending: true }).order('start_time', { ascending: true }),
+      supabase.from('teachers').select('id, name').order('name'),
+      supabase.from('teacher_aliases').select('teacher_id, normalized_key'),
+    ]);
 
     if (lessonsData) setLessons(lessonsData as Lesson[]);
+    if (teachersData) setTeachersForMatch(teachersData as TeacherRow[]);
+    if (aliasesData) setTeacherAliasRows(aliasesData as TeacherAliasRow[]);
 
     if (courseId) {
       const { data: enrollments } = await supabase
@@ -112,6 +175,8 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
         fetchData
       )
       .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, fetchData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'teachers' }, fetchData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'teacher_aliases' }, fetchData)
       .subscribe();
 
     return () => {
@@ -253,7 +318,13 @@ export default function ScheduleTable({ courseId }: { courseId?: string } = {}) 
                     <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center text-[10px] font-bold text-blue-700 shrink-0">
                       {lesson.teacher?.substring(0, 2).toUpperCase() || 'TBA'}
                     </div>
-                    <span className="text-sm font-semibold">{lesson.teacher || 'TBA'}</span>
+                    <div className="text-sm font-semibold flex flex-wrap items-center gap-x-1">
+                      <LessonTeacherNames
+                        lessonId={lesson.id}
+                        teacherRaw={lesson.teacher}
+                        lookup={teacherIdByNormalizedKey}
+                      />
+                    </div>
                   </div>
                 </td>
                 {students.map((student) => {
