@@ -1,13 +1,15 @@
 'use client';
 
-import { useEffect, useRef, ReactNode } from 'react';
+import { useEffect, useRef, ReactNode, useState } from 'react';
 import gsap from 'gsap';
 import ActiveCoursesPanel from './ActiveCoursesPanel';
 import SyncForm from './SyncForm';
 import StatsGrid from './StatsGrid';
+import BulkActiveCoursesSyncModal from './BulkActiveCoursesSyncModal';
 
 export default function DashboardContent({ hoursTaughtChart }: { hoursTaughtChart?: ReactNode }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
 
   useEffect(() => {
     const ctx = gsap.context(() => {
@@ -44,7 +46,7 @@ export default function DashboardContent({ hoursTaughtChart }: { hoursTaughtChar
       </div>
 
       {/* Bento Stats Grid */}
-      <StatsGrid />
+      <StatsGrid onUpdateAll={() => setIsBulkModalOpen(true)} />
 
       {hoursTaughtChart && (
         <div className="mt-8">
@@ -55,6 +57,13 @@ export default function DashboardContent({ hoursTaughtChart }: { hoursTaughtChar
       <div className="mt-8">
         <ActiveCoursesPanel />
       </div>
+      <BulkActiveCoursesSyncModal
+        isOpen={isBulkModalOpen}
+        onClose={() => setIsBulkModalOpen(false)}
+        onSyncComplete={() => {
+          console.log('Bulk sync complete, children will auto-update via Supabase Realtime');
+        }}
+      />
     </section>
   );
 }

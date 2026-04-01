@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 
-export default function StatsGrid() {
+export default function StatsGrid({ onUpdateAll }: { onUpdateAll?: () => void }) {
   const [stats, setStats] = useState({
     totalStudents: 0,
     attendanceRate: 0,
@@ -85,6 +85,14 @@ export default function StatsGrid() {
       <div className="bg-gradient-to-br from-primary to-primary-container p-6 rounded-[1rem] shadow-md flex flex-col justify-between h-48 text-white group hover:scale-[1.02] transition-transform">
         <div className="flex justify-between items-start">
           <span className="material-symbols-outlined text-white/50">pending_actions</span>
+          <button
+            type="button"
+            onClick={() => onUpdateAll?.()}
+            disabled={!onUpdateAll || stats.activeCourses === 0}
+            className="rounded-md border border-white/40 bg-white/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-white hover:bg-white/20 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Update all
+          </button>
         </div>
         <div>
           <div className="text-4xl font-black font-headline leading-none">{stats.activeCourses}</div>

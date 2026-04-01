@@ -4,6 +4,7 @@ import { isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet'
 import { datumChronoAppliesToRow, isDatumChronologyOutlier } from '@/lib/sync/sheetSessionDatumChronology';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { syncCourseTeachers } from '@/lib/sync/googleSheetTeacherSync';
+import { getStudentCacheKey } from '@/lib/sync/googleSheetStudentSync';
 import { isSupabaseMissingColumnError, upsertCourseInGroup } from '@/lib/sync/groupCourseUpsert';
 import type { ScannedSheet, SyncProgressEvent } from '@/lib/sync/googleSheetSync';
 
@@ -14,6 +15,15 @@ type SyncOneScannedCourseSheetResult = {
   reason?: string;
   courseId?: string;
   syncCompleted?: boolean;
+  applySummary?: {
+    sheetTitle: string;
+    courseId: string;
+    sessionsInserted: number;
+    sessionsUpdated: number;
+    sessionsDeleted: number;
+    skippedSessionRows: number;
+    syncCompleted: boolean;
+  };
 };
 
 type SessionDateSkipReason = 'future' | null;
@@ -280,7 +290,7 @@ export async function syncOneScannedCourseSheet(
   if (enrollSelErr) throw new Error(enrollSelErr.message);
   const enrolledStudentIds = new Set((existingEnrollRows ?? []).map((r) => r.student_id as string));
 
-  const missingStudentNames = uniqueStudentNames.filter((name) => !studentCache.has(name));
+  const missingStudentNames = uniqueStudentNames.filter((name) => !studentCache.has(getStudentCacheKey(name)));
   if (missingStudentNames.length > 0) {
     await onProgress?.({
       type: 'db',
@@ -302,13 +312,14 @@ export async function syncOneScannedCourseSheet(
     for (const s of upsertedRows ?? []) {
       const name = String(s.name ?? '').trim();
       const id = String(s.id ?? '').trim();
-      if (name && id) studentCache.set(name, id);
+      const nk = getStudentCacheKey(name);
+      if (nk && id) studentCache.set(nk, id);
     }
   }
 
   const enrollRows: { course_id: string; student_id: string }[] = [];
   for (const name of uniqueStudentNames) {
-    const studentId = studentCache.get(name);
+    const studentId = studentCache.get(getStudentCacheKey(name));
     if (!studentId) throw new Error(`Missing student id for "${name}" after upsert`);
     if (!enrolledStudentIds.has(studentId)) {
       enrollRows.push({ course_id: courseId, student_id: studentId });
@@ -328,7 +339,7 @@ export async function syncOneScannedCourseSheet(
 
   const studentMap: Record<string, string> = {};
   for (const name of uniqueStudentNames) {
-    const sid = studentCache.get(name);
+    const sid = studentCache.get(getStudentCacheKey(name));
     if (sid) studentMap[name] = sid;
   }
 
@@ -340,6 +351,9 @@ export async function syncOneScannedCourseSheet(
   let autoSkippedFutureRows = 0;
   let autoSkippedChronologyRows = 0;
   const autoSkippedInvalidDateRows = 0;
+  let sessionsInserted = 0;
+  let sessionsUpdated = 0;
+  let sessionsDeleted = 0;
   const hasDatumColumn = Boolean(scannedSheet.headers.datum);
   for (let rowIndex = 0; rowIndex < scannedSheet.sampleRows.length; rowIndex++) {
     const row = scannedSheet.sampleRows[rowIndex];
@@ -444,6 +458,7 @@ export async function syncOneScannedCourseSheet(
     const { error: delLessErr } = await supabase.from('lessons').delete().in('id', dropIds);
     if (delLessErr) throw new Error(delLessErr.message);
     dbLessons.length = sessions.length;
+    sessionsDeleted += dropIds.length;
   }
 
   await runWithConcurrencyLimit(sessions.length, LESSON_SYNC_CONCURRENCY, async (sIdx) => {
@@ -487,6 +502,7 @@ export async function syncOneScannedCourseSheet(
           })
           .eq('id', L.id);
         if (upLesErr) throw new Error(upLesErr.message);
+        sessionsUpdated += 1;
       }
       // Keep existing attendance for already-stored sessions on re-import.
     } else {
@@ -511,6 +527,7 @@ export async function syncOneScannedCourseSheet(
           `${sheetLabel} lessons — insert failed (${lessonHint}): ${lessonError?.message ?? 'unknown error'}`
         );
       }
+      sessionsInserted += 1;
       await syncLessonAttendanceIncremental(
         supabase,
         lesson.id,
@@ -568,5 +585,14 @@ export async function syncOneScannedCourseSheet(
     ok: true,
     courseId,
     syncCompleted: courseSyncCompleted,
+    applySummary: {
+      sheetTitle,
+      courseId,
+      sessionsInserted,
+      sessionsUpdated,
+      sessionsDeleted,
+      skippedSessionRows,
+      syncCompleted: courseSyncCompleted,
+    },
   };
 }

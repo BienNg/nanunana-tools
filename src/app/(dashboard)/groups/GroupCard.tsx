@@ -14,6 +14,7 @@ import type {
   TeacherAliasResolution,
   WorkbookClassType,
 } from '@/lib/sync/googleSheetSync';
+import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
 
 type SyncResult = { success: true; message: string } | { success: false; error: string };
 
@@ -241,6 +242,7 @@ export default function GroupCard({
     skippedRowsBySheet: SkippedRowsBySheet,
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
+    studentAliasResolutions: StudentAliasResolution[],
     workbookClassType?: WorkbookClassType
   ) => {
     if (!scanResult) return;
@@ -263,6 +265,7 @@ export default function GroupCard({
           skippedRowsBySheet,
           skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
+          studentAliasResolutions,
           ...(workbookClassType != null ? { workbookClassType } : {}),
         }),
       });

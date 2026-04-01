@@ -44,8 +44,15 @@ import {
   parseTeacherAliasResolutions,
   syncCourseTeachers,
 } from '@/lib/sync/googleSheetTeacherSync';
+import {
+  applyStudentAliasResolutions,
+  getStudentCacheKey,
+  loadStudentResolutionData,
+  parseStudentAliasResolutions,
+} from '@/lib/sync/googleSheetStudentSync';
 import { syncOneScannedCourseSheet } from '@/lib/sync/googleSheetScannedCourseSync';
 import type { TeacherAliasResolution } from '@/lib/sync/googleSheetTeacherSync';
+import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
 
 const LESSON_SYNC_CONCURRENCY = 4;
 
@@ -290,7 +297,7 @@ function resolveClassTypeForSync(workbookTitle: string, rawOverride: unknown): W
   return detectClassType(workbookTitle);
 }
 
-export type { TeacherAliasResolution };
+export type { TeacherAliasResolution, StudentAliasResolution };
 
 export type SyncProgressEvent =
   | { type: 'status'; message: string }
@@ -501,7 +508,11 @@ async function syncOneCourseSheet(
   if (enrollSelErr) throw new Error(enrollSelErr.message);
   const enrolledStudentIds = new Set((existingEnrollRows ?? []).map((r) => r.student_id as string));
 
-  const missingStudentNames = [...new Set(uniqueStudentCols.map((c) => c.name).filter((name) => !studentCache.has(name)))];
+  const missingStudentNames = [
+    ...new Set(
+      uniqueStudentCols.map((c) => c.name).filter((name) => !studentCache.has(getStudentCacheKey(name)))
+    ),
+  ];
   if (missingStudentNames.length > 0) {
     await onProgress?.({
       type: 'db',
@@ -525,14 +536,15 @@ async function syncOneCourseSheet(
     for (const s of upsertedRows ?? []) {
       const name = String(s.name ?? '').trim();
       const id = String(s.id ?? '').trim();
-      if (name && id) studentCache.set(name, id);
+      const nk = getStudentCacheKey(name);
+      if (nk && id) studentCache.set(nk, id);
     }
   }
 
   const enrollRows: { course_id: string; student_id: string }[] = [];
   for (const col of uniqueStudentCols) {
     const name = col.name;
-    const studentId = studentCache.get(name);
+    const studentId = studentCache.get(getStudentCacheKey(name));
     if (!studentId) throw new Error(`Missing student id for "${name}" after upsert`);
     if (!enrolledStudentIds.has(studentId)) {
       enrollRows.push({ course_id: courseId, student_id: studentId });
@@ -554,7 +566,7 @@ async function syncOneCourseSheet(
 
   const studentMap: Record<string, string> = {};
   for (const col of uniqueStudentCols) {
-    const sid = studentCache.get(col.name);
+    const sid = studentCache.get(getStudentCacheKey(col.name));
     if (sid) studentMap[col.name] = sid;
   }
 
@@ -833,8 +845,30 @@ async function syncOneCourseSheet(
   };
 }
 
+export type SyncCourseApplySummary = {
+  sheetTitle: string;
+  courseId: string;
+  sessionsInserted: number;
+  sessionsUpdated: number;
+  sessionsDeleted: number;
+  skippedSessionRows: number;
+  syncCompleted: boolean;
+};
+
+export type SyncGroupApplySummary = {
+  groupId: string;
+  workbookTitle: string;
+  totals: {
+    sessionsInserted: number;
+    sessionsUpdated: number;
+    sessionsDeleted: number;
+    skippedSessionRows: number;
+  };
+  courses: SyncCourseApplySummary[];
+};
+
 export type SyncGoogleSheetResult =
-  | { success: true; message: string }
+  | { success: true; message: string; applySummary?: SyncGroupApplySummary }
   | { success: false; error: string };
 
 /** Key format: `${visibleOrderIndex}:${sheetTitle}`; value: preview row indices to skip. */
@@ -900,6 +934,10 @@ export type ScanGoogleSheetResult =
       detectedNewTeachers: string[];
       /** All teachers for linking sheet names as aliases in the preview modal. */
       existingTeachersForPicker: { id: string; name: string }[];
+      /** Student names found in workbook headers but not present in this group's students (or aliases). */
+      detectedNewStudents: string[];
+      /** Existing students in this group for linking unknown sheet names as aliases in the preview modal. */
+      existingStudentsForPicker: { id: string; name: string }[];
     }
   | { success: false; error: string };
 
@@ -910,6 +948,7 @@ export type ReviewedSnapshotImportPayload = {
   skippedRowsBySheet?: unknown;
   skippedAttendanceCellsBySheet?: unknown;
   teacherAliasResolutions?: unknown;
+  studentAliasResolutions?: unknown;
   workbookClassType?: unknown;
 };
 
@@ -918,6 +957,7 @@ export type ParsedReviewedSnapshotImportPayload = {
   skippedRowsBySheet: SkippedRowsBySheet;
   skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet;
   teacherAliasResolutions?: TeacherAliasResolution[];
+  studentAliasResolutions?: StudentAliasResolution[];
   workbookClassType?: unknown;
 };
 
@@ -1057,6 +1097,11 @@ export function parseReviewedSnapshotImportPayload(raw: unknown): {
     return { ok: false, error: 'teacherAliasResolutions must be a list of { aliasName, teacherId }' };
   }
   const teacherAliasResolutions = parseTeacherAliasResolutions(teacherAliasRaw);
+  const studentAliasRaw = body.studentAliasResolutions;
+  if (studentAliasRaw != null && !Array.isArray(studentAliasRaw)) {
+    return { ok: false, error: 'studentAliasResolutions must be a list of { aliasName, studentId }' };
+  }
+  const studentAliasResolutions = parseStudentAliasResolutions(studentAliasRaw);
 
   return {
     ok: true,
@@ -1065,12 +1110,27 @@ export function parseReviewedSnapshotImportPayload(raw: unknown): {
       skippedRowsBySheet,
       skippedAttendanceCellsBySheet,
       teacherAliasResolutions,
+      studentAliasResolutions,
       workbookClassType: body.workbookClassType,
     },
   };
 }
 
 export type { SheetSyncSource };
+
+function collectStudentNamesFromScannedSheets(scannedSheets: ScannedSheet[], visibleCutoff: number | null): string[] {
+  const byKey = new Map<string, string>();
+  for (const sheet of scannedSheets) {
+    if (visibleCutoff !== null && sheet.visibleOrderIndex > visibleCutoff) continue;
+    for (const student of sheet.headers.students) {
+      const raw = String(student.name ?? '').trim();
+      const nk = getStudentCacheKey(raw);
+      if (!nk || byKey.has(nk)) continue;
+      byKey.set(nk, raw);
+    }
+  }
+  return [...byKey.values()];
+}
 
 export async function scanGoogleSheet(
   source: SheetSyncSource,
@@ -1172,6 +1232,27 @@ export async function scanGoogleSheet(
     const detectedNewTeachers = collectTeacherNamesFromScannedSheets(scannedSheets).filter(
       (teacherName) => !existingTeacherNameKeys.has(normalizePersonNameKey(teacherName))
     );
+    let detectedNewStudents: string[] = [];
+    let existingStudentsForPicker: { id: string; name: string }[] = [];
+    if (groupLookupId) {
+      const { data: existingGroup } = await supabase
+        .from('groups')
+        .select('id')
+        .eq('spreadsheet_id', groupLookupId)
+        .maybeSingle();
+      if (existingGroup?.id) {
+        await onProgress?.({ type: 'db', message: 'students — load names + aliases (scan preview)' });
+        const studentData = await loadStudentResolutionData(supabase, existingGroup.id);
+        existingStudentsForPicker = studentData.existingStudentsForPicker;
+        const scannedStudentNames = collectStudentNamesFromScannedSheets(
+          scannedSheets,
+          currentCourseVisibleIndex
+        );
+        detectedNewStudents = scannedStudentNames.filter(
+          (studentName) => !studentData.studentCache.has(getStudentCacheKey(studentName))
+        );
+      }
+    }
 
     await onProgress?.({ type: 'status', message: 'Scan complete' });
 
@@ -1186,6 +1267,8 @@ export async function scanGoogleSheet(
       currentCourseVisibleIndex,
       detectedNewTeachers,
       existingTeachersForPicker,
+      detectedNewStudents,
+      existingStudentsForPicker,
     };
   } catch (error: unknown) {
     console.error('Scan error:', error);
@@ -1201,6 +1284,7 @@ export async function runGoogleSheetSync(
     skippedRowsBySheet?: SkippedRowsBySheet;
     skippedAttendanceCellsBySheet?: SkippedAttendanceCellsBySheet;
     teacherAliasResolutions?: TeacherAliasResolution[];
+    studentAliasResolutions?: StudentAliasResolution[];
     /** When workbook title does not contain Online_DE / Online_VN / Offline, pass the user’s choice from Review Import. */
     workbookClassType?: unknown;
   }
@@ -1209,6 +1293,7 @@ export async function runGoogleSheetSync(
   const skippedRowsBySheet = options?.skippedRowsBySheet ?? {};
   const skippedAttendanceCellsBySheet = options?.skippedAttendanceCellsBySheet ?? {};
   const teacherAliasResolutions = options?.teacherAliasResolutions;
+  const studentAliasResolutions = options?.studentAliasResolutions;
   const supabase = getSupabaseAdmin();
   try {
     const loaded = await loadWorkbookFromSource(source, onProgress);
@@ -1258,12 +1343,17 @@ export async function runGoogleSheetSync(
       onProgress,
     });
 
-    await onProgress?.({ type: 'db', message: 'students — select by group_id (cache)' });
-    const { data: groupStudents } = await supabase.from('students').select('id, name').eq('group_id', group.id);
-    const studentCache = new Map<string, string>();
-    for (const s of groupStudents ?? []) {
-      studentCache.set(String(s.name).trim(), s.id);
-    }
+    await onProgress?.({ type: 'db', message: 'students — load cache + aliases' });
+    const studentResolution = await loadStudentResolutionData(supabase, group.id);
+    const studentCache = studentResolution.studentCache;
+    await applyStudentAliasResolutions(
+      supabase,
+      group.id,
+      studentCache,
+      studentAliasResolutions,
+      studentResolution.validStudentIds,
+      onProgress
+    );
 
     const visibleSheetCount = loaded.visibleSheets.length;
     const dedupeFolienRows = loaded.sourceKey.startsWith('xlsx:');
@@ -1401,6 +1491,7 @@ export async function runReviewedSnapshotSync(
     skippedRowsBySheet?: SkippedRowsBySheet;
     skippedAttendanceCellsBySheet?: SkippedAttendanceCellsBySheet;
     teacherAliasResolutions?: TeacherAliasResolution[];
+    studentAliasResolutions?: StudentAliasResolution[];
     workbookClassType?: unknown;
   }
 ): Promise<SyncGoogleSheetResult> {
@@ -1408,6 +1499,7 @@ export async function runReviewedSnapshotSync(
   const skippedRowsBySheet = options?.skippedRowsBySheet ?? {};
   const skippedAttendanceCellsBySheet = options?.skippedAttendanceCellsBySheet ?? {};
   const teacherAliasResolutions = options?.teacherAliasResolutions;
+  const studentAliasResolutions = options?.studentAliasResolutions;
   const supabase = getSupabaseAdmin();
   try {
     const workbookTitle = snapshot.workbookTitle;
@@ -1451,10 +1543,17 @@ export async function runReviewedSnapshotSync(
       onProgress,
     });
 
-    await onProgress?.({ type: 'db', message: 'students — select by group_id (cache)' });
-    const { data: groupStudents } = await supabase.from('students').select('id, name').eq('group_id', group.id);
-    const studentCache = new Map<string, string>();
-    for (const s of groupStudents ?? []) studentCache.set(String(s.name).trim(), s.id);
+    await onProgress?.({ type: 'db', message: 'students — load cache + aliases' });
+    const studentResolution = await loadStudentResolutionData(supabase, group.id);
+    const studentCache = studentResolution.studentCache;
+    await applyStudentAliasResolutions(
+      supabase,
+      group.id,
+      studentCache,
+      studentAliasResolutions,
+      studentResolution.validStudentIds,
+      onProgress
+    );
 
     const sheets = [...snapshot.sheets].sort((a, b) => a.visibleOrderIndex - b.visibleOrderIndex);
     const total = sheets.length;
@@ -1467,6 +1566,7 @@ export async function runReviewedSnapshotSync(
     let skipped = 0;
     let skippedAfterCurrentCourse = 0;
     const importedCourseIds: string[] = [];
+    const applyCourseSummaries: SyncCourseApplySummary[] = [];
     const reviewedImportNow = new Date();
     for (let i = 0; i < sheets.length; i++) {
       const sheet = sheets[i];
@@ -1501,6 +1601,7 @@ export async function runReviewedSnapshotSync(
       if (result.ok) {
         synced++;
         if (result.courseId) importedCourseIds.push(result.courseId);
+        if (result.applySummary) applyCourseSummaries.push(result.applySummary);
       } else {
         skipped++;
       }
@@ -1539,7 +1640,18 @@ export async function runReviewedSnapshotSync(
         : '';
     const message = `Sync completed: group "${workbookTitle}", ${synced} reviewed course tab(s) imported, ${skipped} skipped${skipHint}.`;
     await onProgress?.({ type: 'status', message: 'Finishing…' });
-    return { success: true, message };
+    const applySummary: SyncGroupApplySummary = {
+      groupId: group.id,
+      workbookTitle,
+      totals: {
+        sessionsInserted: applyCourseSummaries.reduce((sum, row) => sum + row.sessionsInserted, 0),
+        sessionsUpdated: applyCourseSummaries.reduce((sum, row) => sum + row.sessionsUpdated, 0),
+        sessionsDeleted: applyCourseSummaries.reduce((sum, row) => sum + row.sessionsDeleted, 0),
+        skippedSessionRows: applyCourseSummaries.reduce((sum, row) => sum + row.skippedSessionRows, 0),
+      },
+      courses: applyCourseSummaries,
+    };
+    return { success: true, message, applySummary };
   } catch (error: unknown) {
     console.error('Reviewed snapshot sync error:', error);
     const errMsg = error instanceof Error ? error.message : 'Unknown error';

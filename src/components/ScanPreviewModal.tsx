@@ -9,8 +9,10 @@ import type {
   SkippedAttendanceCellsBySheet,
   SkippedRowsBySheet,
   TeacherAliasResolution,
+  SyncGroupApplySummary,
   WorkbookClassType,
 } from '@/lib/sync/googleSheetSync';
+import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
 import { GROUP_CLASS_TYPE_OPTIONS } from '@/lib/courseDuration';
 import { findLastTaughtSessionRowIndex, parseSheetDatum } from '@/lib/sync/currentCourseSheet';
 import {
@@ -338,6 +340,7 @@ type ScanPreviewModalProps = {
     skippedRowsBySheet: SkippedRowsBySheet,
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
+    studentAliasResolutions: StudentAliasResolution[],
     /** Sent to the server only when the workbook title did not imply a class type. */
     workbookClassType?: WorkbookClassType
   ) => void;
@@ -353,6 +356,19 @@ type ScanPreviewModalProps = {
   resyncError?: string;
   /** Import finished once; require a fresh resync before allowing another import. */
   importRequiresResync?: boolean;
+  groupTabs?: { id: string; label: string; disabled?: boolean }[];
+  activeGroupTabId?: string;
+  onSelectGroupTab?: (groupId: string) => void;
+  onConfirmAllGroups?: (
+    skippedRowsBySheet: SkippedRowsBySheet,
+    skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
+    teacherAliasResolutions: TeacherAliasResolution[],
+    studentAliasResolutions: StudentAliasResolution[],
+    workbookClassType?: WorkbookClassType
+  ) => void;
+  isImportingAllGroups?: boolean;
+  isConfirmAllGroupsDisabled?: boolean;
+  importApplySummary?: SyncGroupApplySummary | null;
 };
 
 type HoverHint = { text: string; x: number; y: number } | null;
@@ -370,6 +386,13 @@ export default function ScanPreviewModal({
   resyncProgressMessage = '',
   resyncError = '',
   importRequiresResync = false,
+  groupTabs = [],
+  activeGroupTabId,
+  onSelectGroupTab,
+  onConfirmAllGroups,
+  isImportingAllGroups = false,
+  isConfirmAllGroupsDisabled = false,
+  importApplySummary = null,
 }: ScanPreviewModalProps) {
   const [activeTab, setActiveTab] = useState(0);
   const [mounted, setMounted] = useState(false);
@@ -381,6 +404,8 @@ export default function ScanPreviewModal({
   const [hoverHint, setHoverHint] = useState<HoverHint>(null);
   /** normalized teacher name key → existing teacher id when user maps a sheet name to a known teacher */
   const [teacherMergeByKey, setTeacherMergeByKey] = useState<Record<string, string>>({});
+  /** normalized student name key → existing student id when user maps a sheet name to a known student */
+  const [studentMergeByKey, setStudentMergeByKey] = useState<Record<string, string>>({});
   /** When scan did not detect a class type from the workbook title, user must pick one. */
   const [manualWorkbookClassType, setManualWorkbookClassType] = useState<'' | WorkbookClassType>('');
   const importLogScrollRef = useRef<HTMLDivElement | null>(null);
@@ -411,6 +436,7 @@ export default function ScanPreviewModal({
     setSkippedAttendanceCellsBySheet({});
     setOpenRowActionIndex(null);
     setTeacherMergeByKey({});
+    setStudentMergeByKey({});
     setManualWorkbookClassType('');
   }, [isOpen, scanResult]);
 
@@ -535,9 +561,9 @@ export default function ScanPreviewModal({
     hasImportBlockingSheetIssues ||
     resolvedWorkbookClassType === null ||
     (hasNoDetectedImportChanges && !hasManualImportSelections);
-
+  const busy = isImporting || isResyncing || isImportingAllGroups;
+  const confirmAllBlocked = busy || confirmImportBlocked || isConfirmAllGroupsDisabled;
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
-  const busy = isImporting || isResyncing;
 
   const detectedNewTeachers = useMemo(() => {
     const raw = scanResult?.detectedNewTeachers ?? [];
@@ -551,6 +577,17 @@ export default function ScanPreviewModal({
   }, [scanResult?.detectedNewTeachers]);
 
   const existingTeachersForPicker = scanResult?.existingTeachersForPicker ?? [];
+  const detectedNewStudents = useMemo(() => {
+    const raw = scanResult?.detectedNewStudents ?? [];
+    const byKey = new Map<string, string>();
+    for (const name of raw) {
+      const key = normalizePersonNameKey(name);
+      if (!key || byKey.has(key)) continue;
+      byKey.set(key, name);
+    }
+    return [...byKey.values()].sort((a, b) => a.localeCompare(b));
+  }, [scanResult?.detectedNewStudents]);
+  const existingStudentsForPicker = scanResult?.existingStudentsForPicker ?? [];
 
   if (!isOpen || !scanResult || !mounted) return null;
 
@@ -661,6 +698,35 @@ export default function ScanPreviewModal({
         </div>
 
         {/* Tabs */}
+        {groupTabs.length > 0 ? (
+          <div
+            className="flex min-h-[3.25rem] items-end gap-1 border-b border-gray-200 bg-gray-100 px-6 pb-0 pt-2 overflow-x-auto no-scrollbar"
+            role="tablist"
+            aria-label="Groups to update"
+          >
+            {groupTabs.map((groupTab) => {
+              const selected = groupTab.id === activeGroupTabId;
+              return (
+                <button
+                  key={groupTab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  disabled={busy || groupTab.disabled}
+                  onClick={() => onSelectGroupTab?.(groupTab.id)}
+                  className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors ${
+                    selected
+                      ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-700 shadow-[0_-1px_0_0_white]'
+                      : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-200/60 hover:text-gray-900'
+                  }`}
+                >
+                  {groupTab.label}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
         <div
           className="flex min-h-[3.25rem] items-end gap-1 border-b border-gray-200 bg-gray-50 px-6 pb-0 pt-2 overflow-x-auto no-scrollbar"
           role="tablist"
@@ -843,6 +909,61 @@ export default function ScanPreviewModal({
               </ul>
             </section>
           ) : null}
+          {detectedNewStudents.length > 0 ? (
+            <section className="mb-4 rounded-md border border-blue-200 bg-blue-50/70 px-4 py-3">
+              <h3 className="text-sm font-semibold text-blue-900">New student names</h3>
+              <p className="mt-1 text-xs text-blue-800">
+                These spellings are not matched yet for this group (canonical name or saved alias). Choose an
+                existing student to treat a name as an alias—it is stored and used on future imports. Otherwise a new
+                student is created.
+              </p>
+              <ul className="mt-3 space-y-2" aria-label="Map new student names">
+                {detectedNewStudents.map((studentName) => {
+                  const nk = normalizePersonNameKey(studentName);
+                  const mergedId = studentMergeByKey[nk];
+                  const mergedLabel = mergedId
+                    ? existingStudentsForPicker.find((s) => s.id === mergedId)?.name
+                    : undefined;
+                  return (
+                    <li
+                      key={nk}
+                      className="flex flex-wrap items-center gap-2 rounded-md border border-blue-200/80 bg-white/90 px-3 py-2 text-sm text-blue-950"
+                    >
+                      <span className="min-w-[6rem] font-medium">{studentName}</span>
+                      <span className="text-xs text-blue-800">→</span>
+                      <select
+                        value={mergedId ?? ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setStudentMergeByKey((prev) => {
+                            const next = { ...prev };
+                            if (!v) delete next[nk];
+                            else next[nk] = v;
+                            return next;
+                          });
+                        }}
+                        disabled={busy}
+                        className="min-w-[12rem] max-w-[min(100%,20rem)] rounded border border-blue-300/80 bg-white px-2 py-1 text-xs font-medium text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:opacity-50"
+                        aria-label={`Link sheet name ${studentName} to existing student`}
+                      >
+                        <option value="">Create new student</option>
+                        {existingStudentsForPicker.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                      {mergedLabel ? (
+                        <span className="text-xs text-blue-800">
+                          Saved as alias for {mergedLabel} on import.
+                        </span>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ) : null}
           {isResyncing ? (
             <div
               className="mb-4 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-950"
@@ -920,6 +1041,16 @@ export default function ScanPreviewModal({
                 </div>
               )}
             </div>
+          ) : null}
+          {importApplySummary ? (
+            <section className="mb-4 rounded-md border border-emerald-200 bg-emerald-50/80 px-4 py-3">
+              <h3 className="text-sm font-semibold text-emerald-900">Applied session summary</h3>
+              <p className="mt-1 text-xs text-emerald-800">
+                Added {importApplySummary.totals.sessionsInserted}, changed {importApplySummary.totals.sessionsUpdated}, removed{' '}
+                {importApplySummary.totals.sessionsDeleted}, skipped {importApplySummary.totals.skippedSessionRows} session
+                row(s).
+              </p>
+            </section>
           ) : null}
           {activeSheet && activeIsFutureCourse ? (
             <div
@@ -1278,6 +1409,43 @@ export default function ScanPreviewModal({
               )}
             </button>
           ) : null}
+          {onConfirmAllGroups ? (
+            <button
+              type="button"
+              onClick={() => {
+                const teacherAliasResolutions: TeacherAliasResolution[] = [];
+                for (const name of detectedNewTeachers) {
+                  const tid = teacherMergeByKey[normalizePersonNameKey(name)];
+                  if (tid) teacherAliasResolutions.push({ aliasName: name, teacherId: tid });
+                }
+                const studentAliasResolutions: StudentAliasResolution[] = [];
+                for (const name of detectedNewStudents) {
+                  const sid = studentMergeByKey[normalizePersonNameKey(name)];
+                  if (sid) studentAliasResolutions.push({ aliasName: name, studentId: sid });
+                }
+                const workbookClassTypeForApi =
+                  scanResult.workbookClassType == null ? resolvedWorkbookClassType ?? undefined : undefined;
+                onConfirmAllGroups(
+                  skippedRowsBySheet,
+                  skippedAttendanceCellsBySheet,
+                  teacherAliasResolutions,
+                  studentAliasResolutions,
+                  workbookClassTypeForApi
+                );
+              }}
+              disabled={confirmAllBlocked}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
+            >
+              {isImportingAllGroups ? (
+                <>
+                  <span className="material-symbols-outlined animate-spin text-sm">sync</span>
+                  Updating all groups...
+                </>
+              ) : (
+                'Update all groups'
+              )}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => {
@@ -1286,12 +1454,18 @@ export default function ScanPreviewModal({
                 const tid = teacherMergeByKey[normalizePersonNameKey(name)];
                 if (tid) teacherAliasResolutions.push({ aliasName: name, teacherId: tid });
               }
+              const studentAliasResolutions: StudentAliasResolution[] = [];
+              for (const name of detectedNewStudents) {
+                const sid = studentMergeByKey[normalizePersonNameKey(name)];
+                if (sid) studentAliasResolutions.push({ aliasName: name, studentId: sid });
+              }
               const workbookClassTypeForApi =
                 scanResult.workbookClassType == null ? resolvedWorkbookClassType ?? undefined : undefined;
               onConfirm(
                 skippedRowsBySheet,
                 skippedAttendanceCellsBySheet,
                 teacherAliasResolutions,
+                studentAliasResolutions,
                 workbookClassTypeForApi
               );
             }}

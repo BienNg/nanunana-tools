@@ -26,8 +26,14 @@ export async function POST(request: Request) {
   if (!parsedPayload || !parsedPayload.ok) {
     return Response.json({ error: parsedPayload?.error ?? 'Invalid request body' }, { status: 400 });
   }
-  const { reviewSnapshot, skippedRowsBySheet, skippedAttendanceCellsBySheet, teacherAliasResolutions, workbookClassType } =
-    parsedPayload.value;
+  const {
+    reviewSnapshot,
+    skippedRowsBySheet,
+    skippedAttendanceCellsBySheet,
+    teacherAliasResolutions,
+    studentAliasResolutions,
+    workbookClassType,
+  } = parsedPayload.value;
 
   const encoder = new TextEncoder();
 
@@ -42,6 +48,7 @@ export async function POST(request: Request) {
           skippedRowsBySheet,
           skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
+          studentAliasResolutions,
           workbookClassType,
           onProgress: (event) => {
             send({ event: 'progress', ...event });

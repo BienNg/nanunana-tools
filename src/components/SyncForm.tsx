@@ -9,9 +9,11 @@ import type {
   SkippedRowsBySheet,
   TeacherAliasResolution,
   WorkbookClassType,
+  SyncGoogleSheetResult,
 } from '@/lib/sync/googleSheetSync';
+import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
 
-type SyncResult = { success: true; message: string } | { success: false; error: string };
+type SyncResult = SyncGoogleSheetResult;
 
 type NdjsonLine =
   | { kind: 'progress-status'; message: string }
@@ -199,6 +201,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     skippedRowsBySheet: SkippedRowsBySheet,
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
+    studentAliasResolutions: StudentAliasResolution[],
     workbookClassType?: WorkbookClassType
   ) => {
     if (!scanResult) return;
@@ -221,6 +224,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
           skippedRowsBySheet,
           skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
+          studentAliasResolutions,
           ...(workbookClassType != null ? { workbookClassType } : {}),
         }),
       };

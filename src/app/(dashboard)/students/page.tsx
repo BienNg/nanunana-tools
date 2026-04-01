@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { Fragment, type ReactNode } from 'react';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import StudentAliasesManager from '@/components/StudentAliasesManager';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,7 +23,9 @@ type StudentRow = {
   name: string;
   groups: GroupRow | GroupRow[] | null;
   course_students: CourseStudentRow[] | null;
+  student_aliases: StudentAliasRow[] | null;
 };
+type StudentAliasRow = { id: string; alias: string } | null;
 
 type NamedEntity = { id: string; name: string };
 
@@ -32,6 +35,7 @@ type StudentSummary = {
   groups: NamedEntity[];
   courses: NamedEntity[];
   teachers: NamedEntity[];
+  aliases: { id: string; alias: string }[];
 };
 
 function addById(map: Map<string, NamedEntity>, entity: NamedEntity | null | undefined): void {
@@ -78,6 +82,7 @@ export default async function StudentsPage() {
       id,
       name,
       groups ( id, name ),
+      student_aliases ( id, alias ),
       course_students (
         courses (
           id,
@@ -128,8 +133,14 @@ export default async function StudentsPage() {
       groups: sortedNamedEntities(groupsMap),
       courses: sortedNamedEntities(coursesMap),
       teachers: sortedNamedEntities(teachersMap),
+      aliases: asArray(student.student_aliases)
+        .filter((alias): alias is NonNullable<StudentAliasRow> => Boolean(alias?.id && alias?.alias))
+        .sort((a, b) => a.alias.localeCompare(b.alias)),
     };
   });
+  const studentOptions = students
+    .map((s) => ({ id: s.id, name: s.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   return (
     <div className="pt-24 px-10 pb-12 animate-fade-up">
@@ -150,6 +161,7 @@ export default async function StudentsPage() {
               <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Groups Attended</th>
               <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Courses Attended</th>
               <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Teachers</th>
+              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Aliases</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
@@ -172,11 +184,19 @@ export default async function StudentsPage() {
                 <td className="py-4 px-6 text-sm text-slate-700">
                   {entityLinks(student.teachers, (id) => `/teachers/${id}`, 'No teachers')}
                 </td>
+                <td className="py-4 px-6 text-sm text-slate-700">
+                  <StudentAliasesManager
+                    studentId={student.id}
+                    studentName={student.name}
+                    aliases={student.aliases}
+                    studentOptions={studentOptions}
+                  />
+                </td>
               </tr>
             ))}
             {students.length === 0 && (
               <tr>
-                <td colSpan={4} className="py-12 text-center text-slate-500">
+                <td colSpan={5} className="py-12 text-center text-slate-500">
                   <div className="flex flex-col items-center justify-center">
                     <span className="material-symbols-outlined text-4xl mb-3 text-slate-300">inbox</span>
                     <p>No students found. Import data to get started.</p>
