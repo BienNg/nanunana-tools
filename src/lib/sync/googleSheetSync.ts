@@ -893,16 +893,6 @@ export type ScannedSheetReimportDiff = {
   changedCellsByRow: Record<number, string[]>;
   /** Tooltip copy for each cell in `changedCellsByRow` (same keys). */
   changeHintsByRow: Record<number, Record<string, string>>;
-  /** Existing DB course is not completed yet; allow re-import to refresh completion flags even without content diffs. */
-  pendingCompletionSync?: boolean;
-  /** Current completion flag in `courses.sync_completed` for this matched tab/course. */
-  dbSyncCompleted?: boolean;
-  /** Completion inferred from Review Import analysis (auto skips only: future/invalid rows). */
-  analyzedSyncCompleted?: boolean;
-  /** True when database completion does not match current Review Import analysis. */
-  syncCompletedMismatch?: boolean;
-  /** Human-readable mismatch context for UI tooltips/notices. */
-  syncCompletedMismatchReason?: string;
   /** Import-eligible rows with no paired existing lesson (positional), treated as new sessions. */
   newSessionRowIndices: number[];
   hasStructuralChanges: boolean;
@@ -1207,28 +1197,6 @@ export async function scanGoogleSheet(
             if (!cid) continue;
             const snaps = snapshotsMap.get(cid) ?? [];
             const diff = buildReimportDiffForSheet(sh, cid, snaps, now);
-            const matched = courses.find((c) => c.id === cid);
-            const scannedSessionAnalysis = analyzeScannedSheetSessionsForImport(sh, now);
-            if (matched) {
-              const dbSyncCompleted = Boolean(matched.sync_completed);
-              const analyzedSyncCompleted = isCourseSyncCompleted(
-                scannedSessionAnalysis.autoSkippedFutureRows,
-                scannedSessionAnalysis.autoSkippedInvalidDateRows,
-                scannedSessionAnalysis.eligibleRowIndices.length,
-                scannedSessionAnalysis.openSessionRows
-              );
-              diff.dbSyncCompleted = dbSyncCompleted;
-              diff.analyzedSyncCompleted = analyzedSyncCompleted;
-              if (dbSyncCompleted !== analyzedSyncCompleted) {
-                diff.syncCompletedMismatch = true;
-                diff.syncCompletedMismatchReason = analyzedSyncCompleted
-                  ? 'Database says this course is not completed, but the current Review Import analysis marks it completed.'
-                  : `Database says this course is completed, but the current Review Import analysis marks it not completed (${scannedSessionAnalysis.autoSkippedFutureRows} future row(s) are skipped).`;
-              }
-              if (!dbSyncCompleted && analyzedSyncCompleted) {
-                diff.pendingCompletionSync = true;
-              }
-            }
             sh.reimportDiff = diff;
           }
         }

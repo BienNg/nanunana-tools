@@ -553,11 +553,7 @@ export default function ScanPreviewModal({
     if (importable.length === 0) return true;
     return !importable.some((s) => {
       if (!s.reimportDiff) return true;
-      return (
-        s.reimportDiff.hasStructuralChanges ||
-        Boolean(s.reimportDiff.pendingCompletionSync) ||
-        Boolean(s.reimportDiff.syncCompletedMismatch)
-      );
+      return s.reimportDiff.hasStructuralChanges;
     });
   }, [isOpen, scanResult, mounted]);
 
@@ -595,28 +591,6 @@ export default function ScanPreviewModal({
   }, [scanResult?.detectedNewTeachers]);
 
   const existingTeachersForPicker = scanResult?.existingTeachersForPicker ?? [];
-  const syncCompletionMismatches = useMemo(() => {
-    if (!scanResult) return [];
-    const cutoff = scanResult.currentCourseVisibleIndex;
-    return scanResult.sheets
-      .filter((sheet) => cutoff === null || sheet.visibleOrderIndex <= cutoff)
-      .map((sheet) => ({ sheet, diff: sheet.reimportDiff }))
-      .filter((item) => Boolean(item.diff?.syncCompletedMismatch))
-      .map((item) => {
-        const dbValue = Boolean(item.diff?.dbSyncCompleted);
-        const analyzedValue = Boolean(item.diff?.analyzedSyncCompleted);
-        return {
-          title: item.sheet.title,
-          dbValue,
-          analyzedValue,
-          reason:
-            item.diff?.syncCompletedMismatchReason ??
-            `Database=${dbValue ? 'completed' : 'not completed'}, review analysis=${
-              analyzedValue ? 'completed' : 'not completed'
-            }.`,
-        };
-      });
-  }, [scanResult]);
 
   if (!isOpen || !scanResult || !mounted) return null;
 
@@ -746,15 +720,11 @@ export default function ScanPreviewModal({
             if (isCurrentCourse) tabLabel = `${tabLabelBase}, current course`;
             else if (isFutureCourseTab) tabLabel = `${sheet.title}, not included in this import`;
             const hasReimportUpdates = Boolean(sheet.reimportDiff?.hasStructuralChanges);
-            const hasPendingCompletionSync = Boolean(sheet.reimportDiff?.pendingCompletionSync);
-            const hasSyncCompletedMismatch = Boolean(sheet.reimportDiff?.syncCompletedMismatch);
             const analyzedCourseCompleted = Boolean(
-              sheet.analyzedSyncCompleted ?? sheet.reimportDiff?.analyzedSyncCompleted
+              sheet.analyzedSyncCompleted
             );
             const isCourseCompleted = analyzedCourseCompleted && !hasSkippedRows;
             if (hasReimportUpdates) tabLabel = `${tabLabelBase}, updates since last import`;
-            if (hasPendingCompletionSync) tabLabel = `${tabLabelBase}, will be marked complete`;
-            if (hasSyncCompletedMismatch) tabLabel = `${tabLabelBase}, sync completion mismatch`;
             else if (isCourseCompleted) tabLabel = `${tabLabel}, completed`;
             return (
               <button
@@ -766,14 +736,9 @@ export default function ScanPreviewModal({
                 onClick={() => setActiveTab(idx)}
                 aria-label={tabLabel}
                 title={
-                  hasSyncCompletedMismatch
-                    ? sheet.reimportDiff?.syncCompletedMismatchReason ??
-                      'Database completion status differs from this review analysis. Import to update sync_completed.'
-                    : hasPendingCompletionSync
-                    ? 'This tab is currently incomplete in the database and will be marked complete after import.'
-                    : hasReimportUpdates
+                  hasReimportUpdates
                       ? 'This tab matches an existing course; highlights show changes since the last import.'
-                      : undefined
+                    : undefined
                 }
                 className={
                   isFutureCourseTab
@@ -792,7 +757,7 @@ export default function ScanPreviewModal({
                 {isCourseCompleted ? (
                   <span
                     className="size-2.5 shrink-0 rounded-full bg-emerald-500 ring-1 ring-emerald-300/80"
-                    title={hasPendingCompletionSync ? 'Will be marked complete on import' : 'Course completed'}
+                    title="Course completed"
                     aria-hidden
                   />
                 ) : null}
@@ -803,24 +768,6 @@ export default function ScanPreviewModal({
                     aria-hidden
                   >
                     <span className="material-symbols-outlined text-sm leading-none">difference</span>
-                  </span>
-                ) : null}
-                {hasPendingCompletionSync ? (
-                  <span
-                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-900 ring-1 ring-emerald-300/90"
-                    title="Will mark this course complete on import"
-                    aria-hidden
-                  >
-                    <span className="material-symbols-outlined text-sm leading-none">task_alt</span>
-                  </span>
-                ) : null}
-                {hasSyncCompletedMismatch ? (
-                  <span
-                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900 ring-1 ring-amber-300/90"
-                    title="Sync completed status mismatch"
-                    aria-hidden
-                  >
-                    <span className="material-symbols-outlined text-sm leading-none">sync_problem</span>
                   </span>
                 ) : null}
                 {tabIssues > 0 && (
@@ -952,29 +899,6 @@ export default function ScanPreviewModal({
             <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-950" role="alert">
               {resyncError}
             </div>
-          ) : null}
-          {syncCompletionMismatches.length > 0 ? (
-            <section className="mb-4 rounded-md border border-amber-300 bg-amber-50/90 px-4 py-3" role="alert">
-              <h3 className="text-sm font-semibold text-amber-950">Sync completion mismatch detected</h3>
-              <p className="mt-1 text-xs text-amber-900">
-                The database `sync_completed` value differs from the current Review Import analysis for these tabs.
-                You can continue with <strong>Confirm &amp; Import</strong> to update the database to the analyzed
-                value.
-              </p>
-              <ul className="mt-2 space-y-1 text-xs text-amber-950">
-                {syncCompletionMismatches.map((item) => (
-                  <li
-                    key={item.title}
-                    className="rounded border border-amber-200/80 bg-white/70 px-2 py-1"
-                    title={item.reason}
-                  >
-                    <span className="font-semibold">{item.title}</span>: DB is{' '}
-                    <strong>{item.dbValue ? 'completed' : 'not completed'}</strong>, review analysis is{' '}
-                    <strong>{item.analyzedValue ? 'completed' : 'not completed'}</strong>.
-                  </li>
-                ))}
-              </ul>
-            </section>
           ) : null}
           {hasNoDetectedImportChanges && !isImporting && !isResyncing ? (
             <section className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3" role="status" aria-live="polite">
