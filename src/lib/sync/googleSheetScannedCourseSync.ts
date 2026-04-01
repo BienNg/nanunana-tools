@@ -102,10 +102,12 @@ function isCourseSyncCompleted(
   autoSkippedFutureRows: number,
   autoSkippedInvalidDateRows: number,
   eligibleSessionRows: number,
-  openSessionRows: number
+  openSessionRows: number,
+  skippedSessionRows = 0
 ): boolean {
   void autoSkippedInvalidDateRows;
-  return autoSkippedFutureRows === 0 && eligibleSessionRows > 0 && openSessionRows === 0;
+  void openSessionRows;
+  return autoSkippedFutureRows === 0 && eligibleSessionRows > 0 && skippedSessionRows === 0;
 }
 
 async function runWithConcurrencyLimit(
@@ -576,7 +578,8 @@ export async function syncOneScannedCourseSheet(
     autoSkippedFutureRows,
     autoSkippedInvalidDateRows,
     sessions.length,
-    sessions.filter((sess) => !sess.parsedDate || !sess.teacherCell).length
+    sessions.filter((sess) => !sess.parsedDate || !sess.teacherCell).length,
+    skippedSessionRows
   );
   await onProgress?.({
     type: 'db',

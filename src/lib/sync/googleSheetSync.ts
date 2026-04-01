@@ -145,14 +145,16 @@ function isCourseSyncCompleted(
   autoSkippedFutureRows: number,
   autoSkippedInvalidDateRows: number,
   eligibleSessionRows: number,
-  openSessionRows: number
+  openSessionRows: number,
+  skippedSessionRows = 0
 ): boolean {
   // Completion is based only on future session skips.
   // If at least one future session row is auto-skipped, the course is not completed.
+  // If no sessions are imported, the course is also not completed.
+  // If any session row is skipped (for example, user-skipped in Review Import), the course is not completed.
   void autoSkippedInvalidDateRows;
-  void eligibleSessionRows;
   void openSessionRows;
-  return autoSkippedFutureRows === 0;
+  return autoSkippedFutureRows === 0 && eligibleSessionRows > 0 && skippedSessionRows === 0;
 }
 
 function isGroupSyncCompleted(
@@ -834,7 +836,8 @@ async function syncOneCourseSheet(
     autoSkippedFutureRows,
     autoSkippedInvalidDateRows,
     sessions.length,
-    sessions.filter((sess) => !sess.parsedDate || !sess.teacherCell).length
+    sessions.filter((sess) => !sess.parsedDate || !sess.teacherCell).length,
+    skippedSessionRows
   );
   await onProgress?.({
     type: 'db',

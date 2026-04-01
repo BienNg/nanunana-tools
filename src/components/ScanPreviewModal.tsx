@@ -492,6 +492,29 @@ export default function ScanPreviewModal({
     });
   }, [isOpen, scanResult, mounted, skippedRowsBySheet, skippedAttendanceCellsBySheet]);
 
+  const sheetHasSkippedSessionRows = useMemo(() => {
+    if (!isOpen || !scanResult || !mounted) return new Set<string>();
+    const out = new Set<string>();
+    const cutoff = scanResult.currentCourseVisibleIndex;
+    const now = new Date();
+    for (const s of scanResult.sheets) {
+      if (cutoff !== null && s.visibleOrderIndex > cutoff) continue;
+      const skipped = new Set(skippedRowsBySheet[makeSheetKey(s)] ?? []);
+      const trailingNoDateTeacherRows = trailingNoDateTeacherSessionRows(s.sampleRows);
+      const maxValidationRowIndex =
+        cutoff !== null && s.visibleOrderIndex === cutoff
+          ? findLastTaughtSessionRowIndex(s.sampleRows, now)
+          : null;
+      for (let rIdx = 0; rIdx < s.sampleRows.length; rIdx++) {
+        if (rowOutsideValidationScope(s.sampleRows, rIdx, skipped, trailingNoDateTeacherRows, maxValidationRowIndex, now)) {
+          out.add(makeSheetKey(s));
+          break;
+        }
+      }
+    }
+    return out;
+  }, [isOpen, scanResult, mounted, skippedRowsBySheet]);
+
   const currentCourseVisibleIndex = scanResult?.currentCourseVisibleIndex ?? null;
   const importableSheets = useMemo(
     () =>
@@ -699,6 +722,7 @@ export default function ScanPreviewModal({
         >
           {sheets.map((sheet, idx) => {
             const tabIssues = sheetIssueCounts[idx] ?? 0;
+            const hasSkippedRows = sheetHasSkippedSessionRows.has(makeSheetKey(sheet));
             const isCurrentCourse = sheet.visibleOrderIndex === currentCourseVisibleIndex;
             const isFutureCourseTab =
               currentCourseVisibleIndex !== null && sheet.visibleOrderIndex > currentCourseVisibleIndex;
@@ -712,7 +736,10 @@ export default function ScanPreviewModal({
             const hasReimportUpdates = Boolean(sheet.reimportDiff?.hasStructuralChanges);
             const hasPendingCompletionSync = Boolean(sheet.reimportDiff?.pendingCompletionSync);
             const hasSyncCompletedMismatch = Boolean(sheet.reimportDiff?.syncCompletedMismatch);
-            const isCourseCompleted = Boolean(sheet.analyzedSyncCompleted ?? sheet.reimportDiff?.analyzedSyncCompleted);
+            const analyzedCourseCompleted = Boolean(
+              sheet.analyzedSyncCompleted ?? sheet.reimportDiff?.analyzedSyncCompleted
+            );
+            const isCourseCompleted = analyzedCourseCompleted && !hasSkippedRows;
             if (hasReimportUpdates) tabLabel = `${tabLabelBase}, updates since last import`;
             if (hasPendingCompletionSync) tabLabel = `${tabLabelBase}, will be marked complete`;
             if (hasSyncCompletedMismatch) tabLabel = `${tabLabelBase}, sync completion mismatch`;
