@@ -362,6 +362,14 @@ function studentAttendanceCellClass(
   return 'border-r border-gray-200';
 }
 
+function isDatabaseMutationLogLine(line: string): boolean {
+  const lower = line.toLowerCase();
+  if (/\b(insert|upsert|update|delete|enroll)\b/.test(lower)) return true;
+  if (lower.includes('sync_completed=')) return true;
+  // Attendance summary lines use +/~/- counters instead of action verbs.
+  return /attendance\s+—\s+\+\d+\s+~\d+\s+[−-]\d+/i.test(line);
+}
+
 type ScanPreviewModalProps = {
   isOpen: boolean;
   scanResult: Extract<ScanGoogleSheetResult, { success: true }> | null;
@@ -416,16 +424,20 @@ export default function ScanPreviewModal({
   /** When scan did not detect a class type from the workbook title, user must pick one. */
   const [manualWorkbookClassType, setManualWorkbookClassType] = useState<'' | WorkbookClassType>('');
   const importLogScrollRef = useRef<HTMLDivElement | null>(null);
+  const importMutationDbLog = useMemo(
+    () => importDbLog.filter((line) => isDatabaseMutationLogLine(line)),
+    [importDbLog]
+  );
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
   useEffect(() => {
-    if (!isImporting || importDbLog.length === 0) return;
+    if (!isImporting || importMutationDbLog.length === 0) return;
     const el = importLogScrollRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [isImporting, importDbLog]);
+  }, [isImporting, importMutationDbLog]);
 
   useEffect(() => {
     if (!isOpen || !scanResult) return;
@@ -996,7 +1008,7 @@ export default function ScanPreviewModal({
                   <span className="min-w-0 font-medium">{importProgressMessage}</span>
                 </div>
               ) : null}
-              {importDbLog.length > 0 ? (
+              {importMutationDbLog.length > 0 ? (
                 <div className="rounded-md border border-slate-200 bg-slate-50/95">
                   <div className="border-b border-slate-200 bg-slate-100/80 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Database activity
@@ -1004,10 +1016,10 @@ export default function ScanPreviewModal({
                   <div
                     ref={importLogScrollRef}
                     className="max-h-[min(40vh,16rem)] overflow-y-auto px-3 py-2"
-                    aria-label="Database import steps"
+                    aria-label="Database write steps"
                   >
                     <ol className="font-mono text-[0.7rem] leading-relaxed text-slate-800 space-y-0.5 list-decimal list-inside marker:text-slate-400">
-                      {importDbLog.map((line, idx) => (
+                      {importMutationDbLog.map((line, idx) => (
                         <li key={`${idx}-${line.slice(0, 48)}`} className="break-words">
                           {line}
                         </li>

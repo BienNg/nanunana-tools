@@ -17,6 +17,7 @@ type SessionRow = {
 export type TeacherSessionsCourseTab = {
   courseId: string;
   name: string;
+  groupName?: string | null;
   sessions: SessionRow[];
 };
 
@@ -162,7 +163,7 @@ export default function TeacherSessionsSection({
               }`}
               onClick={() => setTab({ kind: 'course', courseId: c.courseId })}
             >
-              {c.name}
+              {c.groupName ? `${c.name} · ${c.groupName}` : c.name}
             </button>
           ))}
         </div>
