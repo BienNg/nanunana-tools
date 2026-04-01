@@ -1,3 +1,5 @@
+import Link from 'next/link';
+import { Fragment, type ReactNode } from 'react';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
 export const dynamic = 'force-dynamic';
@@ -22,13 +24,46 @@ type StudentRow = {
   course_students: CourseStudentRow[] | null;
 };
 
+type NamedEntity = { id: string; name: string };
+
 type StudentSummary = {
   id: string;
   name: string;
-  groups: string[];
-  courses: string[];
-  teachers: string[];
+  groups: NamedEntity[];
+  courses: NamedEntity[];
+  teachers: NamedEntity[];
 };
+
+function addById(map: Map<string, NamedEntity>, entity: NamedEntity | null | undefined): void {
+  if (entity?.id && entity?.name) map.set(entity.id, { id: entity.id, name: entity.name });
+}
+
+function sortedNamedEntities(map: Map<string, NamedEntity>): NamedEntity[] {
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function entityLinks(
+  items: NamedEntity[],
+  href: (id: string) => string,
+  emptyLabel: string
+): ReactNode {
+  if (items.length === 0) return emptyLabel;
+  return (
+    <>
+      {items.map((item, i) => (
+        <Fragment key={item.id}>
+          {i > 0 ? ', ' : null}
+          <Link
+            href={href(item.id)}
+            className="text-primary font-medium underline-offset-2 hover:text-primary/80 hover:underline"
+          >
+            {item.name}
+          </Link>
+        </Fragment>
+      ))}
+    </>
+  );
+}
 
 function asArray<T>(value: T | T[] | null | undefined): T[] {
   if (!value) return [];
@@ -62,26 +97,26 @@ export default async function StudentsPage() {
 
   const studentRows = (data ?? []) as StudentRow[];
   const students: StudentSummary[] = studentRows.map((student) => {
-    const groups = new Set<string>();
-    const courses = new Set<string>();
-    const teachers = new Set<string>();
+    const groupsMap = new Map<string, NamedEntity>();
+    const coursesMap = new Map<string, NamedEntity>();
+    const teachersMap = new Map<string, NamedEntity>();
 
     asArray(student.groups).forEach((group) => {
-      if (group?.name) groups.add(group.name);
+      addById(groupsMap, group);
     });
 
     asArray(student.course_students).forEach((courseStudent) => {
       asArray(courseStudent?.courses).forEach((course) => {
         if (!course) return;
 
-        if (course.name) courses.add(course.name);
+        addById(coursesMap, course);
         asArray(course.groups).forEach((group) => {
-          if (group?.name) groups.add(group.name);
+          addById(groupsMap, group);
         });
 
         asArray(course.course_teachers).forEach((courseTeacher) => {
           asArray(courseTeacher?.teachers).forEach((teacher) => {
-            if (teacher?.name) teachers.add(teacher.name);
+            addById(teachersMap, teacher);
           });
         });
       });
@@ -90,9 +125,9 @@ export default async function StudentsPage() {
     return {
       id: student.id,
       name: student.name,
-      groups: [...groups].sort((a, b) => a.localeCompare(b)),
-      courses: [...courses].sort((a, b) => a.localeCompare(b)),
-      teachers: [...teachers].sort((a, b) => a.localeCompare(b)),
+      groups: sortedNamedEntities(groupsMap),
+      courses: sortedNamedEntities(coursesMap),
+      teachers: sortedNamedEntities(teachersMap),
     };
   });
 
@@ -129,13 +164,13 @@ export default async function StudentsPage() {
                   </div>
                 </td>
                 <td className="py-4 px-6 text-sm text-slate-700">
-                  {student.groups.length > 0 ? student.groups.join(', ') : 'No groups'}
+                  {entityLinks(student.groups, (id) => `/groups/${id}`, 'No groups')}
                 </td>
                 <td className="py-4 px-6 text-sm text-slate-700">
-                  {student.courses.length > 0 ? student.courses.join(', ') : 'No courses'}
+                  {entityLinks(student.courses, (id) => `/courses/${id}`, 'No courses')}
                 </td>
                 <td className="py-4 px-6 text-sm text-slate-700">
-                  {student.teachers.length > 0 ? student.teachers.join(', ') : 'No teachers'}
+                  {entityLinks(student.teachers, (id) => `/teachers/${id}`, 'No teachers')}
                 </td>
               </tr>
             ))}

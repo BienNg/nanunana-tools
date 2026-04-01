@@ -12,11 +12,14 @@ import type {
   WorkbookClassType,
 } from '@/lib/sync/googleSheetSync';
 import { GROUP_CLASS_TYPE_OPTIONS } from '@/lib/courseDuration';
+import { findLastTaughtSessionRowIndex, parseSheetDatum } from '@/lib/sync/currentCourseSheet';
 import {
-  findLastTaughtSessionRowIndex,
-  isSheetDatumStrictlyAfterToday,
-  parseSheetDatum,
-} from '@/lib/sync/currentCourseSheet';
+  datumChronoAppliesToRow,
+  isDatumChronologyOutlier,
+  rowOutsideChronologyValidationTarget,
+  rowOutsideDatumChronologyScope,
+  type DatumChronologyScope,
+} from '@/lib/sync/sheetSessionDatumChronology';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 
 const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
@@ -54,8 +57,9 @@ function datumCellHoverTitle(
   datumInvalid: boolean,
   datumChrono: boolean
 ): string | undefined {
-  if (rowIsSkipped || rowOutsideValidation) return undefined;
+  if (rowIsSkipped) return undefined;
   if (!datumEmpty && !datumInvalid && !datumChrono) return undefined;
+  if (rowOutsideValidation && !datumChrono) return undefined;
   const parts: string[] = [];
   if (datumEmpty) parts.push(HINT_EMPTY_DATUM);
   if (datumInvalid) parts.push(HINT_INVALID_DATUM);
@@ -88,12 +92,23 @@ function formatDatumForDisplay(raw: string): string {
   return `${day}.${month}.${year}`;
 }
 
-/**
- * Session rows are in teaching order; each date must be strictly after the previous row’s date
- * and strictly before the next row’s date (no duplicate session dates vs neighbors).
- * Unparseable dates are warning-only (no chronology warning).
- * Future session rows (Datum after local today) are excluded like skipped rows.
- */
+function sampleRowsDatumChronologyScope(
+  rows: ScannedSampleRow[],
+  skippedRows: ReadonlySet<number>,
+  trailingNoDateTeacherRows: ReadonlySet<number>,
+  maxValidationRowIndex: number | null,
+  now: Date
+): DatumChronologyScope {
+  return {
+    rowCount: rows.length,
+    getDatumRaw: (i) => String(rows[i]?.values['Datum'] ?? ''),
+    skippedRows,
+    trailingNoDateTeacherRows,
+    maxValidationRowIndex,
+    now,
+  };
+}
+
 function rowOutsideValidationScope(
   rows: ScannedSampleRow[],
   rowIndex: number,
@@ -102,80 +117,10 @@ function rowOutsideValidationScope(
   maxValidationRowIndex: number | null,
   now: Date
 ): boolean {
-  if (skippedRows.has(rowIndex)) return true;
-  if (trailingNoDateTeacherRows.has(rowIndex)) return true;
-  if (maxValidationRowIndex !== null && rowIndex > maxValidationRowIndex) return true;
-  return isSheetDatumStrictlyAfterToday(rows[rowIndex]?.values['Datum'], now);
-}
-
-function previousActiveRowIndex(
-  rows: ScannedSampleRow[],
-  rowIndex: number,
-  skippedRows: ReadonlySet<number>,
-  trailingNoDateTeacherRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null,
-  now: Date
-): number {
-  for (let i = rowIndex - 1; i >= 0; i--) {
-    if (rowOutsideValidationScope(rows, i, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) continue;
-    return i;
-  }
-  return -1;
-}
-
-function nextActiveRowIndex(
-  rows: ScannedSampleRow[],
-  rowIndex: number,
-  skippedRows: ReadonlySet<number>,
-  trailingNoDateTeacherRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null,
-  now: Date
-): number {
-  for (let i = rowIndex + 1; i < rows.length; i++) {
-    if (rowOutsideValidationScope(rows, i, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) continue;
-    return i;
-  }
-  return -1;
-}
-
-function isDatumChronologyOutlier(
-  rows: ScannedSampleRow[],
-  rowIndex: number,
-  skippedRows: ReadonlySet<number>,
-  trailingNoDateTeacherRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null,
-  now: Date
-): boolean {
-  if (rowOutsideValidationScope(rows, rowIndex, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) return false;
-  const n = rows.length;
-  if (n < 2) return false;
-
-  const cur = parseSheetDatum(rows[rowIndex].values['Datum'] ?? '');
-  if (cur === null) return false;
-
-  const prevIdx = previousActiveRowIndex(rows, rowIndex, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now);
-  const nextIdx = nextActiveRowIndex(rows, rowIndex, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now);
-  const prev = prevIdx >= 0 ? parseSheetDatum(rows[prevIdx].values['Datum'] ?? '') : null;
-  const next = nextIdx >= 0 ? parseSheetDatum(rows[nextIdx].values['Datum'] ?? '') : null;
-
-  if (prevIdx < 0) {
-    if (next === null) return false;
-    return cur >= next;
-  }
-
-  if (nextIdx < 0) {
-    if (prev === null) return false;
-    return cur <= prev;
-  }
-
-  if (prev !== null && next !== null) {
-    return cur <= prev || cur >= next;
-  }
-
-  if (prev !== null && next === null) return cur <= prev;
-  if (prev === null && next !== null) return cur >= next;
-
-  return false;
+  return rowOutsideDatumChronologyScope(
+    sampleRowsDatumChronologyScope(rows, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now),
+    rowIndex
+  );
 }
 
 /** Sheet background color (Present / Absent) or explicit absent wording counts as attendance data — not plain feedback text alone (matches import: status comes from fill color). */
@@ -251,10 +196,7 @@ function validationInReimportScope(sheet: ScannedSheet, rowIdx: number, columnKe
 }
 
 function datumChronoInReimportScope(sheet: ScannedSheet, rowIdx: number): boolean {
-  const d = sheet.reimportDiff;
-  if (!d) return true;
-  if (d.newSessionRowIndices.includes(rowIdx)) return true;
-  return (d.changedCellsByRow[rowIdx] ?? []).includes('Datum');
+  return datumChronoAppliesToRow(sheet.reimportDiff, rowIdx);
 }
 
 function countSheetValidationIssues(
@@ -266,43 +208,61 @@ function countSheetValidationIssues(
   now: Date
 ): number {
   const { sampleRows } = sheet;
+  const chronoScope = sampleRowsDatumChronologyScope(
+    sampleRows,
+    skippedRows,
+    trailingNoDateTeacherRows,
+    maxValidationRowIndex,
+    now
+  );
   let n = 0;
   sampleRows.forEach((row, rIdx) => {
-    if (rowOutsideValidationScope(sampleRows, rIdx, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now))
-      return;
-    for (const key of DATA_COLUMN_KEYS) {
-      if (!validationInReimportScope(sheet, rIdx, key)) continue;
-      if (isEmptyCellValue(row.values[key])) n++;
+    const outsideFull = rowOutsideValidationScope(
+      sampleRows,
+      rIdx,
+      skippedRows,
+      trailingNoDateTeacherRows,
+      maxValidationRowIndex,
+      now
+    );
+    if (!outsideFull) {
+      for (const key of DATA_COLUMN_KEYS) {
+        if (!validationInReimportScope(sheet, rIdx, key)) continue;
+        if (isEmptyCellValue(row.values[key])) n++;
+      }
+      if (
+        !isEmptyCellValue(row.values['Datum']) &&
+        parseSheetDatum(row.values['Datum'] ?? '') === null &&
+        validationInReimportScope(sheet, rIdx, 'Datum')
+      ) {
+        n++;
+      }
     }
     if (
-      !isEmptyCellValue(row.values['Datum']) &&
-      parseSheetDatum(row.values['Datum'] ?? '') === null &&
-      validationInReimportScope(sheet, rIdx, 'Datum')
-    ) {
-      n++;
-    }
-    if (
+      !rowOutsideChronologyValidationTarget(chronoScope, rIdx) &&
       !isEmptyCellValue(row.values['Datum']) &&
       datumChronoInReimportScope(sheet, rIdx) &&
-      isDatumChronologyOutlier(sampleRows, rIdx, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)
+      isDatumChronologyOutlier(chronoScope, rIdx)
     ) {
       n++;
     }
-    for (const s of sheet.headers.students) {
-      if (!validationInReimportScope(sheet, rIdx, s.name)) continue;
-      if (skippedAttendanceCells.has(`${rIdx}:${s.name}`)) continue;
-      if (
-        isStudentEmptyViolation(
-          sampleRows,
-          rIdx,
-          s.name,
-          skippedRows,
-          trailingNoDateTeacherRows,
-          maxValidationRowIndex,
-          now
+    if (!outsideFull) {
+      for (const s of sheet.headers.students) {
+        if (!validationInReimportScope(sheet, rIdx, s.name)) continue;
+        if (skippedAttendanceCells.has(`${rIdx}:${s.name}`)) continue;
+        if (
+          isStudentEmptyViolation(
+            sampleRows,
+            rIdx,
+            s.name,
+            skippedRows,
+            trailingNoDateTeacherRows,
+            maxValidationRowIndex,
+            now
+          )
         )
-      )
-        n++;
+          n++;
+      }
     }
   });
   return n;
@@ -969,7 +929,15 @@ export default function ScanPreviewModal({
               This course comes after the current course in the workbook. It is not validated here and is not
               included in import.
             </div>
-          ) : activeSheet ? (
+          ) : activeSheet ? (() => {
+            const tableDatumChronoScope = sampleRowsDatumChronologyScope(
+              activeSheet.sampleRows,
+              activeSkippedRows,
+              activeTrailingNoDateTeacherRows,
+              activeMaxValidationRowIndex,
+              previewValidationNow
+            );
+            return (
             <div className="border border-gray-200 rounded-md overflow-x-auto">
               <table className="w-full text-left text-sm text-gray-700">
                 <thead className="bg-gray-100 text-gray-600 font-semibold border-b border-gray-200">
@@ -1012,14 +980,9 @@ export default function ScanPreviewModal({
                         activeMaxValidationRowIndex,
                         previewValidationNow
                       );
-                      const datumChrono = isDatumChronologyOutlier(
-                        rows,
-                        rIdx,
-                        activeSkippedRows,
-                        activeTrailingNoDateTeacherRows,
-                        activeMaxValidationRowIndex,
-                        previewValidationNow
-                      );
+                      const chronoRowAllowed = !rowOutsideChronologyValidationTarget(tableDatumChronoScope, rIdx);
+                      const datumChrono =
+                        chronoRowAllowed && isDatumChronologyOutlier(tableDatumChronoScope, rIdx);
                       const datumEmpty = isEmptyCellValue(row.values['Datum']);
                       const datumInvalid = !datumEmpty && parseSheetDatum(row.values['Datum'] ?? '') === null;
                       const isNewReimportSession = Boolean(
@@ -1040,7 +1003,7 @@ export default function ScanPreviewModal({
                         datumEmpty;
                       const warnDatumChrono =
                         !rowIsAutoSkipped &&
-                        !rowOutsideValidation &&
+                        chronoRowAllowed &&
                         datumChronoInReimportScope(activeSheet, rIdx) &&
                         !datumEmpty &&
                         !datumInvalid &&
@@ -1278,7 +1241,8 @@ export default function ScanPreviewModal({
                 </tbody>
               </table>
             </div>
-          ) : (
+            );
+          })() : (
             <div className="text-gray-500 text-center py-10">No data available to preview.</div>
           )}
         </div>

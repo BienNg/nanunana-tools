@@ -1,6 +1,7 @@
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import { dbTimeToComparable, normalizeTeacherCellForCompare, sheetStudentStatusForCompare } from '@/lib/sync/googleSheetReimportDiff';
 import { isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
+import { datumChronoAppliesToRow, isDatumChronologyOutlier } from '@/lib/sync/sheetSessionDatumChronology';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { syncCourseTeachers } from '@/lib/sync/googleSheetTeacherSync';
 import { isSupabaseMissingColumnError, upsertCourseInGroup } from '@/lib/sync/groupCourseUpsert';
@@ -256,6 +257,7 @@ export async function syncOneScannedCourseSheet(
   studentCache: Map<string, string>,
   skippedPreviewRows: ReadonlySet<number>,
   skippedAttendanceCells: ReadonlySet<string>,
+  maxValidationRowIndex: number | null,
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ): Promise<SyncOneScannedCourseSheetResult> {
   const sheetTitle = scannedSheet.title;
@@ -336,6 +338,7 @@ export async function syncOneScannedCourseSheet(
   let skippedSessionRows = 0;
   let userSkippedSessionRows = 0;
   let autoSkippedFutureRows = 0;
+  let autoSkippedChronologyRows = 0;
   const autoSkippedInvalidDateRows = 0;
   const hasDatumColumn = Boolean(scannedSheet.headers.datum);
   for (let rowIndex = 0; rowIndex < scannedSheet.sampleRows.length; rowIndex++) {
@@ -380,15 +383,33 @@ export async function syncOneScannedCourseSheet(
     }
   }
 
+  const scannedSyncNow = new Date();
+  const scannedChronoScope = {
+    rowCount: scannedSheet.sampleRows.length,
+    getDatumRaw: (i: number) => String(scannedSheet.sampleRows[i]?.values['Datum'] ?? ''),
+    skippedRows: skippedPreviewRows,
+    trailingNoDateTeacherRows: autoSkippedNoDateTeacherPreviewRows,
+    maxValidationRowIndex,
+    now: scannedSyncNow,
+  };
+
   for (const sess of sessionDrafts) {
     if (autoSkippedNoDateTeacherPreviewRows.has(sess.previewRowIndex)) {
       skippedSessionRows += 1;
       continue;
     }
-    const dateSkipReason = classifySessionDateSkip(sess.parsedDate, hasDatumColumn, new Date());
+    const dateSkipReason = classifySessionDateSkip(sess.parsedDate, hasDatumColumn, scannedSyncNow);
     if (dateSkipReason === 'future') {
       skippedSessionRows += 1;
       autoSkippedFutureRows += 1;
+      continue;
+    }
+    if (
+      datumChronoAppliesToRow(scannedSheet.reimportDiff, sess.previewRowIndex) &&
+      isDatumChronologyOutlier(scannedChronoScope, sess.previewRowIndex)
+    ) {
+      skippedSessionRows += 1;
+      autoSkippedChronologyRows += 1;
       continue;
     }
     sess.teacherParts.forEach((n) => teachersForCourse.add(n));
@@ -520,7 +541,7 @@ export async function syncOneScannedCourseSheet(
   );
   await onProgress?.({
     type: 'db',
-    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
+    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, chrono_skipped=${autoSkippedChronologyRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
   });
   const { error: courseSyncFlagErr } = await supabase
     .from('courses')

@@ -1,5 +1,10 @@
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
-import { findCurrentCourseVisibleIndex, isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
+import {
+  findCurrentCourseVisibleIndex,
+  findLastTaughtSessionRowIndex,
+  isIsoDateStrictlyAfterLocalToday,
+} from '@/lib/sync/currentCourseSheet';
+import { isDatumChronologyOutlier } from '@/lib/sync/sheetSessionDatumChronology';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import type { GroupClassType } from '@/lib/courseDuration';
 import { parseWorkbookClassTypeInput } from '@/lib/courseDuration';
@@ -437,7 +442,7 @@ async function syncOneCourseSheet(
   skippedPreviewRows: ReadonlySet<number>,
   skippedAttendanceCells: ReadonlySet<string>,
   sheetUrl: string | null,
-  options?: { dedupeFolienRows?: boolean },
+  options?: { dedupeFolienRows?: boolean; maxValidationRowIndex?: number | null },
   onProgress?: (event: SyncProgressEvent) => void | Promise<void>
 ): Promise<{
   ok: boolean;
@@ -560,6 +565,7 @@ async function syncOneCourseSheet(
   let skippedSessionRows = 0;
   let userSkippedSessionRows = 0;
   let autoSkippedFutureRows = 0;
+  let autoSkippedChronologyRows = 0;
   const autoSkippedInvalidDateRows = 0;
   const seenFolien = new Set<string>();
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
@@ -630,15 +636,35 @@ async function syncOneCourseSheet(
     }
   }
 
+  const sessionSyncNow = new Date();
+  const datumColIdx = colIndices.datum;
+  const sessionChronoScope = {
+    rowCount: sessionDrafts.length,
+    getDatumRaw: (previewIdx: number) => {
+      const draft = sessionDrafts[previewIdx];
+      if (!draft || datumColIdx < 0) return '';
+      return String(rows[draft.gridRowIndex]?.[datumColIdx] ?? '');
+    },
+    skippedRows: skippedPreviewRows,
+    trailingNoDateTeacherRows: autoSkippedNoDateTeacherPreviewRows,
+    maxValidationRowIndex: options?.maxValidationRowIndex ?? null,
+    now: sessionSyncNow,
+  };
+
   for (const sess of sessionDrafts) {
     if (autoSkippedNoDateTeacherPreviewRows.has(sess.previewRowIndex)) {
       skippedSessionRows += 1;
       continue;
     }
-    const dateSkipReason = classifySessionDateSkip(sess.parsedDate, colIndices.datum !== -1, new Date());
+    const dateSkipReason = classifySessionDateSkip(sess.parsedDate, colIndices.datum !== -1, sessionSyncNow);
     if (dateSkipReason === 'future') {
       skippedSessionRows += 1;
       autoSkippedFutureRows += 1;
+      continue;
+    }
+    if (isDatumChronologyOutlier(sessionChronoScope, sess.previewRowIndex)) {
+      skippedSessionRows += 1;
+      autoSkippedChronologyRows += 1;
       continue;
     }
     sess.teacherParts.forEach((n) => teachersForCourse.add(n));
@@ -777,7 +803,7 @@ async function syncOneCourseSheet(
   );
   await onProgress?.({
     type: 'db',
-    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
+    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, chrono_skipped=${autoSkippedChronologyRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
   });
   const { error: courseSyncFlagErr } = await supabase
     .from('courses')
@@ -1288,7 +1314,8 @@ export async function runGoogleSheetSync(
       visibleSlotIndex++;
     }
 
-    const currentCourseVisibleIndex = findCurrentCourseVisibleIndex(visibleSlots, new Date());
+    const directSyncNow = new Date();
+    const currentCourseVisibleIndex = findCurrentCourseVisibleIndex(visibleSlots, directSyncNow);
 
     for (const item of queued) {
       if (currentCourseVisibleIndex !== null && item.slotIndex > currentCourseVisibleIndex) {
@@ -1296,6 +1323,11 @@ export async function runGoogleSheetSync(
         skippedAfterCurrentCourse++;
         continue;
       }
+      const slotSampleRows = visibleSlots[item.slotIndex]?.sampleRows ?? [];
+      const maxValidationRowIndex =
+        currentCourseVisibleIndex !== null && item.slotIndex === currentCourseVisibleIndex
+          ? findLastTaughtSessionRowIndex(slotSampleRows, directSyncNow)
+          : null;
       const result = await syncOneCourseSheet(
         supabase,
         group.id,
@@ -1308,7 +1340,7 @@ export async function runGoogleSheetSync(
         new Set(skippedRowsBySheet[`${item.slotIndex}:${item.title}`] ?? []),
         new Set(skippedAttendanceCellsBySheet[`${item.slotIndex}:${item.title}`] ?? []),
         item.sheetUrl,
-        { dedupeFolienRows },
+        { dedupeFolienRows, maxValidationRowIndex },
         onProgress
       );
       if (result.ok) {
@@ -1435,6 +1467,7 @@ export async function runReviewedSnapshotSync(
     let skipped = 0;
     let skippedAfterCurrentCourse = 0;
     const importedCourseIds: string[] = [];
+    const reviewedImportNow = new Date();
     for (let i = 0; i < sheets.length; i++) {
       const sheet = sheets[i];
       await onProgress?.({
@@ -1449,6 +1482,10 @@ export async function runReviewedSnapshotSync(
         skippedAfterCurrentCourse++;
         continue;
       }
+      const maxValidationRowIndex =
+        cutoff !== null && sheet.visibleOrderIndex === cutoff
+          ? findLastTaughtSessionRowIndex(sheet.sampleRows, reviewedImportNow)
+          : null;
       const result = await syncOneScannedCourseSheet(
         supabase,
         group.id,
@@ -1458,6 +1495,7 @@ export async function runReviewedSnapshotSync(
         studentCache,
         new Set(skippedRowsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []),
         new Set(skippedAttendanceCellsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []),
+        maxValidationRowIndex,
         onProgress
       );
       if (result.ok) {
