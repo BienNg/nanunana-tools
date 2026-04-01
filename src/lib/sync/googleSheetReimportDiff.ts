@@ -1,0 +1,551 @@
+import { parseSpreadsheetIdFromUrl } from '@/lib/googleSheets/parseSpreadsheetIdFromUrl';
+import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import { normalizePersonNameKey } from '@/lib/normalizePersonName';
+import { isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
+import type { ScannedSampleRow, ScannedSheet, ScannedSheetReimportDiff, SyncProgressEvent } from '@/lib/sync/googleSheetSync';
+
+type SessionDateSkipReason = 'future' | null;
+
+export type ExistingCourseRow = {
+  id: string;
+  name: string;
+  sheet_url: string | null;
+  sync_completed?: boolean | null;
+};
+
+export type ScannedImportSessionAnalysis = {
+  eligibleRowIndices: number[];
+  autoSkippedFutureRows: number;
+  autoSkippedInvalidDateRows: number;
+  autoSkippedTotal: number;
+  openSessionRows: number;
+};
+
+export type LessonCompareSnapshot = {
+  slide_id: string | null;
+  date: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  teacher: string | null;
+  attendanceByStudentName: Map<string, { status: string; feedback: string }>;
+};
+
+function parseTeacherNames(raw: string | undefined | null): string[] {
+  if (raw == null || raw === '') return [];
+  const s = String(raw).trim();
+  if (!s) return [];
+  return s
+    .split(/[/,;\n]+|\s+und\s+/i)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+function normalizeTimeForDb(value: string | undefined | null): string | null {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+  if (!s) return null;
+  const parts = s.split(':');
+  if (parts.length === 2) return `${parts[0].padStart(2, '0')}:${parts[1].padStart(2, '0')}:00`;
+  if (parts.length === 3) {
+    return `${parts[0].padStart(2, '0')}:${parts[1].padStart(2, '0')}:${parts[2].padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function parseSheetDate(raw: string | undefined | null): string | null {
+  if (raw == null || raw === '') return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
+    const [d, m, y] = s.split('/').map((p) => p.trim());
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(s)) {
+    const [d, m, y] = s.split('.').map((p) => p.trim());
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  const dmy = s.match(/(^|[^\d])(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?=$|[^\d])/);
+  if (dmy) {
+    const d = dmy[2] ?? '';
+    const m = dmy[3] ?? '';
+    const yy = dmy[4] ?? '';
+    let y = yy;
+    if (yy.length === 2) {
+      const n = Number(yy);
+      if (Number.isFinite(n)) y = String(n >= 70 ? 1900 + n : 2000 + n);
+    }
+    if (y.length === 4) {
+      return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    }
+  }
+  return null;
+}
+
+function normalizeFolienKey(value: string | undefined | null): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/\s+/g, '');
+}
+
+function classifySessionDateSkip(
+  parsedDate: string | null,
+  hasDatumColumn: boolean,
+  now: Date
+): SessionDateSkipReason {
+  void hasDatumColumn;
+  if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, now)) return 'future';
+  return null;
+}
+
+function parseGidFromGoogleSheetUrl(url: string): string | null {
+  const m = url.match(/[#&]gid=(\d+)/i);
+  return m?.[1] ?? null;
+}
+
+/** Same spreadsheet tab for course matching during scan (legacy rows may omit `sheet_url`). */
+export function courseDbUrlMatchesTabUrl(dbUrl: string | null | undefined, tabUrl: string | null): boolean {
+  const d = (dbUrl ?? '').trim();
+  const t = (tabUrl ?? '').trim();
+  if (!d && !t) return true;
+  if (!d && t) return true;
+  if (d && !t) return false;
+  const idD = parseSpreadsheetIdFromUrl(d);
+  const idT = parseSpreadsheetIdFromUrl(t);
+  if (idD && idT && idD === idT) {
+    const gD = parseGidFromGoogleSheetUrl(d);
+    const gT = parseGidFromGoogleSheetUrl(t);
+    if (gD && gT) return gD === gT;
+    if (!gD && !gT) return true;
+    return false;
+  }
+  return d === t;
+}
+
+/**
+ * Match scan tab to existing DB course similarly to sync import resolution:
+ * prefer exact tab URL when possible, but fall back to same-name rows so
+ * completion mismatches are still surfaced for legacy/missing sheet_url data.
+ */
+export function findExistingCourseForScannedTab(
+  courses: ExistingCourseRow[],
+  sheetTitle: string,
+  sheetUrl: string | null
+): ExistingCourseRow | null {
+  const sameName = courses.filter((c) => c.name === sheetTitle);
+  if (sameName.length === 0) return null;
+  if (sameName.length === 1) return sameName[0] ?? null;
+  if (sheetUrl) {
+    const byUrl = sameName.find((c) => courseDbUrlMatchesTabUrl(c.sheet_url, sheetUrl));
+    if (byUrl) return byUrl;
+  }
+  const withoutStoredUrl = sameName.find((c) => !(c.sheet_url ?? '').trim());
+  if (withoutStoredUrl) return withoutStoredUrl;
+  return sameName[0] ?? null;
+}
+
+export function normalizeTeacherCellForCompare(raw: string | undefined | null): string {
+  const parts = parseTeacherNames(raw)
+    .map((p) => normalizePersonNameKey(p))
+    .filter(Boolean)
+    .sort();
+  return parts.join('|');
+}
+
+export function dbTimeToComparable(value: string | null | undefined): string | null {
+  if (value == null || value === '') return null;
+  const m = String(value).match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return normalizeTimeForDb(value);
+  const hh = m[1].padStart(2, '0');
+  const mm = m[2].padStart(2, '0');
+  const ss = (m[3] ?? '00').padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+export function sheetStudentStatusForCompare(row: ScannedSampleRow, studentName: string): 'Present' | 'Absent' | null {
+  const a = row.studentAttendance[studentName];
+  if (a === 'Present' || a === 'Absent') return a;
+  const t = String(row.values[studentName] ?? '').trim();
+  if (/\babwesend\b/i.test(t) || /\babsent\b/i.test(t)) return 'Absent';
+  return null;
+}
+
+function reimportHintDisplayCell(s: string | undefined | null): string {
+  const t = String(s ?? '').trim();
+  return t.length > 0 ? t : '(empty)';
+}
+
+function reimportHintIsoDateDe(iso: string | null): string {
+  if (!iso) return '(empty)';
+  const head = String(iso).slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(head);
+  if (!m) return head;
+  return `${m[3]}.${m[2]}.${m[1]}`;
+}
+
+function reimportHintSheetDatum(raw: string | undefined): string {
+  const parsed = parseSheetDate(raw ?? '');
+  if (parsed) return reimportHintIsoDateDe(parsed);
+  return reimportHintDisplayCell(raw);
+}
+
+function reimportHintTimeCompare(comparable: string | null): string {
+  if (!comparable) return '(empty)';
+  const m = comparable.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (m) return `${m[1]}:${m[2]}`;
+  return comparable;
+}
+
+function dbAttendanceStatusToken(status: string): 'Present' | 'Absent' | null {
+  if (status === 'Present' || status === 'Absent') return status;
+  return null;
+}
+
+function reimportAttendanceLine(status: 'Present' | 'Absent' | null, feedback: string): string {
+  const parts: string[] = [];
+  if (status === 'Present' || status === 'Absent') parts.push(status);
+  else parts.push('no mark');
+  const fb = feedback.trim();
+  if (fb) parts.push(`note "${fb}"`);
+  return parts.join(', ');
+}
+
+function reimportRowExactlyMatchesLesson(
+  row: ScannedSampleRow,
+  lesson: LessonCompareSnapshot,
+  studentNames: string[]
+): boolean {
+  if (normalizeFolienKey(row.values['Folien']) !== normalizeFolienKey(lesson.slide_id)) return false;
+
+  const sheetDate = parseSheetDate(row.values['Datum'] ?? '');
+  if ((sheetDate ?? null) !== (lesson.date ?? null)) return false;
+
+  const sStart = normalizeTimeForDb(row.values['von'] ?? null);
+  const sEnd = normalizeTimeForDb(row.values['bis'] ?? null);
+  if (
+    (sStart ?? null) !== (dbTimeToComparable(lesson.start_time) ?? null) ||
+    (sEnd ?? null) !== (dbTimeToComparable(lesson.end_time) ?? null)
+  ) {
+    return false;
+  }
+
+  const tSheet = normalizeTeacherCellForCompare(row.values['Lehrer']);
+  const tDb = normalizeTeacherCellForCompare(lesson.teacher);
+  if (tSheet !== tDb) return false;
+
+  for (const name of studentNames) {
+    const stSheet = sheetStudentStatusForCompare(row, name);
+    const fbSheet = String(row.values[name] ?? '').trim();
+    const dbRec = lesson.attendanceByStudentName.get(name);
+    if (!dbRec) {
+      if (stSheet !== null || fbSheet !== '') return false;
+      continue;
+    }
+    const dbSt = dbAttendanceStatusToken(dbRec.status);
+    if (stSheet !== dbSt) return false;
+    if (fbSheet !== (dbRec.feedback ?? '').trim()) return false;
+  }
+
+  return true;
+}
+
+function trailingNoDateTeacherRowIndices(
+  rows: ReadonlyArray<{ values: Record<string, string> }>
+): ReadonlySet<number> {
+  const out = new Set<number>();
+  let allFollowingNoDateTeacher = true;
+  for (let rIdx = rows.length - 1; rIdx >= 0; rIdx--) {
+    const row = rows[rIdx];
+    const hasDate = String(row.values['Datum'] ?? '').trim().length > 0;
+    const hasTeacher = String(row.values['Lehrer'] ?? '').trim().length > 0;
+    const noDateTeacher = !hasDate && !hasTeacher;
+    if (allFollowingNoDateTeacher && noDateTeacher) {
+      out.add(rIdx);
+    } else {
+      allFollowingNoDateTeacher = false;
+    }
+  }
+  return out;
+}
+
+/**
+ * Shared scan/import classification for session-like rows in scanned sampleRows.
+ * `rIdx === previewRowIndex` for each row in sampleRows.
+ */
+export function analyzeScannedSheetSessionsForImport(sheet: ScannedSheet, now: Date): ScannedImportSessionAnalysis {
+  const hasDatumColumn = Boolean(sheet.headers.datum);
+  const autoSkippedNoDateTeacherRows = trailingNoDateTeacherRowIndices(sheet.sampleRows);
+  const eligibleRowIndices: number[] = [];
+  let autoSkippedFutureRows = 0;
+  const autoSkippedInvalidDateRows = 0;
+  let openSessionRows = 0;
+  for (let rIdx = 0; rIdx < sheet.sampleRows.length; rIdx++) {
+    const row = sheet.sampleRows[rIdx];
+    if (autoSkippedNoDateTeacherRows.has(rIdx)) {
+      continue;
+    }
+    const parsedDate = parseSheetDate(row.values['Datum'] ?? '');
+    const reason = classifySessionDateSkip(parsedDate, hasDatumColumn, now);
+    if (reason === 'future') {
+      autoSkippedFutureRows += 1;
+      continue;
+    }
+    eligibleRowIndices.push(rIdx);
+    const teacher = String(row.values['Lehrer'] ?? '').trim();
+    if (!parsedDate || !teacher) openSessionRows += 1;
+  }
+  return {
+    eligibleRowIndices,
+    autoSkippedFutureRows,
+    autoSkippedInvalidDateRows,
+    autoSkippedTotal: autoSkippedFutureRows + autoSkippedInvalidDateRows,
+    openSessionRows,
+  };
+}
+
+export async function loadLessonSnapshotsMapForCourses(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  courseIds: string[],
+  studentIdToName: Map<string, string>,
+  onProgress?: (event: SyncProgressEvent) => void | Promise<void>
+): Promise<Map<string, LessonCompareSnapshot[]>> {
+  const out = new Map<string, LessonCompareSnapshot[]>();
+  for (const id of courseIds) out.set(id, []);
+  if (courseIds.length === 0) return out;
+
+  await onProgress?.({ type: 'db', message: 'reimport diff — batch load lessons' });
+  const { data: lessons, error: leErr } = await supabase
+    .from('lessons')
+    .select('id, course_id, slide_id, date, start_time, end_time, teacher')
+    .in('course_id', courseIds);
+  if (leErr) throw new Error(leErr.message);
+  if (!lessons?.length) return out;
+
+  lessons.sort((a, b) => {
+    const ca = String(a.course_id);
+    const cb = String(b.course_id);
+    if (ca !== cb) return ca.localeCompare(cb);
+    const da = a.date as string | null | undefined;
+    const db = b.date as string | null | undefined;
+    if (!da && !db) {
+    } else if (!da) return 1;
+    else if (!db) return -1;
+    else if (da !== db) return String(da).localeCompare(String(db));
+
+    const ta = a.start_time != null ? String(a.start_time) : '';
+    const tb = b.start_time != null ? String(b.start_time) : '';
+    if (ta !== tb) return ta.localeCompare(tb);
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  const lessonIds = lessons.map((l) => l.id as string);
+  const { data: records, error: attErr } = await supabase
+    .from('attendance_records')
+    .select('lesson_id, student_id, status, feedback')
+    .in('lesson_id', lessonIds);
+  if (attErr) throw new Error(attErr.message);
+
+  const attByLesson = new Map<string, Map<string, { status: string; feedback: string }>>();
+  for (const r of records ?? []) {
+    const lid = r.lesson_id as string;
+    const sid = r.student_id as string;
+    const name = studentIdToName.get(sid);
+    if (!name) continue;
+    let m = attByLesson.get(lid);
+    if (!m) {
+      m = new Map();
+      attByLesson.set(lid, m);
+    }
+    m.set(name, { status: String(r.status), feedback: String(r.feedback ?? '') });
+  }
+
+  for (const L of lessons) {
+    const cid = L.course_id as string;
+    const arr = out.get(cid);
+    if (!arr) continue;
+    arr.push({
+      slide_id: L.slide_id != null ? String(L.slide_id) : null,
+      date: L.date != null ? String(L.date).slice(0, 10) : null,
+      start_time: L.start_time != null ? String(L.start_time) : null,
+      end_time: L.end_time != null ? String(L.end_time) : null,
+      teacher: L.teacher != null ? String(L.teacher) : null,
+      attendanceByStudentName: attByLesson.get(L.id as string) ?? new Map(),
+    });
+  }
+  return out;
+}
+
+export function buildReimportDiffForSheet(
+  sheet: ScannedSheet,
+  courseId: string,
+  dbLessons: LessonCompareSnapshot[],
+  now: Date
+): ScannedSheetReimportDiff {
+  const analysis = analyzeScannedSheetSessionsForImport(sheet, now);
+  const eligible = analysis.eligibleRowIndices;
+  const changedCellsByRow: Record<number, string[]> = {};
+  const changeHintsByRow: Record<number, Record<string, string>> = {};
+  const newSessionRowIndices: number[] = [];
+  const studentNames = sheet.headers.students.map((s) => s.name);
+
+  const pairedDbIndexByRow = new Map<number, number>();
+  const remainingDbIndices = new Set<number>(dbLessons.map((_, idx) => idx));
+  for (const rIdx of eligible) {
+    const row = sheet.sampleRows[rIdx];
+    let hit: number | null = null;
+    for (const dbIdx of remainingDbIndices) {
+      const lesson = dbLessons[dbIdx];
+      if (lesson && reimportRowExactlyMatchesLesson(row, lesson, studentNames)) {
+        hit = dbIdx;
+        break;
+      }
+    }
+    if (hit !== null) {
+      pairedDbIndexByRow.set(rIdx, hit);
+      remainingDbIndices.delete(hit);
+    }
+  }
+  for (const rIdx of eligible) {
+    if (pairedDbIndexByRow.has(rIdx)) continue;
+    const row = sheet.sampleRows[rIdx];
+    const folienKey = normalizeFolienKey(row.values['Folien']);
+    if (!folienKey) continue;
+    const candidates: number[] = [];
+    for (const dbIdx of remainingDbIndices) {
+      const lesson = dbLessons[dbIdx];
+      if (!lesson) continue;
+      if (normalizeFolienKey(lesson.slide_id) === folienKey) {
+        candidates.push(dbIdx);
+      }
+    }
+    if (candidates.length === 1) {
+      const dbIdx = candidates[0]!;
+      pairedDbIndexByRow.set(rIdx, dbIdx);
+      remainingDbIndices.delete(dbIdx);
+    }
+  }
+  const fallbackDbIndices = [...remainingDbIndices].sort((a, b) => a - b);
+  let fallbackCursor = 0;
+  for (const rIdx of eligible) {
+    if (pairedDbIndexByRow.has(rIdx)) continue;
+    const dbIdx = fallbackDbIndices[fallbackCursor];
+    if (dbIdx == null) continue;
+    pairedDbIndexByRow.set(rIdx, dbIdx);
+    fallbackCursor += 1;
+  }
+
+  for (const rIdx of eligible) {
+    const row = sheet.sampleRows[rIdx];
+    const dbIdx = pairedDbIndexByRow.get(rIdx);
+    const lesson = dbIdx == null ? undefined : dbLessons[dbIdx];
+    if (!lesson) {
+      newSessionRowIndices.push(rIdx);
+      continue;
+    }
+
+    const changed: string[] = [];
+    const hints: Record<string, string> = {};
+    const track = (key: string, hint: string) => {
+      changed.push(key);
+      hints[key] = hint;
+    };
+
+    if (normalizeFolienKey(row.values['Folien']) !== normalizeFolienKey(lesson.slide_id)) {
+      track(
+        'Folien',
+        `Folien / slides: was "${reimportHintDisplayCell(lesson.slide_id)}" — sheet now "${reimportHintDisplayCell(row.values['Folien'])}".`
+      );
+    }
+
+    const sheetDate = parseSheetDate(row.values['Datum'] ?? '');
+    const dbD = lesson.date;
+    if ((sheetDate ?? null) !== (dbD ?? null)) {
+      track(
+        'Datum',
+        `Date: was ${reimportHintIsoDateDe(dbD)} — sheet now ${reimportHintSheetDatum(row.values['Datum'])}.`
+      );
+    }
+
+    const sStart = normalizeTimeForDb(row.values['von'] ?? null);
+    const sEnd = normalizeTimeForDb(row.values['bis'] ?? null);
+    if ((sStart ?? null) !== (dbTimeToComparable(lesson.start_time) ?? null)) {
+      track(
+        'von',
+        `Start (von): was ${reimportHintTimeCompare(dbTimeToComparable(lesson.start_time))} — sheet now ${reimportHintTimeCompare(sStart)}.`
+      );
+    }
+    if ((sEnd ?? null) !== (dbTimeToComparable(lesson.end_time) ?? null)) {
+      track(
+        'bis',
+        `End (bis): was ${reimportHintTimeCompare(dbTimeToComparable(lesson.end_time))} — sheet now ${reimportHintTimeCompare(sEnd)}.`
+      );
+    }
+
+    const tSheet = normalizeTeacherCellForCompare(row.values['Lehrer']);
+    const tDb = normalizeTeacherCellForCompare(lesson.teacher);
+    if (tSheet !== tDb) {
+      track(
+        'Lehrer',
+        `Teacher: was "${reimportHintDisplayCell(lesson.teacher)}" — sheet now "${reimportHintDisplayCell(row.values['Lehrer'])}".`
+      );
+    }
+
+    for (const st of sheet.headers.students) {
+      const name = st.name;
+      const stSheet = sheetStudentStatusForCompare(row, name);
+      const fbSheet = String(row.values[name] ?? '').trim();
+      const dbRec = lesson.attendanceByStudentName.get(name);
+      if (!dbRec) {
+        if (stSheet !== null || fbSheet !== '') {
+          track(
+            name,
+            `${name}: no attendance was stored — sheet now ${reimportAttendanceLine(stSheet, fbSheet)}.`
+          );
+        }
+      } else {
+        const dbSt = dbAttendanceStatusToken(dbRec.status);
+        if (stSheet !== dbSt) {
+          track(
+            name,
+            `${name}: was ${reimportAttendanceLine(dbSt, dbRec.feedback)} — sheet now ${reimportAttendanceLine(stSheet, fbSheet)}.`
+          );
+        } else if (fbSheet !== (dbRec.feedback ?? '').trim()) {
+          track(
+            name,
+            `${name}: note was "${reimportHintDisplayCell(dbRec.feedback)}" — sheet now "${reimportHintDisplayCell(fbSheet)}".`
+          );
+        }
+      }
+    }
+
+    if (changed.length > 0) {
+      changedCellsByRow[rIdx] = changed;
+      changeHintsByRow[rIdx] = hints;
+    }
+  }
+
+  const hasStructuralChanges =
+    newSessionRowIndices.length > 0 || Object.keys(changedCellsByRow).length > 0;
+
+  return {
+    courseId,
+    changedCellsByRow,
+    changeHintsByRow,
+    newSessionRowIndices,
+    hasStructuralChanges,
+  };
+}
+
+export function collectTeacherNamesFromScannedSheets(sheets: ScannedSheet[]): string[] {
+  const namesByKey = new Map<string, string>();
+  for (const sheet of sheets) {
+    for (const row of sheet.sampleRows) {
+      for (const teacherName of parseTeacherNames(row.values['Lehrer'])) {
+        const key = normalizePersonNameKey(teacherName);
+        if (!key || namesByKey.has(key)) continue;
+        namesByKey.set(key, teacherName);
+      }
+    }
+  }
+  return [...namesByKey.values()].sort((a, b) => a.localeCompare(b));
+}
