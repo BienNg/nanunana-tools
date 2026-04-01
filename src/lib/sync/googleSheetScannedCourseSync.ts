@@ -1,8 +1,9 @@
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
-import { dbTimeToComparable, normalizeTeacherCellForCompare, courseDbUrlMatchesTabUrl, sheetStudentStatusForCompare } from '@/lib/sync/googleSheetReimportDiff';
+import { dbTimeToComparable, normalizeTeacherCellForCompare, sheetStudentStatusForCompare } from '@/lib/sync/googleSheetReimportDiff';
 import { isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { syncCourseTeachers } from '@/lib/sync/googleSheetTeacherSync';
+import { isSupabaseMissingColumnError, upsertCourseInGroup } from '@/lib/sync/groupCourseUpsert';
 import type { ScannedSheet, SyncProgressEvent } from '@/lib/sync/googleSheetSync';
 
 const LESSON_SYNC_CONCURRENCY = 4;
@@ -26,14 +27,6 @@ type SheetParsedSession = {
   teacherCell: string | null;
   teacherParts: string[];
 };
-
-/** PostgREST when the column was never migrated / not in schema cache yet. */
-function isSupabaseMissingColumnError(message: string | undefined, column: string): boolean {
-  if (!message) return false;
-  const m = message.toLowerCase();
-  const col = column.toLowerCase();
-  return m.includes(col) && (m.includes('schema cache') || m.includes('could not find'));
-}
 
 /** Split one or more teacher names from a cell (comma, slash, semicolon, newline, German "und"). */
 function parseTeacherNames(raw: string | undefined | null): string[] {
@@ -270,69 +263,13 @@ export async function syncOneScannedCourseSheet(
   const sheetUrl = scannedSheet.sheetUrl;
   const uniqueStudentNames = [...new Set(scannedSheet.headers.students.map((s) => s.name.trim()).filter(Boolean))];
 
-  await onProgress?.({
-    type: 'db',
-    message: `${sheetLabel} courses — select by group + name`,
+  const { courseId } = await upsertCourseInGroup(supabase, {
+    groupId,
+    courseName: sheetTitle,
+    sheetUrl,
+    progressLabel: sheetLabel,
+    onProgress,
   });
-  const { data: existingCourses, error: existingCoursesErr } = await supabase
-    .from('courses')
-    .select('id, sheet_url')
-    .eq('group_id', groupId)
-    .eq('name', sheetTitle);
-  if (existingCoursesErr) throw new Error(existingCoursesErr.message);
-
-  let courseId: string;
-  let existing: { id: string; sheet_url: string | null } | null = null;
-  if ((existingCourses ?? []).length === 1) {
-    existing = existingCourses![0] as { id: string; sheet_url: string | null };
-  } else if ((existingCourses ?? []).length > 1) {
-    const rows = (existingCourses ?? []) as { id: string; sheet_url: string | null }[];
-    if (sheetUrl) {
-      existing = rows.find((c) => courseDbUrlMatchesTabUrl(c.sheet_url, sheetUrl)) ?? null;
-    }
-    if (!existing) {
-      existing = rows.find((c) => !(c.sheet_url ?? '').trim()) ?? rows[0] ?? null;
-    }
-  }
-
-  if (existing?.id) {
-    courseId = existing.id;
-    const prevUrl = (existing.sheet_url ?? '').trim();
-    const nextUrl = (sheetUrl ?? '').trim();
-    if (sheetUrl && prevUrl !== nextUrl) {
-      await onProgress?.({
-        type: 'db',
-        message: `${sheetLabel} courses — update sheet_url`,
-      });
-      const { error: sheetUrlErr } = await supabase.from('courses').update({ sheet_url: sheetUrl }).eq('id', courseId);
-      if (sheetUrlErr && !isSupabaseMissingColumnError(sheetUrlErr.message, 'sheet_url')) {
-        throw new Error(`Failed to update course sheet_url "${sheetTitle}": ${sheetUrlErr.message}`);
-      }
-    }
-  } else {
-    await onProgress?.({
-      type: 'db',
-      message: `${sheetLabel} courses — insert`,
-    });
-    let row: { id: string } | null = null;
-    let createError = null as { message: string } | null;
-    ({ data: row, error: createError } = await supabase
-      .from('courses')
-      .insert({ name: sheetTitle, group_id: groupId, sheet_url: sheetUrl })
-      .select('id')
-      .single());
-    if (createError && isSupabaseMissingColumnError(createError.message, 'sheet_url')) {
-      ({ data: row, error: createError } = await supabase
-        .from('courses')
-        .insert({ name: sheetTitle, group_id: groupId })
-        .select('id')
-        .single());
-    }
-    if (createError || !row) {
-      throw new Error(`Failed to create course "${sheetTitle}": ${createError?.message ?? 'unknown'}`);
-    }
-    courseId = row.id;
-  }
 
   const { data: existingEnrollRows, error: enrollSelErr } = await supabase
     .from('course_students')

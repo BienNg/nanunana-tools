@@ -20,12 +20,16 @@ import {
   analyzeScannedSheetSessionsForImport,
   buildReimportDiffForSheet,
   collectTeacherNamesFromScannedSheets,
-  courseDbUrlMatchesTabUrl,
   dbTimeToComparable,
   findExistingCourseForScannedTab,
   loadLessonSnapshotsMapForCourses,
   normalizeTeacherCellForCompare,
 } from '@/lib/sync/googleSheetReimportDiff';
+import {
+  isSupabaseMissingColumnError,
+  upsertCourseInGroup,
+  upsertGroupBySpreadsheetId,
+} from '@/lib/sync/groupCourseUpsert';
 import type { AttendanceFromColor, SheetRow, SheetSyncSource } from '@/lib/sync/googleSheetWorkbookSource';
 import type { ExistingCourseRow } from '@/lib/sync/googleSheetReimportDiff';
 import type { ScannedSampleRow, ScannedStudent } from '@/lib/sync/googleSheetGridParser';
@@ -60,14 +64,6 @@ async function runWithConcurrencyLimit(
 
   const workers = Array.from({ length: safeLimit }, () => runOne());
   await Promise.all(workers);
-}
-
-/** PostgREST when the column was never migrated / not in schema cache yet. */
-function isSupabaseMissingColumnError(message: string | undefined, column: string): boolean {
-  if (!message) return false;
-  const m = message.toLowerCase();
-  const col = column.toLowerCase();
-  return m.includes(col) && (m.includes('schema cache') || m.includes('could not find'));
 }
 
 /** Split one or more teacher names from a cell (comma, slash, semicolon, newline, German "und"). */
@@ -485,73 +481,13 @@ async function syncOneCourseSheet(
 
   const uniqueStudentCols = dedupeSheetStudentColumns(studentNames);
 
-  await onProgress?.({
-    type: 'db',
-    message: `${sheetLabel} courses — select by group + name`,
+  const { courseId } = await upsertCourseInGroup(supabase, {
+    groupId,
+    courseName: sheetTitle,
+    sheetUrl,
+    progressLabel: sheetLabel,
+    onProgress,
   });
-  const { data: existingCourses, error: existingCoursesErr } = await supabase
-    .from('courses')
-    .select('id, sheet_url')
-    .eq('group_id', groupId)
-    .eq('name', sheetTitle);
-  if (existingCoursesErr) throw new Error(existingCoursesErr.message);
-
-  let courseId: string;
-  let existing: { id: string; sheet_url: string | null } | null = null;
-  if ((existingCourses ?? []).length === 1) {
-    existing = existingCourses![0] as { id: string; sheet_url: string | null };
-  } else if ((existingCourses ?? []).length > 1) {
-    const rows = (existingCourses ?? []) as { id: string; sheet_url: string | null }[];
-    if (sheetUrl) {
-      existing = rows.find((c) => courseDbUrlMatchesTabUrl(c.sheet_url, sheetUrl)) ?? null;
-    }
-    if (!existing) {
-      // Fall back to a row without stored tab URL (legacy imports), else first row.
-      existing = rows.find((c) => !(c.sheet_url ?? '').trim()) ?? rows[0] ?? null;
-    }
-  }
-
-  if (existing?.id) {
-    courseId = existing.id;
-    const prevUrl = (existing.sheet_url ?? '').trim();
-    const nextUrl = (sheetUrl ?? '').trim();
-    if (sheetUrl && prevUrl !== nextUrl) {
-      await onProgress?.({
-        type: 'db',
-        message: `${sheetLabel} courses — update sheet_url`,
-      });
-      const { error: sheetUrlErr } = await supabase
-        .from('courses')
-        .update({ sheet_url: sheetUrl })
-        .eq('id', courseId);
-      if (sheetUrlErr && !isSupabaseMissingColumnError(sheetUrlErr.message, 'sheet_url')) {
-        throw new Error(`Failed to update course sheet_url "${sheetTitle}": ${sheetUrlErr.message}`);
-      }
-    }
-  } else {
-    await onProgress?.({
-      type: 'db',
-      message: `${sheetLabel} courses — insert`,
-    });
-    let row: { id: string } | null = null;
-    let createError = null as { message: string } | null;
-    ({ data: row, error: createError } = await supabase
-      .from('courses')
-      .insert({ name: sheetTitle, group_id: groupId, sheet_url: sheetUrl })
-      .select('id')
-      .single());
-    if (createError && isSupabaseMissingColumnError(createError.message, 'sheet_url')) {
-      ({ data: row, error: createError } = await supabase
-        .from('courses')
-        .insert({ name: sheetTitle, group_id: groupId })
-        .select('id')
-        .single());
-    }
-    if (createError || !row) {
-      throw new Error(`Failed to create course "${sheetTitle}": ${createError?.message ?? 'unknown'}`);
-    }
-    courseId = row.id;
-  }
 
   const { data: existingEnrollRows, error: enrollSelErr } = await supabase
     .from('course_students')
@@ -1288,89 +1224,13 @@ export async function runGoogleSheetSync(
       onProgress
     );
 
-    await onProgress?.({ type: 'db', message: 'groups — select by spreadsheet_id' });
-    const { data: existingGroup, error: groupSelectError } = await supabase
-      .from('groups')
-      .select('id, name, class_type, spreadsheet_url')
-      .eq('spreadsheet_id', groupLookupId)
-      .maybeSingle();
-
-    if (groupSelectError) throw new Error(groupSelectError.message);
-    let group: {
-      id: string;
-      name?: string | null;
-      class_type?: string | null;
-      spreadsheet_url?: string | null;
-    } | null = existingGroup;
-
-    if (!group) {
-      await onProgress?.({ type: 'db', message: 'groups — insert' });
-      const baseGroup = {
-        name: workbookTitle,
-        spreadsheet_id: groupLookupId,
-        class_type: classType,
-      };
-      let inserted: { id: string } | null = null;
-      let insertErr: { message: string } | null = null;
-      ({ data: inserted, error: insertErr } = await supabase
-        .from('groups')
-        .insert({ ...baseGroup, spreadsheet_url: loaded.spreadsheetUrl })
-        .select('id')
-        .single());
-      if (insertErr && isSupabaseMissingColumnError(insertErr.message, 'spreadsheet_url')) {
-        ({ data: inserted, error: insertErr } = await supabase
-          .from('groups')
-          .insert(baseGroup)
-          .select('id')
-          .single());
-      }
-      if (insertErr || !inserted) {
-        throw new Error(`Failed to create group: ${insertErr?.message ?? 'unknown'}`);
-      }
-      group = inserted;
-    } else {
-      const prevName = (existingGroup?.name ?? '').trim();
-      const prevClass = existingGroup?.class_type ?? null;
-      const prevUrl = (existingGroup?.spreadsheet_url ?? '').trim();
-      const nextUrl = (loaded.spreadsheetUrl ?? '').trim();
-      const groupNeedsUpdate =
-        prevName !== workbookTitle.trim() ||
-        prevClass !== classType ||
-        (loaded.spreadsheetUrl != null && prevUrl !== nextUrl);
-
-      if (groupNeedsUpdate) {
-        await onProgress?.({ type: 'db', message: 'groups — update changed fields' });
-        if (loaded.spreadsheetUrl) {
-          const { error: upErr } = await supabase
-            .from('groups')
-            .update({
-              name: workbookTitle,
-              class_type: classType,
-              spreadsheet_url: loaded.spreadsheetUrl,
-            })
-            .eq('id', group.id);
-          if (upErr && isSupabaseMissingColumnError(upErr.message, 'spreadsheet_url')) {
-            const { error: up2 } = await supabase
-              .from('groups')
-              .update({ name: workbookTitle, class_type: classType })
-              .eq('id', group.id);
-            if (up2) throw new Error(up2.message);
-          } else if (upErr) {
-            throw new Error(upErr.message);
-          }
-        } else {
-          const { error: upErr } = await supabase
-            .from('groups')
-            .update({ name: workbookTitle, class_type: classType })
-            .eq('id', group.id);
-          if (upErr) throw new Error(upErr.message);
-        }
-      }
-    }
-
-    if (!group) {
-      throw new Error('Internal error: group not resolved after load/insert');
-    }
+    const group = await upsertGroupBySpreadsheetId(supabase, {
+      spreadsheetId: groupLookupId,
+      workbookTitle,
+      classType,
+      spreadsheetUrl: loaded.spreadsheetUrl ?? null,
+      onProgress,
+    });
 
     await onProgress?.({ type: 'db', message: 'students — select by group_id (cache)' });
     const { data: groupStudents } = await supabase.from('students').select('id, name').eq('group_id', group.id);
@@ -1551,80 +1411,13 @@ export async function runReviewedSnapshotSync(
       onProgress
     );
 
-    await onProgress?.({ type: 'db', message: 'groups — select by spreadsheet_id' });
-    const { data: existingGroup, error: groupSelectError } = await supabase
-      .from('groups')
-      .select('id, name, class_type, spreadsheet_url')
-      .eq('spreadsheet_id', groupLookupId)
-      .maybeSingle();
-    if (groupSelectError) throw new Error(groupSelectError.message);
-
-    let group: {
-      id: string;
-      name?: string | null;
-      class_type?: string | null;
-      spreadsheet_url?: string | null;
-    } | null = existingGroup;
-
-    if (!group) {
-      await onProgress?.({ type: 'db', message: 'groups — insert' });
-      const baseGroup = {
-        name: workbookTitle,
-        spreadsheet_id: groupLookupId,
-        class_type: classType,
-      };
-      let inserted: { id: string } | null = null;
-      let insertErr: { message: string } | null = null;
-      ({ data: inserted, error: insertErr } = await supabase
-        .from('groups')
-        .insert({ ...baseGroup, spreadsheet_url: snapshot.spreadsheetUrl })
-        .select('id')
-        .single());
-      if (insertErr && isSupabaseMissingColumnError(insertErr.message, 'spreadsheet_url')) {
-        ({ data: inserted, error: insertErr } = await supabase.from('groups').insert(baseGroup).select('id').single());
-      }
-      if (insertErr || !inserted) throw new Error(`Failed to create group: ${insertErr?.message ?? 'unknown'}`);
-      group = inserted;
-    } else {
-      const prevName = (existingGroup?.name ?? '').trim();
-      const prevClass = existingGroup?.class_type ?? null;
-      const prevUrl = (existingGroup?.spreadsheet_url ?? '').trim();
-      const nextUrl = (snapshot.spreadsheetUrl ?? '').trim();
-      const groupNeedsUpdate =
-        prevName !== workbookTitle.trim() ||
-        prevClass !== classType ||
-        (snapshot.spreadsheetUrl != null && prevUrl !== nextUrl);
-      if (groupNeedsUpdate) {
-        await onProgress?.({ type: 'db', message: 'groups — update changed fields' });
-        if (snapshot.spreadsheetUrl) {
-          const { error: upErr } = await supabase
-            .from('groups')
-            .update({
-              name: workbookTitle,
-              class_type: classType,
-              spreadsheet_url: snapshot.spreadsheetUrl,
-            })
-            .eq('id', group.id);
-          if (upErr && isSupabaseMissingColumnError(upErr.message, 'spreadsheet_url')) {
-            const { error: up2 } = await supabase
-              .from('groups')
-              .update({ name: workbookTitle, class_type: classType })
-              .eq('id', group.id);
-            if (up2) throw new Error(up2.message);
-          } else if (upErr) {
-            throw new Error(upErr.message);
-          }
-        } else {
-          const { error: upErr } = await supabase
-            .from('groups')
-            .update({ name: workbookTitle, class_type: classType })
-            .eq('id', group.id);
-          if (upErr) throw new Error(upErr.message);
-        }
-      }
-    }
-
-    if (!group) throw new Error('Internal error: group not resolved after insert/select');
+    const group = await upsertGroupBySpreadsheetId(supabase, {
+      spreadsheetId: groupLookupId,
+      workbookTitle,
+      classType,
+      spreadsheetUrl: snapshot.spreadsheetUrl ?? null,
+      onProgress,
+    });
 
     await onProgress?.({ type: 'db', message: 'students — select by group_id (cache)' });
     const { data: groupStudents } = await supabase.from('students').select('id, name').eq('group_id', group.id);
