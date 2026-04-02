@@ -4,7 +4,6 @@ import { supabase } from '@/lib/supabase/client';
 export default function StatsGrid({ onUpdateAll }: { onUpdateAll?: () => void }) {
   const [stats, setStats] = useState({
     totalStudents: 0,
-    attendanceRate: 0,
     activeCourses: 0,
   });
 
@@ -15,16 +14,6 @@ export default function StatsGrid({ onUpdateAll }: { onUpdateAll?: () => void })
         .from('students')
         .select('*', { count: 'exact', head: true });
 
-      const { data: attendance } = await supabase
-        .from('attendance_records')
-        .select('status');
-
-      let attendanceRate = 0;
-      if (attendance && attendance.length > 0) {
-        const presentCount = attendance.filter(a => a.status === 'Present').length;
-        attendanceRate = Math.round((presentCount / attendance.length) * 1000) / 10;
-      }
-
       const { count: activeCourses } = await supabase
         .from('courses')
         .select('*', { count: 'exact', head: true })
@@ -32,7 +21,6 @@ export default function StatsGrid({ onUpdateAll }: { onUpdateAll?: () => void })
 
       setStats({
         totalStudents: totalStudents || 0,
-        attendanceRate,
         activeCourses: activeCourses || 0,
       });
     }
@@ -53,7 +41,7 @@ export default function StatsGrid({ onUpdateAll }: { onUpdateAll?: () => void })
   }, []);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12 animate-fade-up">
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12 animate-fade-up">
       <div className="bg-surface-container-lowest p-6 rounded-[1rem] shadow-sm flex flex-col justify-between h-48 group hover:translate-y-[-4px] transition-transform">
         <div className="flex justify-between items-start">
           <span className="material-symbols-outlined text-primary bg-primary/10 p-2 rounded-lg">
@@ -63,22 +51,6 @@ export default function StatsGrid({ onUpdateAll }: { onUpdateAll?: () => void })
         <div>
           <div className="text-4xl font-black text-on-surface font-headline">{stats.totalStudents}</div>
           <div className="text-sm font-medium text-on-surface-variant">Total Students</div>
-        </div>
-      </div>
-
-      <div className="bg-surface-container-lowest p-6 rounded-[1rem] shadow-sm flex flex-col justify-between h-48 group hover:translate-y-[-4px] transition-transform">
-        <div className="flex justify-between items-start">
-          <span className="material-symbols-outlined text-tertiary bg-tertiary/10 p-2 rounded-lg">
-            checklist_rtl
-          </span>
-          <span className="text-xs font-bold text-tertiary">Overall</span>
-        </div>
-        <div>
-          <div className="text-4xl font-black text-on-surface font-headline">{stats.attendanceRate}%</div>
-          <div className="text-sm font-medium text-on-surface-variant">Attendance Rate</div>
-          <div className="w-full h-1.5 bg-surface-container-highest rounded-full mt-3 overflow-hidden">
-            <div className="h-full bg-tertiary" style={{ width: `${stats.attendanceRate}%` }}></div>
-          </div>
         </div>
       </div>
 

@@ -187,6 +187,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     setIsScanning(true);
     setError('');
     setPreviewScanError('');
+    setImportDbLog([]);
     setSheetProgressTab(0);
     setSheetProgressTotal(1);
     try {
@@ -223,6 +224,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     setIsScanning(true);
     setPreviewScanError('');
     setError('');
+    setImportDbLog([]);
     setSheetProgressTab(0);
     setSheetProgressTotal(1);
     try {

@@ -16,12 +16,16 @@ type ActiveCourseRow = {
   course_teachers: { teachers: Teacher | null }[] | null;
 };
 
+const groupNameCollator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+
 function sortActiveCourses(a: ActiveCourseRow, b: ActiveCourseRow): number {
-  const ga = a.groups?.name ?? '\uffff';
-  const gb = b.groups?.name ?? '\uffff';
-  const byGroup = ga.localeCompare(gb);
+  const ga = (a.groups?.name ?? '').trim();
+  const gb = (b.groups?.name ?? '').trim();
+  const gaKey = ga === '' ? '\uffff' : ga;
+  const gbKey = gb === '' ? '\uffff' : gb;
+  const byGroup = groupNameCollator.compare(gaKey, gbKey);
   if (byGroup !== 0) return byGroup;
-  return a.name.localeCompare(b.name);
+  return groupNameCollator.compare(a.name.trim(), b.name.trim());
 }
 
 export default function ActiveCoursesPanel() {
@@ -37,7 +41,7 @@ export default function ActiveCoursesPanel() {
         name,
         sync_completed,
         group_id,
-        groups ( id, name ),
+        groups:groups!group_id ( id, name ),
         course_teachers (
           teachers ( id, name )
         )

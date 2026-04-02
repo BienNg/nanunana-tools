@@ -195,6 +195,7 @@ export default function GroupCard({
     setPreviewScanError('');
     setOpen(false);
     setIsScanning(true);
+    setImportDbLog([]);
     try {
       const finalResult = await streamSheetScan(url, setProgressMessage);
       if (finalResult?.success) {
@@ -220,6 +221,7 @@ export default function GroupCard({
     setIsScanning(true);
     setPreviewScanError('');
     setActionError('');
+    setImportDbLog([]);
     try {
       const finalResult = await streamSheetScan(url, setProgressMessage);
       if (finalResult?.success) {
