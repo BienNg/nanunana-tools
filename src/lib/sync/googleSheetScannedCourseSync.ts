@@ -1,6 +1,6 @@
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import { dbTimeToComparable, normalizeTeacherCellForCompare, sheetStudentStatusForCompare } from '@/lib/sync/googleSheetReimportDiff';
-import { isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
+import { isIsoDateStrictlyAfterLocalToday, isSheetDatumStrictlyAfterToday } from '@/lib/sync/currentCourseSheet';
 import { datumChronoAppliesToRow, isDatumChronologyOutlier } from '@/lib/sync/sheetSessionDatumChronology';
 import { newSheetRowExcludedFromImport } from '@/lib/sync/reviewImportValidation';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
@@ -33,6 +33,7 @@ type SheetParsedSession = {
   gridRowIndex: number;
   previewRowIndex: number;
   folien: string;
+  datumRaw: string;
   parsedDate: string | null;
   startTime: string | null;
   endTime: string | null;
@@ -95,10 +96,12 @@ function parseSheetDate(raw: string | undefined | null): string | null {
 
 function classifySessionDateSkip(
   parsedDate: string | null,
+  datumRaw: string | undefined | null,
   hasDatumColumn: boolean,
   now: Date
 ): SessionDateSkipReason {
   void hasDatumColumn;
+  if (isSheetDatumStrictlyAfterToday(datumRaw, now)) return 'future';
   if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, now)) return 'future';
   return null;
 }
@@ -379,6 +382,7 @@ export async function syncOneScannedCourseSheet(
       gridRowIndex: rowIndex,
       previewRowIndex: rowIndex,
       folien: String(row.values['Folien'] ?? ''),
+      datumRaw: String(row.values['Datum'] ?? ''),
       parsedDate,
       startTime: normalizeTimeForDb(String(row.values['von'] ?? '')),
       endTime: normalizeTimeForDb(String(row.values['bis'] ?? '')),
@@ -414,7 +418,7 @@ export async function syncOneScannedCourseSheet(
       skippedSessionRows += 1;
       continue;
     }
-    const dateSkipReason = classifySessionDateSkip(sess.parsedDate, hasDatumColumn, scannedSyncNow);
+    const dateSkipReason = classifySessionDateSkip(sess.parsedDate, sess.datumRaw, hasDatumColumn, scannedSyncNow);
     if (dateSkipReason === 'future') {
       skippedSessionRows += 1;
       autoSkippedFutureRows += 1;

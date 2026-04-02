@@ -1,7 +1,7 @@
 import { parseSpreadsheetIdFromUrl } from '@/lib/googleSheets/parseSpreadsheetIdFromUrl';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
-import { isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
+import { isIsoDateStrictlyAfterLocalToday, isSheetDatumStrictlyAfterToday } from '@/lib/sync/currentCourseSheet';
 import type {
   ScanGoogleSheetResult,
   ScannedSampleRow,
@@ -95,10 +95,12 @@ function normalizeFolienKey(value: string | undefined | null): string {
 
 function classifySessionDateSkip(
   parsedDate: string | null,
+  datumRaw: string | undefined | null,
   hasDatumColumn: boolean,
   now: Date
 ): SessionDateSkipReason {
   void hasDatumColumn;
+  if (isSheetDatumStrictlyAfterToday(datumRaw, now)) return 'future';
   if (parsedDate && isIsoDateStrictlyAfterLocalToday(parsedDate, now)) return 'future';
   return null;
 }
@@ -261,8 +263,9 @@ export function analyzeScannedSheetSessionsForImport(sheet: ScannedSheet, now: D
     if (autoSkippedNoDateTeacherRows.has(rIdx)) {
       continue;
     }
-    const parsedDate = parseSheetDate(row.values['Datum'] ?? '');
-    const reason = classifySessionDateSkip(parsedDate, hasDatumColumn, now);
+    const datumRaw = row.values['Datum'] ?? '';
+    const parsedDate = parseSheetDate(datumRaw);
+    const reason = classifySessionDateSkip(parsedDate, datumRaw, hasDatumColumn, now);
     if (reason === 'future') {
       autoSkippedFutureRows += 1;
       continue;

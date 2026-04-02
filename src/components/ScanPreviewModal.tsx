@@ -20,6 +20,7 @@ import {
 import { GROUP_CLASS_TYPE_OPTIONS } from '@/lib/courseDuration';
 import {
   findLastTaughtSessionRowIndex,
+  isSheetDatumStrictlyAfterToday,
   isSheetDatumOnOrBeforeToday,
   parseSheetDatum,
 } from '@/lib/sync/currentCourseSheet';
@@ -1132,7 +1133,11 @@ export default function ScanPreviewModal({
                       const rows = activeSheet.sampleRows;
                       const rowIsSkipped = activeSkippedRows.has(rIdx);
                       const rowIsTrailingNoDateTeacher = activeTrailingNoDateTeacherRows.has(rIdx);
-                      const rowIsAutoSkipped = rowIsSkipped || rowIsTrailingNoDateTeacher;
+                      const rowIsFutureSession = isSheetDatumStrictlyAfterToday(
+                        row.values['Datum'] ?? '',
+                        previewValidationNow
+                      );
+                      const rowIsAutoSkipped = rowIsSkipped || rowIsTrailingNoDateTeacher || rowIsFutureSession;
                       const rowOutsideValidation = rowOutsideValidationScope(
                         rows,
                         rIdx,
