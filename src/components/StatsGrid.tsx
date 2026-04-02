@@ -15,19 +15,25 @@ export default function StatsGrid({
 
   useEffect(() => {
     async function fetchStats() {
-      // Very basic fetch
-      const { count: totalStudents } = await supabase
-        .from('students')
-        .select('*', { count: 'exact', head: true });
-
-      const { count: activeCourses } = await supabase
+      const { data: activeCourseRows, count: activeCourses } = await supabase
         .from('courses')
-        .select('*', { count: 'exact', head: true })
+        .select('id', { count: 'exact' })
         .or('sync_completed.is.false,sync_completed.is.null');
 
+      const activeCourseIds = (activeCourseRows ?? []).map((r) => r.id);
+
+      let totalStudents = 0;
+      if (activeCourseIds.length > 0) {
+        const { data: enrollRows } = await supabase
+          .from('course_students')
+          .select('student_id')
+          .in('course_id', activeCourseIds);
+        totalStudents = new Set((enrollRows ?? []).map((r) => r.student_id)).size;
+      }
+
       setStats({
-        totalStudents: totalStudents || 0,
-        activeCourses: activeCourses || 0,
+        totalStudents,
+        activeCourses: activeCourses ?? 0,
       });
     }
 
@@ -56,7 +62,7 @@ export default function StatsGrid({
         </div>
         <div>
           <div className="text-4xl font-black text-on-surface font-headline">{stats.totalStudents}</div>
-          <div className="text-sm font-medium text-on-surface-variant">Total Students</div>
+          <div className="text-sm font-medium text-on-surface-variant">Students in active courses</div>
         </div>
       </div>
 
