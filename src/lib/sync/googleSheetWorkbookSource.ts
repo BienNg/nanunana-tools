@@ -406,7 +406,7 @@ type XlsxFetchAccessHint = 'google_sheet_export' | 'google_drive_download' | 'di
 
 function messageForXlsxAccessDenied(hint: XlsxFetchAccessHint, status: number): string {
   if (hint === 'google_sheet_export') {
-    return `Could not download the spreadsheet (HTTP ${status}). The sync server has no Google login, so the file must be reachable without signing in. In Google Sheets: Share → General access → set to “Anyone with the link” with Viewer (or wider), then try again.`;
+    return `Spreadsheet download failed (HTTP ${status}). Set Google Sheets sharing to “Anyone with the link” (Viewer) and try again.`;
   }
   if (hint === 'google_drive_download') {
     return `Could not download the file from Google Drive (HTTP ${status}). Share the file so “Anyone with the link” can view it (Share → General access), then try again.`;
