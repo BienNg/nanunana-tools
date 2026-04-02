@@ -7,6 +7,10 @@ import {
 } from '@/lib/courseDuration';
 import HoursTaughtChartClient from './HoursTaughtChartClient';
 
+type HoursTaughtChartClientData = Parameters<typeof HoursTaughtChartClient>[0]['data'];
+type HoursTaughtChartDataPoint = HoursTaughtChartClientData[number];
+type HoursTaughtClassType = HoursTaughtChartDataPoint['classTypeHours'][number]['classType'];
+
 function yearMonthFromLessonDate(dateStr: unknown): string | null {
   if (typeof dateStr !== 'string') return null;
   const m = dateStr.match(/^(\d{4}-\d{2})/);
@@ -108,8 +112,8 @@ export default async function HoursTaughtChart() {
     'A',
     'P',
   ];
-  const UNKNOWN_CLASS_TYPE_KEY = 'Unknown';
-  type ClassTypeBucketKey = GroupClassType | typeof UNKNOWN_CLASS_TYPE_KEY;
+  const UNKNOWN_CLASS_TYPE_KEY: Extract<HoursTaughtClassType, 'Unknown'> = 'Unknown';
+  type ClassTypeBucketKey = Exclude<HoursTaughtClassType, 'Unknown'> | typeof UNKNOWN_CLASS_TYPE_KEY;
 
   const minutesByYearMonth: Record<string, number> = {};
   const minutesByYearMonthAndClassType: Record<string, Record<ClassTypeBucketKey, number>> = {};
@@ -138,7 +142,7 @@ export default async function HoursTaughtChart() {
     }
   }
 
-  const chartData = trendMonthBuckets.map(({ ym, label }) => {
+  const chartData: HoursTaughtChartClientData = trendMonthBuckets.map(({ ym, label }) => {
     const minutes = minutesByYearMonth[ym] ?? 0;
     return {
       ym,

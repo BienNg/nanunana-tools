@@ -84,7 +84,10 @@ export default function HoursTaughtChartClient({ data }: { data: ChartData[] }) 
                     style={{ height: barTrackPx }}
                   >
                     {/* Tooltip / Value Label */}
-                    <div className="absolute -top-8 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none flex flex-col items-center z-20">
+                    <div
+                      className="absolute opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none flex flex-col items-center z-20"
+                      style={{ bottom: `${barPx + 10}px` }}
+                    >
                       <div className="bg-inverse-surface text-inverse-on-surface text-[10px] font-bold px-2 py-1 rounded-md shadow-md whitespace-nowrap min-w-[120px]">
                         <div className="mb-1">{hoursStr} hrs total</div>
                         {nonZeroClassTypeHours.length > 0 ? (
