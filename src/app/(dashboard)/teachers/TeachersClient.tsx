@@ -105,8 +105,57 @@ export default function TeachersClient({
 }) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
+  const [teachersByStatus, setTeachersByStatus] = useState<Record<StatusFilter, Teacher[]>>({
+    active: initialTeachers,
+    all: [],
+    inactive: [],
+  });
+  const [teachers, setTeachers] = useState<Teacher[]>(initialTeachers);
+  const [isLoadingHours, setIsLoadingHours] = useState(false);
 
-  const filteredTeachers = initialTeachers.filter((teacher) => {
+  useEffect(() => {
+    let cancelled = false;
+
+    const cached = teachersByStatus[statusFilter];
+    if (cached.length > 0) {
+      setTeachers(cached);
+      setIsLoadingHours(false);
+      return;
+    }
+
+    // If "all" has already been loaded, derive inactive without another server roundtrip.
+    if (statusFilter === 'inactive' && teachersByStatus.all.length > 0) {
+      const inactiveTeachers = teachersByStatus.all.filter((teacher) => teacher.status === 'inactive');
+      setTeachersByStatus((prev) => ({ ...prev, inactive: inactiveTeachers }));
+      setTeachers(inactiveTeachers);
+      setIsLoadingHours(false);
+      return;
+    }
+
+    const loadTeachers = async () => {
+      setIsLoadingHours(true);
+      setTeachers([]);
+      try {
+        const response = await fetch(`/api/teachers/hours?status=${statusFilter}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Failed to load teachers (${response.status})`);
+        const payload = (await response.json()) as { teachers: Teacher[] };
+        if (cancelled) return;
+        setTeachersByStatus((prev) => ({ ...prev, [statusFilter]: payload.teachers }));
+        setTeachers(payload.teachers);
+      } catch (error) {
+        console.error(error);
+      } finally {
+        if (!cancelled) setIsLoadingHours(false);
+      }
+    };
+
+    void loadTeachers();
+    return () => {
+      cancelled = true;
+    };
+  }, [statusFilter, teachersByStatus]);
+
+  const filteredTeachers = teachers.filter((teacher) => {
     if (statusFilter === 'active' && teacher.status !== 'active') return false;
     if (statusFilter === 'inactive' && teacher.status !== 'inactive') return false;
     return teacher.name.toLowerCase().includes(search.toLowerCase());
@@ -159,6 +208,26 @@ export default function TeachersClient({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
+            {isLoadingHours ? (
+              Array.from({ length: 6 }).map((_, rowIdx) => (
+                <tr key={`skeleton-${rowIdx}`} className="animate-pulse">
+                  <td className="py-4 px-6">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-slate-200" />
+                      <div className="h-4 w-32 rounded bg-slate-200" />
+                    </div>
+                  </td>
+                  {monthColumnLabels.map((label) => (
+                    <td key={`skeleton-${rowIdx}-${label}`} className="py-4 px-6">
+                      <div className="h-4 w-10 rounded bg-slate-200" />
+                    </td>
+                  ))}
+                  <td className="py-4 px-6">
+                    <div className="h-4 w-24 rounded bg-slate-200" />
+                  </td>
+                </tr>
+              ))
+            ) : null}
             {filteredTeachers.map((teacher) => (
               <tr 
                 key={teacher.id} 
@@ -194,7 +263,7 @@ export default function TeachersClient({
                 </td>
               </tr>
             ))}
-            {filteredTeachers.length === 0 && (
+            {!isLoadingHours && filteredTeachers.length === 0 && (
               <tr>
                 <td colSpan={2 + monthColumnLabels.length} className="py-12 text-center text-slate-500">
                   <div className="flex flex-col items-center justify-center">
