@@ -495,6 +495,12 @@ export default function ScanPreviewModal({
               >
                 {isUpdatingExistingGroupCourses ? 'Updating existing group & courses' : 'New sheet'}
               </span>
+              {isUpdatingExistingGroupCourses ? (
+                <p className="mt-2 max-w-xl text-xs text-slate-600 leading-relaxed">
+                  Courses already marked completed in the database are auto-skipped on reimport: no diff checks for
+                  those tabs and they are not written on import.
+                </p>
+              ) : null}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -654,15 +660,7 @@ export default function ScanPreviewModal({
               aria-live="polite"
             >
               <h3 className="text-sm font-semibold text-amber-950">Unknown class type</h3>
-              <p className="mt-1 text-xs text-amber-900">
-                The workbook title &ldquo;{scanResult.workbookTitle}&rdquo; does not contain a recognized class type.
-                Choose a class type below for this import, or rename the spreadsheet / .xlsx and use{' '}
-                <strong>Resync</strong>.
-              </p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <label htmlFor="manual-workbook-class-type" className="text-xs font-medium text-amber-950">
-                  Class type
-                </label>
+              <div className="mt-3">
                 <select
                   id="manual-workbook-class-type"
                   value={manualWorkbookClassType}

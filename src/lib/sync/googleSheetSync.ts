@@ -1201,23 +1201,40 @@ export async function scanGoogleSheet(
         const courses = (courseRows ?? []) as ExistingCourseRow[];
         const courseIdBySheet = new Map<string, string>();
         const matchedCourseIds = new Set<string>();
+        const completedMatchedCourseIds = new Set<string>();
         for (const sh of scannedSheets) {
           const hit = findExistingCourseForScannedTab(courses, sh.title, sh.sheetUrl);
           if (hit) {
-            courseIdBySheet.set(`${sh.visibleOrderIndex}:${sh.title}`, hit.id);
+            const sheetKey = `${sh.visibleOrderIndex}:${sh.title}`;
+            courseIdBySheet.set(sheetKey, hit.id);
             matchedCourseIds.add(hit.id);
+            if (Boolean(hit.sync_completed)) {
+              completedMatchedCourseIds.add(hit.id);
+              // Completed existing courses are treated as unchanged in reimport:
+              // skip diff/validation work and keep them out of import writes.
+              sh.reimportDiff = {
+                courseId: hit.id,
+                changedCellsByRow: {},
+                changeHintsByRow: {},
+                newSessionRowIndices: [],
+                hasStructuralChanges: false,
+              };
+              sh.analyzedSyncCompleted = true;
+            }
           }
         }
-        if (matchedCourseIds.size > 0) {
+        const diffEligibleCourseIds = [...matchedCourseIds].filter((id) => !completedMatchedCourseIds.has(id));
+        if (diffEligibleCourseIds.length > 0) {
           const snapshotsMap = await loadLessonSnapshotsMapForCourses(
             supabase,
-            [...matchedCourseIds],
+            diffEligibleCourseIds,
             onProgress
           );
           const now = new Date();
           for (const sh of scannedSheets) {
             const cid = courseIdBySheet.get(`${sh.visibleOrderIndex}:${sh.title}`);
             if (!cid) continue;
+            if (completedMatchedCourseIds.has(cid)) continue;
             const snaps = snapshotsMap.get(cid) ?? [];
             const diff = buildReimportDiffForSheet(sh, cid, snaps, now);
             sh.reimportDiff = diff;

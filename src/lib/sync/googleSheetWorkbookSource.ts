@@ -402,9 +402,27 @@ function fileNameFromUrl(url: string): string | null {
   }
 }
 
-async function fetchXlsxBytesFromUrl(url: string): Promise<{ bytes: Uint8Array; fileName: string | null }> {
+type XlsxFetchAccessHint = 'google_sheet_export' | 'google_drive_download' | 'direct_url';
+
+function messageForXlsxAccessDenied(hint: XlsxFetchAccessHint, status: number): string {
+  if (hint === 'google_sheet_export') {
+    return `Could not download the spreadsheet (HTTP ${status}). The sync server has no Google login, so the file must be reachable without signing in. In Google Sheets: Share → General access → set to “Anyone with the link” with Viewer (or wider), then try again.`;
+  }
+  if (hint === 'google_drive_download') {
+    return `Could not download the file from Google Drive (HTTP ${status}). Share the file so “Anyone with the link” can view it (Share → General access), then try again.`;
+  }
+  return `Failed to download .xlsx file: HTTP ${status}. If this URL is on Google Drive or similar, share it so anyone with the link can view it without signing in.`;
+}
+
+async function fetchXlsxBytesFromUrl(
+  url: string,
+  accessHint: XlsxFetchAccessHint = 'direct_url'
+): Promise<{ bytes: Uint8Array; fileName: string | null }> {
   const response = await fetch(url, { redirect: 'follow' });
   if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(messageForXlsxAccessDenied(accessHint, response.status));
+    }
     throw new Error(`Failed to download .xlsx file: HTTP ${response.status}`);
   }
   const arrayBuffer = await response.arrayBuffer();
@@ -430,7 +448,7 @@ export async function loadWorkbookFromSource(
           message: 'Sheets API failed, trying XLSX export…',
         });
         const exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=xlsx`;
-        const downloaded = await fetchXlsxBytesFromUrl(exportUrl);
+        const downloaded = await fetchXlsxBytesFromUrl(exportUrl, 'google_sheet_export');
         const fromXlsx = await loadWorkbookFromXlsxBytes(
           downloaded.fileName ?? `${spreadsheetId}.xlsx`,
           downloaded.bytes,
@@ -448,7 +466,7 @@ export async function loadWorkbookFromSource(
     if (driveFileId) {
       await onProgress?.({ type: 'status', message: 'Downloading Drive .xlsx file…' });
       const directDownloadUrl = `https://drive.google.com/uc?export=download&id=${driveFileId}`;
-      const downloaded = await fetchXlsxBytesFromUrl(directDownloadUrl);
+      const downloaded = await fetchXlsxBytesFromUrl(directDownloadUrl, 'google_drive_download');
       return loadWorkbookFromXlsxBytes(downloaded.fileName ?? `${driveFileId}.xlsx`, downloaded.bytes, onProgress);
     }
 
