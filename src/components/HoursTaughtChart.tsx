@@ -1,5 +1,6 @@
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import {
+  compareLessonsChronologically,
   GroupClassType,
   lessonDurationMinutes,
   normalizeGroupClassType,
@@ -68,14 +69,7 @@ export default async function HoursTaughtChart() {
   });
 
   Object.values(lessonsByCourseId).forEach((courseLessons) => {
-    courseLessons.sort((a, b) => {
-      const dateA = a.date ? new Date(a.date).getTime() : 0;
-      const dateB = b.date ? new Date(b.date).getTime() : 0;
-      if (dateA !== dateB) return dateA - dateB;
-      const timeA = a.start_time || '';
-      const timeB = b.start_time || '';
-      return timeA.localeCompare(timeB);
-    });
+    courseLessons.sort(compareLessonsChronologically);
 
     courseLessons.forEach((lesson, index) => {
       const classType = classTypeByCourseId.get(lesson.course_id) ?? null;

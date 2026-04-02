@@ -6,6 +6,7 @@ import { useState } from 'react';
 type SessionRow = {
   id: string;
   course_id: string;
+  slide_id?: string | null;
   date: string | null;
   start_time?: string | null;
   end_time?: string | null;
@@ -73,7 +74,7 @@ function SessionsTable({ sessions }: { sessions: SessionRow[] }) {
                     </div>
                   </td>
                   <td className="py-5 pr-4">
-                    <p className="font-bold text-on-surface">{session.courses?.name ?? '—'}</p>
+                    <p className="font-bold text-on-surface">{session.slide_id ?? '—'}</p>
                   </td>
                   <td className="py-5 pr-4">{totalCount > 0 ? `${presentCount} / ${totalCount}` : '-'}</td>
                   <td className="py-5 pr-4">{durationHrs} hrs</td>

@@ -52,7 +52,13 @@ import {
   parseStudentAliasResolutions,
 } from '@/lib/sync/googleSheetStudentSync';
 import { syncOneScannedCourseSheet } from '@/lib/sync/googleSheetScannedCourseSync';
-import { sheetHasRemainingStructuralDiff } from '@/lib/sync/reviewImportValidation';
+import {
+  datumChronoInReimportScope,
+  newSheetRowExcludedFromImport,
+  sampleRowsDatumChronologyScope,
+  sheetHasRemainingStructuralDiff,
+  trailingNoDateTeacherSessionRows,
+} from '@/lib/sync/reviewImportValidation';
 import type { TeacherAliasResolution } from '@/lib/sync/googleSheetTeacherSync';
 import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
 
@@ -174,6 +180,45 @@ function isGroupSyncCompleted(
   allImportedCoursesCompleted: boolean
 ): boolean {
   return skippedAfterCurrentCourse === 0 && allImportedCoursesCompleted;
+}
+
+function reviewedSnapshotImportableSessionRowIndices(
+  sheet: ScannedSheet,
+  skippedPreviewRows: ReadonlySet<number>,
+  skippedAttendanceCells: ReadonlySet<string>,
+  maxValidationRowIndex: number | null,
+  now: Date
+): number[] {
+  const trailingNoDateTeacherRows = trailingNoDateTeacherSessionRows(sheet.sampleRows);
+  const chronoScope = sampleRowsDatumChronologyScope(
+    sheet.sampleRows,
+    skippedPreviewRows,
+    trailingNoDateTeacherRows,
+    maxValidationRowIndex,
+    now
+  );
+  const included: number[] = [];
+  for (let rowIndex = 0; rowIndex < sheet.sampleRows.length; rowIndex++) {
+    if (skippedPreviewRows.has(rowIndex)) continue;
+    if (trailingNoDateTeacherRows.has(rowIndex)) continue;
+    if (isSheetDatumStrictlyAfterToday(sheet.sampleRows[rowIndex]?.values['Datum'] ?? '', now)) continue;
+    if (datumChronoInReimportScope(sheet, rowIndex) && isDatumChronologyOutlier(chronoScope, rowIndex)) continue;
+    if (
+      newSheetRowExcludedFromImport(
+        sheet,
+        rowIndex,
+        skippedPreviewRows,
+        skippedAttendanceCells,
+        trailingNoDateTeacherRows,
+        maxValidationRowIndex,
+        now
+      )
+    ) {
+      continue;
+    }
+    included.push(rowIndex);
+  }
+  return included;
 }
 
 function analyzeRawSheetSessionSkips(
@@ -642,15 +687,15 @@ async function syncOneCourseSheet(
     });
   }
 
-  let trailingNoDateTeacher = true;
+  let trailingNoDate = true;
   const autoSkippedNoDateTeacherPreviewRows = new Set<number>();
   for (let i = sessionDrafts.length - 1; i >= 0; i--) {
     const sess = sessionDrafts[i];
-    const noDateTeacher = !sess.parsedDate && !sess.teacherCell;
-    if (trailingNoDateTeacher && noDateTeacher) {
+    const noDate = !sess.parsedDate;
+    if (trailingNoDate && noDate) {
       autoSkippedNoDateTeacherPreviewRows.add(sess.previewRowIndex);
     } else {
-      trailingNoDateTeacher = false;
+      trailingNoDate = false;
     }
   }
 
@@ -896,6 +941,8 @@ export type { ScannedSampleRow };
 /** When the tab matches an existing course (name + sheet URL), preview only flags updates vs the database. */
 export type ScannedSheetReimportDiff = {
   courseId: string;
+  /** Number of stored lessons currently in DB for this matched course, used for delete planning. */
+  existingLessonCount: number;
   /** Sample row index → structural lesson column keys that differ from the stored lesson (Folien, Datum, von, bis, Lehrer). */
   changedCellsByRow: Record<number, string[]>;
   /** Tooltip copy for each cell in `changedCellsByRow` (same keys). */
@@ -1260,6 +1307,7 @@ export async function scanGoogleSheet(
               // skip diff/validation work and keep them out of import writes.
               sh.reimportDiff = {
                 courseId: hit.id,
+                existingLessonCount: 0,
                 changedCellsByRow: {},
                 changeHintsByRow: {},
                 newSessionRowIndices: [],
@@ -1654,6 +1702,21 @@ export async function runReviewedSnapshotSync(
       const skippedAttendanceCells = new Set(
         skippedAttendanceCellsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []
       );
+      const importableSessionRows = reviewedSnapshotImportableSessionRowIndices(
+        sheet,
+        skippedPreviewRows,
+        skippedAttendanceCells,
+        maxValidationRowIndex,
+        reviewedImportNow
+      );
+      if (importableSessionRows.length === 0) {
+        skipped++;
+        await onProgress?.({
+          type: 'status',
+          message: `[${sheet.title}] No importable session rows remain after review — not imported.`,
+        });
+        continue;
+      }
       if (sheet.reimportDiff && !sheetHasRemainingStructuralDiff(sheet, skippedPreviewRows)) {
         skipped++;
         await onProgress?.({

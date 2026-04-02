@@ -139,16 +139,23 @@ export function findExistingCourseForScannedTab(
   sheetTitle: string,
   sheetUrl: string | null
 ): ExistingCourseRow | null {
+  const preferCompleted = (rows: ExistingCourseRow[]): ExistingCourseRow | null => {
+    if (rows.length === 0) return null;
+    const completed = rows.find((c) => Boolean(c.sync_completed));
+    return completed ?? rows[0] ?? null;
+  };
   const sameName = courses.filter((c) => c.name === sheetTitle);
   if (sameName.length === 0) return null;
   if (sameName.length === 1) return sameName[0] ?? null;
   if (sheetUrl) {
-    const byUrl = sameName.find((c) => courseDbUrlMatchesTabUrl(c.sheet_url, sheetUrl));
-    if (byUrl) return byUrl;
+    const byUrl = sameName.filter((c) => courseDbUrlMatchesTabUrl(c.sheet_url, sheetUrl));
+    const pickedByUrl = preferCompleted(byUrl);
+    if (pickedByUrl) return pickedByUrl;
   }
-  const withoutStoredUrl = sameName.find((c) => !(c.sheet_url ?? '').trim());
-  if (withoutStoredUrl) return withoutStoredUrl;
-  return sameName[0] ?? null;
+  const withoutStoredUrl = sameName.filter((c) => !(c.sheet_url ?? '').trim());
+  const pickedWithoutUrl = preferCompleted(withoutStoredUrl);
+  if (pickedWithoutUrl) return pickedWithoutUrl;
+  return preferCompleted(sameName);
 }
 
 export function normalizeTeacherCellForCompare(raw: string | undefined | null): string {
@@ -232,16 +239,14 @@ function trailingNoDateTeacherRowIndices(
   rows: ReadonlyArray<{ values: Record<string, string> }>
 ): ReadonlySet<number> {
   const out = new Set<number>();
-  let allFollowingNoDateTeacher = true;
+  let allFollowingNoDate = true;
   for (let rIdx = rows.length - 1; rIdx >= 0; rIdx--) {
     const row = rows[rIdx];
     const hasDate = String(row.values['Datum'] ?? '').trim().length > 0;
-    const hasTeacher = String(row.values['Lehrer'] ?? '').trim().length > 0;
-    const noDateTeacher = !hasDate && !hasTeacher;
-    if (allFollowingNoDateTeacher && noDateTeacher) {
+    if (allFollowingNoDate && !hasDate) {
       out.add(rIdx);
     } else {
-      allFollowingNoDateTeacher = false;
+      allFollowingNoDate = false;
     }
   }
   return out;
@@ -457,6 +462,7 @@ export function buildReimportDiffForSheet(
 
   return {
     courseId,
+    existingLessonCount: dbLessons.length,
     changedCellsByRow,
     changeHintsByRow,
     newSessionRowIndices,

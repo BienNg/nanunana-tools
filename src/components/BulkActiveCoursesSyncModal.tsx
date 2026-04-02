@@ -436,9 +436,12 @@ export default function BulkActiveCoursesSyncModal({
     _selectedStudentAliasResolutions: StudentAliasResolution[],
     _selectedNewTeacherCreateAcknowledgements: string[],
     _selectedWorkbookClassType?: WorkbookClassType,
-    reviewStateByGroupId?: Record<string, ReviewImportSlice>
+    reviewStateByGroupId?: Record<string, ReviewImportSlice>,
+    groupIdsToImport?: string[]
   ) => {
-    const readyGroupIds = targets.map((t) => t.id).filter((id) => Boolean(scanResultsByGroup[id]));
+    const baseGroupIds =
+      groupIdsToImport && groupIdsToImport.length > 0 ? groupIdsToImport : targets.map((t) => t.id);
+    const readyGroupIds = baseGroupIds.filter((id) => Boolean(scanResultsByGroup[id]));
     if (readyGroupIds.length === 0) return;
     setIsImportingAll(true);
     try {

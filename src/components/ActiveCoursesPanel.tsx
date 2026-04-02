@@ -189,7 +189,11 @@ export default function ActiveCoursesPanel({ bodyRefreshKey = 0 }: { bodyRefresh
                   </div>
                 </div>
                 <div className="flex items-center gap-1 shrink-0 self-end sm:self-center">
-                  <CourseActionsMenu courseId={course.id} courseName={course.name} />
+                  <CourseActionsMenu
+                    courseId={course.id}
+                    courseName={course.name}
+                    syncCompleted={course.sync_completed ?? false}
+                  />
                   <Link
                     href={`/courses/${course.id}`}
                     className="text-primary opacity-0 group-hover:opacity-100 transition-opacity p-1 -m-1 rounded-full hover:bg-primary/5"

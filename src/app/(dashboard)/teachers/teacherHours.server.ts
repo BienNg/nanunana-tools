@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import {
+  compareLessonsChronologically,
   lessonDurationMinutes,
   normalizeGroupClassType,
   normalizeGroupDefaultLessonMinutes,
@@ -274,11 +275,7 @@ export async function getTeachersWithHoursByStatus(statusFilter: StatusFilter): 
     }
 
     Object.values(lessonsByCourseId).forEach((courseLessons) => {
-      courseLessons.sort((a, b) => {
-        const dateA = a.date ? new Date(a.date).getTime() : 0;
-        const dateB = b.date ? new Date(b.date).getTime() : 0;
-        return dateA - dateB;
-      });
+      courseLessons.sort(compareLessonsChronologically);
     });
   }
 
@@ -291,11 +288,7 @@ export async function getTeachersWithHoursByStatus(statusFilter: StatusFilter): 
     for (const courseId of courseIdsForTeacher) {
       const courseLessons = lessonsByCourseId[courseId] ?? [];
       const matched = courseLessons.filter((lesson) => lessonMatchesAnyTeacherKey(lesson.teacher, lessonMatchKeys));
-      matched.sort((a, b) => {
-        const dateA = a.date ? new Date(a.date).getTime() : 0;
-        const dateB = b.date ? new Date(b.date).getTime() : 0;
-        return dateA - dateB;
-      });
+      matched.sort(compareLessonsChronologically);
       const defaultClassType = classTypeByCourseId.get(courseId) ?? null;
       const defaultLessonMinutes = defaultLessonMinutesByCourseId.get(courseId) ?? null;
       matched.forEach((lesson, index) => {

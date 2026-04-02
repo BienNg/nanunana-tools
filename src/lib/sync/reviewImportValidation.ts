@@ -103,17 +103,16 @@ export function isStudentEmptyViolation(
   return rowIndex > first && !studentCellHasAttendanceData(rows[rowIndex], studentName);
 }
 
+/** Trailing session rows with empty Datum are treated as future/planned and excluded from import scope. */
 export function trailingNoDateTeacherSessionRows(rows: ScannedSampleRow[]): ReadonlySet<number> {
   const out = new Set<number>();
-  let allFollowingNoDateTeacher = true;
+  let allFollowingNoDate = true;
   for (let i = rows.length - 1; i >= 0; i--) {
     const noDate = isEmptyCellValue(rows[i]?.values['Datum']);
-    const noTeacher = isEmptyCellValue(rows[i]?.values['Lehrer']);
-    const isNoDateTeacher = noDate && noTeacher;
-    if (allFollowingNoDateTeacher && isNoDateTeacher) {
+    if (allFollowingNoDate && noDate) {
       out.add(i);
     } else {
-      allFollowingNoDateTeacher = false;
+      allFollowingNoDate = false;
     }
   }
   return out;

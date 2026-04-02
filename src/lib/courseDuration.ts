@@ -1,6 +1,6 @@
 /**
  * Scheduled course duration from lesson rows + group class type.
- * Rules: Online_DE/VN → 1.5h per session; first session → 2h if actual span > 1h50m.
+ * Rules: Online_DE/VN → 1.5h per session; first session → 2h if actual span >= 1h45m.
  * Offline → 2.5h per session.
  * Other class types can use a group-level default lesson duration (minutes).
  * Fallback for M with no custom value is 1.25h.
@@ -19,6 +19,7 @@ export const GROUP_CLASS_TYPE_OPTIONS: readonly GroupClassType[] = [
 ];
 
 export type LessonForDuration = {
+  date?: string | null;
   start_time?: string | null;
   end_time?: string | null;
 };
@@ -118,7 +119,7 @@ export function lessonDurationMinutes(
     let sessionMinutes = 90;
     if (isFirst) {
       const actual = actualScheduleMinutes(lesson.start_time, lesson.end_time);
-      if (actual != null && actual > 110) sessionMinutes = 120;
+      if (actual != null && actual >= 105) sessionMinutes = 120;
     }
     return sessionMinutes;
   }
@@ -131,6 +132,24 @@ export function lessonDurationMinutes(
   if (defaultMinutes != null) return defaultMinutes;
 
   return actualScheduleMinutes(lesson.start_time, lesson.end_time) ?? 0;
+}
+
+/**
+ * Chronological lesson sort used before first-session duration logic.
+ * - Lessons with a valid date/time come first
+ * - Missing/invalid dates are pushed to the end
+ * - For same date, start_time is used as tie-breaker
+ */
+export function compareLessonsChronologically(
+  a: Pick<LessonForDuration, 'date' | 'start_time'>,
+  b: Pick<LessonForDuration, 'date' | 'start_time'>
+): number {
+  const dateA = a.date ? new Date(a.date).getTime() : Number.POSITIVE_INFINITY;
+  const dateB = b.date ? new Date(b.date).getTime() : Number.POSITIVE_INFINITY;
+  if (dateA !== dateB) return dateA - dateB;
+  const timeA = String(a.start_time ?? '');
+  const timeB = String(b.start_time ?? '');
+  return timeA.localeCompare(timeB);
 }
 
 /** Total scheduled minutes for a course. Pass lessons ordered by date/time (first session first). */

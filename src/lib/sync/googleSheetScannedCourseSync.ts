@@ -391,15 +391,15 @@ export async function syncOneScannedCourseSheet(
     });
   }
 
-  let trailingNoDateTeacher = true;
+  let trailingNoDate = true;
   const autoSkippedNoDateTeacherPreviewRows = new Set<number>();
   for (let i = sessionDrafts.length - 1; i >= 0; i--) {
     const sess = sessionDrafts[i];
-    const noDateTeacher = !sess.parsedDate && !sess.teacherCell;
-    if (trailingNoDateTeacher && noDateTeacher) {
+    const noDate = !sess.parsedDate;
+    if (trailingNoDate && noDate) {
       autoSkippedNoDateTeacherPreviewRows.add(sess.previewRowIndex);
     } else {
-      trailingNoDateTeacher = false;
+      trailingNoDate = false;
     }
   }
 

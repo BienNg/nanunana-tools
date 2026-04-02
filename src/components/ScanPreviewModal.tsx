@@ -31,6 +31,7 @@ import {
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import {
   countSheetValidationIssues,
+  newSheetRowExcludedFromImport,
   datumChronoInReimportScope,
   isEmptyCellValue,
   isStudentEmptyViolation,
@@ -209,7 +210,9 @@ type ScanPreviewModalProps = {
     newTeacherCreateAcknowledgements: string[],
     workbookClassType?: WorkbookClassType,
     /** Per-group review state so batch import keeps skips and alias picks from every group tab. */
-    reviewStateByGroupId?: Record<string, ReviewImportSlice>
+    reviewStateByGroupId?: Record<string, ReviewImportSlice>,
+    /** Explicit allow-list from review UI; groups outside this list must not be imported. */
+    groupIdsToImport?: string[]
   ) => void;
   isImportingAllGroups?: boolean;
   isConfirmAllGroupsDisabled?: boolean;
@@ -217,6 +220,14 @@ type ScanPreviewModalProps = {
 };
 
 type HoverHint = { text: string; x: number; y: number } | null;
+type PlannedGroupDbChanges = {
+  sessionsInserted: number;
+  sessionsUpdated: number;
+  sessionsDeleted: number;
+  teachersAdded: number;
+  studentsAdded: number;
+  totalChanges: number;
+};
 
 /** Stable empty maps so `?? {}` does not break memo deps with a new object each render. */
 const EMPTY_SKIPPED_ROWS: SkippedRowsBySheet = {};
@@ -242,6 +253,68 @@ function emptyReviewSlice(activeTab = 0): ReviewImportSlice {
     studentMergeByKey: {},
     manualWorkbookClassType: '',
   };
+}
+
+function parseTeacherNamesFromCell(raw: string | undefined | null): string[] {
+  if (raw == null || raw === '') return [];
+  const s = String(raw).trim();
+  if (!s) return [];
+  return s
+    .split(/[/,;\n]+|\s+und\s+/i)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+function includedSessionRowIndicesForImport(
+  sheet: ScannedSheet,
+  skippedRows: ReadonlySet<number>,
+  skippedAttendanceCells: ReadonlySet<string>,
+  maxValidationRowIndex: number | null,
+  now: Date
+): number[] {
+  const sessionDraftRows: number[] = [];
+  for (let rowIdx = 0; rowIdx < sheet.sampleRows.length; rowIdx++) {
+    if (skippedRows.has(rowIdx)) continue;
+    sessionDraftRows.push(rowIdx);
+  }
+  const trailingNoDateTeacherRows = new Set<number>();
+  let allFollowingNoDate = true;
+  for (let i = sessionDraftRows.length - 1; i >= 0; i--) {
+    const rowIdx = sessionDraftRows[i]!;
+    const row = sheet.sampleRows[rowIdx];
+    const hasDate = !isEmptyCellValue(row.values['Datum']);
+    if (allFollowingNoDate && !hasDate) trailingNoDateTeacherRows.add(rowIdx);
+    else allFollowingNoDate = false;
+  }
+  const chronoScope = sampleRowsDatumChronologyScope(
+    sheet.sampleRows,
+    skippedRows,
+    trailingNoDateTeacherRows,
+    maxValidationRowIndex,
+    now
+  );
+  const included: number[] = [];
+  for (const rowIdx of sessionDraftRows) {
+    const row = sheet.sampleRows[rowIdx]!;
+    if (trailingNoDateTeacherRows.has(rowIdx)) continue;
+    if (isSheetDatumStrictlyAfterToday(row.values['Datum'] ?? '', now)) continue;
+    if (datumChronoInReimportScope(sheet, rowIdx) && isDatumChronologyOutlier(chronoScope, rowIdx)) continue;
+    if (
+      newSheetRowExcludedFromImport(
+        sheet,
+        rowIdx,
+        skippedRows,
+        skippedAttendanceCells,
+        trailingNoDateTeacherRows,
+        maxValidationRowIndex,
+        now
+      )
+    ) {
+      continue;
+    }
+    included.push(rowIdx);
+  }
+  return included;
 }
 
 function makeReviewSheetKey(sheet: ScannedSheet): string {
@@ -341,6 +414,7 @@ export default function ScanPreviewModal({
   const [reviewSlicesByKey, setReviewSlicesByKey] = useState<Record<string, ReviewImportSlice>>({});
   const [openRowActionIndex, setOpenRowActionIndex] = useState<number | null>(null);
   const [hoverHint, setHoverHint] = useState<HoverHint>(null);
+  const [confirmAllError, setConfirmAllError] = useState('');
   const prevActiveGroupTabIdRef = useRef<string | undefined>(undefined);
   const persistPerGroupReview = Boolean(onSelectGroupTab);
   const reviewStorageKey = persistPerGroupReview ? (activeGroupTabId ?? '__none__') : '_single';
@@ -503,6 +577,163 @@ export default function ScanPreviewModal({
     return sheetIssueCounts.some((c) => c > 0);
   }, [isOpen, scanResult, mounted, sheetIssueCounts]);
 
+  const batchValidationByGroup = useMemo(() => {
+    if (!isOpen || !mounted || !onConfirmAllGroups || !batchScanResultsByGroup) return [];
+    const labelByGroupId = new Map(groupTabs.map((g) => [g.id, g.label]));
+    const now = new Date();
+    return Object.entries(batchScanResultsByGroup)
+      .map(([groupId, scan]) => {
+        const slice = reviewSlicesByKey[groupId] ?? emptyReviewSlice();
+        const skippedRowsBySheetForGroup = slice.skippedRowsBySheet ?? EMPTY_SKIPPED_ROWS;
+        const skippedAttendanceBySheetForGroup =
+          slice.skippedAttendanceCellsBySheet ?? EMPTY_SKIPPED_ATTENDANCE;
+        const cutoff = scan.currentCourseVisibleIndex;
+        const sheetIssues = scan.sheets
+          .map((sheet) => {
+            if (cutoff !== null && sheet.visibleOrderIndex > cutoff) return null;
+            const sheetKey = makeReviewSheetKey(sheet);
+            const skipped = new Set(skippedRowsBySheetForGroup[sheetKey] ?? []);
+            const skippedAttendance = new Set(skippedAttendanceBySheetForGroup[sheetKey] ?? []);
+            const trailingNoDateTeacherRows = trailingNoDateTeacherSessionRows(sheet.sampleRows);
+            const maxValidationRowIndex =
+              cutoff !== null && sheet.visibleOrderIndex === cutoff
+                ? findLastTaughtSessionRowIndex(sheet.sampleRows, now)
+                : null;
+            const issueCount = countSheetValidationIssues(
+              sheet,
+              skipped,
+              skippedAttendance,
+              trailingNoDateTeacherRows,
+              maxValidationRowIndex,
+              now
+            );
+            if (issueCount <= 0) return null;
+            return { title: sheet.title, issueCount };
+          })
+          .filter((row): row is { title: string; issueCount: number } => row !== null);
+        const totalIssueCount = sheetIssues.reduce((sum, row) => sum + row.issueCount, 0);
+        return {
+          groupId,
+          groupLabel: labelByGroupId.get(groupId) ?? groupId,
+          totalIssueCount,
+          sheetIssues,
+        };
+      })
+      .filter((group) => group.totalIssueCount > 0)
+      .sort((a, b) => a.groupLabel.localeCompare(b.groupLabel));
+  }, [isOpen, mounted, onConfirmAllGroups, batchScanResultsByGroup, reviewSlicesByKey, groupTabs]);
+  const batchValidationIssueTotal = useMemo(
+    () => batchValidationByGroup.reduce((sum, g) => sum + g.totalIssueCount, 0),
+    [batchValidationByGroup]
+  );
+  const plannedDbChangesByGroupId = useMemo(() => {
+    const out = new Map<string, PlannedGroupDbChanges>();
+    if (!onConfirmAllGroups || !batchScanResultsByGroup) return out;
+    const now = new Date();
+    for (const [groupId, scan] of Object.entries(batchScanResultsByGroup)) {
+      const slice = reviewSlicesByKey[groupId] ?? emptyReviewSlice();
+      const skippedRowsBySheetForGroup = slice.skippedRowsBySheet ?? EMPTY_SKIPPED_ROWS;
+      const skippedAttendanceBySheetForGroup =
+        slice.skippedAttendanceCellsBySheet ?? EMPTY_SKIPPED_ATTENDANCE;
+      const teacherCreateKeys = new Set(
+        (scan.detectedNewTeachers ?? [])
+          .filter((name) => {
+            const nk = normalizePersonNameKey(name);
+            return slice.teacherMergeByKey[nk] === REVIEW_TEACHER_MERGE_CREATE_NEW;
+          })
+          .map((name) => normalizePersonNameKey(name))
+          .filter(Boolean)
+      );
+      const unresolvedStudentKeys = new Set(
+        (scan.detectedNewStudents ?? [])
+          .map((name) => normalizePersonNameKey(name))
+          .filter((nk) => nk && !slice.studentMergeByKey[nk])
+      );
+      const importedSheetKeys = new Set<string>();
+      let sessionsInserted = 0;
+      let sessionsUpdated = 0;
+      let sessionsDeleted = 0;
+      const cutoff = scan.currentCourseVisibleIndex;
+      for (const sheet of scan.sheets) {
+        if (cutoff !== null && sheet.visibleOrderIndex > cutoff) continue;
+        const sheetKey = makeReviewSheetKey(sheet);
+        const skippedRows = new Set(skippedRowsBySheetForGroup[sheetKey] ?? []);
+        const skippedAttendance = new Set(skippedAttendanceBySheetForGroup[sheetKey] ?? []);
+        if (sheet.reimportDiff && !sheetHasRemainingStructuralDiff(sheet, skippedRows)) continue;
+        const maxValidationRowIndex =
+          cutoff !== null && sheet.visibleOrderIndex === cutoff
+            ? findLastTaughtSessionRowIndex(sheet.sampleRows, now)
+            : null;
+        const includedRows = includedSessionRowIndicesForImport(
+          sheet,
+          skippedRows,
+          skippedAttendance,
+          maxValidationRowIndex,
+          now
+        );
+        importedSheetKeys.add(sheetKey);
+        if (sheet.reimportDiff) {
+          const newSessionRows = new Set(sheet.reimportDiff.newSessionRowIndices);
+          for (const rowIdx of includedRows) {
+            if (newSessionRows.has(rowIdx)) sessionsInserted += 1;
+            else if ((sheet.reimportDiff.changedCellsByRow[rowIdx] ?? []).length > 0) sessionsUpdated += 1;
+          }
+          sessionsDeleted += Math.max(0, sheet.reimportDiff.existingLessonCount - includedRows.length);
+        } else {
+          sessionsInserted += includedRows.length;
+        }
+      }
+      const teacherNamesInImportedSessions = new Set<string>();
+      if (teacherCreateKeys.size > 0) {
+        for (const sheet of scan.sheets) {
+          const sheetKey = makeReviewSheetKey(sheet);
+          if (!importedSheetKeys.has(sheetKey)) continue;
+          const skippedRows = new Set(skippedRowsBySheetForGroup[sheetKey] ?? []);
+          const skippedAttendance = new Set(skippedAttendanceBySheetForGroup[sheetKey] ?? []);
+          const maxValidationRowIndex =
+            cutoff !== null && sheet.visibleOrderIndex === cutoff
+              ? findLastTaughtSessionRowIndex(sheet.sampleRows, now)
+              : null;
+          const includedRows = includedSessionRowIndicesForImport(
+            sheet,
+            skippedRows,
+            skippedAttendance,
+            maxValidationRowIndex,
+            now
+          );
+          for (const rowIdx of includedRows) {
+            const row = sheet.sampleRows[rowIdx];
+            for (const teacherName of parseTeacherNamesFromCell(row.values['Lehrer'])) {
+              const nk = normalizePersonNameKey(teacherName);
+              if (nk && teacherCreateKeys.has(nk)) teacherNamesInImportedSessions.add(nk);
+            }
+          }
+        }
+      }
+      const unresolvedStudentsInImportedSheets = new Set<string>();
+      for (const sheet of scan.sheets) {
+        const sheetKey = makeReviewSheetKey(sheet);
+        if (!importedSheetKeys.has(sheetKey)) continue;
+        for (const student of sheet.headers.students) {
+          const nk = normalizePersonNameKey(student.name);
+          if (nk && unresolvedStudentKeys.has(nk)) unresolvedStudentsInImportedSheets.add(nk);
+        }
+      }
+      const teachersAdded = teacherNamesInImportedSessions.size;
+      const studentsAdded = unresolvedStudentsInImportedSheets.size;
+      const totalChanges = sessionsInserted + sessionsUpdated + sessionsDeleted + teachersAdded + studentsAdded;
+      out.set(groupId, {
+        sessionsInserted,
+        sessionsUpdated,
+        sessionsDeleted,
+        teachersAdded,
+        studentsAdded,
+        totalChanges,
+      });
+    }
+    return out;
+  }, [onConfirmAllGroups, batchScanResultsByGroup, reviewSlicesByKey]);
+
   /**
    * No structural updates left to apply on importable tabs: either never had reimport diff, or every
    * remaining new/changed session row is skipped. Session-row skips can clear the diff; attendance
@@ -563,13 +794,26 @@ export default function ScanPreviewModal({
     resolvedWorkbookClassType === null ||
     (hasNoEffectiveImportChanges && !hasSkippedAttendanceCells) ||
     teacherMergeBlockedReason !== null;
+  const updatableGroupIds = useMemo(() => {
+    if (!onConfirmAllGroups) return [];
+    return groupTabs
+      .map((g) => g.id)
+      .filter((groupId) => (plannedDbChangesByGroupId.get(groupId)?.totalChanges ?? 0) > 0);
+  }, [onConfirmAllGroups, groupTabs, plannedDbChangesByGroupId]);
+  const visibleGroupTabs = useMemo(() => {
+    if (!onConfirmAllGroups) return groupTabs;
+    const visibleIds = new Set(updatableGroupIds);
+    return groupTabs.filter((g) => visibleIds.has(g.id));
+  }, [onConfirmAllGroups, groupTabs, updatableGroupIds]);
   const busy = isImporting || isResyncing || isImportingAllGroups;
-  const confirmAllBlocked =
+  const confirmAllHardBlocked =
     busy ||
     confirmImportBlocked ||
     isConfirmAllGroupsDisabled ||
-    confirmAllTeacherMergeBlockedReason !== null;
-  const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
+    confirmAllTeacherMergeBlockedReason !== null ||
+    updatableGroupIds.length === 0;
+  const confirmAllBlockedByWarnings = batchValidationIssueTotal > 0;
+  const confirmAllBlocked = confirmAllHardBlocked || confirmAllBlockedByWarnings;
 
   const existingTeachersForPicker = scanResult?.existingTeachersForPicker ?? [];
   const detectedNewStudents = useMemo(() => {
@@ -583,11 +827,132 @@ export default function ScanPreviewModal({
     return [...byKey.values()].sort((a, b) => a.localeCompare(b));
   }, [scanResult?.detectedNewStudents]);
   const existingStudentsForPicker = scanResult?.existingStudentsForPicker ?? [];
+  const plannedDbChangesByActiveSheetIndex = useMemo(() => {
+    const out = new Map<number, PlannedGroupDbChanges>();
+    if (!scanResult) return out;
+    const now = new Date();
+    const cutoff = scanResult.currentCourseVisibleIndex;
+    const teacherCreateKeys = new Set(
+      (scanResult.detectedNewTeachers ?? [])
+        .filter((name) => {
+          const nk = normalizePersonNameKey(name);
+          return teacherMergeByKey[nk] === REVIEW_TEACHER_MERGE_CREATE_NEW;
+        })
+        .map((name) => normalizePersonNameKey(name))
+        .filter(Boolean)
+    );
+    const unresolvedStudentKeys = new Set(
+      (scanResult.detectedNewStudents ?? [])
+        .map((name) => normalizePersonNameKey(name))
+        .filter((nk) => nk && !studentMergeByKey[nk])
+    );
+    for (let idx = 0; idx < scanResult.sheets.length; idx++) {
+      const sheet = scanResult.sheets[idx]!;
+      if (cutoff !== null && sheet.visibleOrderIndex > cutoff) continue;
+      const sheetKey = makeReviewSheetKey(sheet);
+      const skippedRows = new Set(skippedRowsBySheet[sheetKey] ?? []);
+      const skippedAttendance = new Set(skippedAttendanceCellsBySheet[sheetKey] ?? []);
+      if (sheet.reimportDiff && !sheetHasRemainingStructuralDiff(sheet, skippedRows)) {
+        out.set(idx, {
+          sessionsInserted: 0,
+          sessionsUpdated: 0,
+          sessionsDeleted: 0,
+          teachersAdded: 0,
+          studentsAdded: 0,
+          totalChanges: 0,
+        });
+        continue;
+      }
+      const maxValidationRowIndex =
+        cutoff !== null && sheet.visibleOrderIndex === cutoff
+          ? findLastTaughtSessionRowIndex(sheet.sampleRows, now)
+          : null;
+      const includedRows = includedSessionRowIndicesForImport(
+        sheet,
+        skippedRows,
+        skippedAttendance,
+        maxValidationRowIndex,
+        now
+      );
+      let sessionsInserted = 0;
+      let sessionsUpdated = 0;
+      let sessionsDeleted = 0;
+      if (sheet.reimportDiff) {
+        const newSessionRows = new Set(sheet.reimportDiff.newSessionRowIndices);
+        for (const rowIdx of includedRows) {
+          if (newSessionRows.has(rowIdx)) sessionsInserted += 1;
+          else if ((sheet.reimportDiff.changedCellsByRow[rowIdx] ?? []).length > 0) sessionsUpdated += 1;
+        }
+        sessionsDeleted += Math.max(0, sheet.reimportDiff.existingLessonCount - includedRows.length);
+      } else {
+        sessionsInserted += includedRows.length;
+      }
+      const teachersInImport = new Set<string>();
+      if (teacherCreateKeys.size > 0) {
+        for (const rowIdx of includedRows) {
+          const row = sheet.sampleRows[rowIdx];
+          for (const teacherName of parseTeacherNamesFromCell(row.values['Lehrer'])) {
+            const nk = normalizePersonNameKey(teacherName);
+            if (nk && teacherCreateKeys.has(nk)) teachersInImport.add(nk);
+          }
+        }
+      }
+      const unresolvedStudentsInSheet = new Set<string>();
+      for (const student of sheet.headers.students) {
+        const nk = normalizePersonNameKey(student.name);
+        if (nk && unresolvedStudentKeys.has(nk)) unresolvedStudentsInSheet.add(nk);
+      }
+      const teachersAdded = teachersInImport.size;
+      const studentsAdded = unresolvedStudentsInSheet.size;
+      out.set(idx, {
+        sessionsInserted,
+        sessionsUpdated,
+        sessionsDeleted,
+        teachersAdded,
+        studentsAdded,
+        totalChanges: sessionsInserted + sessionsUpdated + sessionsDeleted + teachersAdded + studentsAdded,
+      });
+    }
+    return out;
+  }, [
+    scanResult,
+    skippedRowsBySheet,
+    skippedAttendanceCellsBySheet,
+    teacherMergeByKey,
+    studentMergeByKey,
+  ]);
+  const visibleSheetIndices = useMemo(() => {
+    if (!scanResult) return [];
+    const allIndices = scanResult.sheets.map((_, idx) => idx);
+    if (!onConfirmAllGroups) return allIndices;
+    return allIndices.filter((idx) => (plannedDbChangesByActiveSheetIndex.get(idx)?.totalChanges ?? 0) > 0);
+  }, [scanResult, onConfirmAllGroups, plannedDbChangesByActiveSheetIndex]);
+  const effectiveActiveTab = visibleSheetIndices.includes(activeTab)
+    ? activeTab
+    : (visibleSheetIndices[0] ?? activeTab);
+  const emptyCellCount = sheetIssueCounts[effectiveActiveTab] ?? 0;
 
+  useEffect(() => {
+    if (!isOpen) {
+      setConfirmAllError('');
+      return;
+    }
+    if (!confirmAllBlockedByWarnings && confirmAllError) {
+      setConfirmAllError('');
+    }
+  }, [isOpen, confirmAllBlockedByWarnings, confirmAllError]);
+
+  useEffect(() => {
+    if (!isOpen || !onConfirmAllGroups || !onSelectGroupTab) return;
+    if (visibleGroupTabs.length === 0) return;
+    const visibleIds = new Set(visibleGroupTabs.map((g) => g.id));
+    if (activeGroupTabId && visibleIds.has(activeGroupTabId)) return;
+    onSelectGroupTab(visibleGroupTabs[0]!.id);
+  }, [isOpen, onConfirmAllGroups, onSelectGroupTab, activeGroupTabId, visibleGroupTabs]);
   if (!isOpen || !scanResult || !mounted) return null;
 
   const sheets = scanResult.sheets;
-  const activeSheet = sheets[activeTab];
+  const activeSheet = sheets[effectiveActiveTab];
   const activeIsFutureCourse =
     activeSheet != null &&
     currentCourseVisibleIndex !== null &&
@@ -701,18 +1066,19 @@ export default function ScanPreviewModal({
         </div>
 
         {/* Tabs */}
-        {groupTabs.length > 0 ? (
+        {visibleGroupTabs.length > 0 ? (
           <div
             className="flex min-h-[3.25rem] items-end gap-1 border-b border-gray-200 bg-gray-100 px-6 pb-0 pt-2 overflow-x-auto no-scrollbar"
             role="tablist"
             aria-label="Groups to update"
           >
-            {groupTabs.map((groupTab) => {
+            {visibleGroupTabs.map((groupTab) => {
+              const plannedChanges = plannedDbChangesByGroupId.get(groupTab.id);
               const selected = groupTab.id === activeGroupTabId;
-              const n = groupTab.detectedChangeCount;
+              const n = plannedChanges?.totalChanges ?? groupTab.detectedChangeCount;
               const tabAriaLabel =
                 n != null
-                  ? `${groupTab.label}, ${n} session rows with new or changed lesson data on scan`
+                  ? `${groupTab.label}, ${n} planned database changes from current review state`
                   : groupTab.label;
               return (
                 <button
@@ -733,7 +1099,11 @@ export default function ScanPreviewModal({
                   {n != null ? (
                     <span
                       className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-slate-200 px-1.5 py-0.5 text-[0.6875rem] font-bold leading-none text-slate-900 ring-1 ring-slate-400/35 tabular-nums"
-                      title={groupTab.detectedChangeTooltip}
+                      title={
+                        plannedChanges
+                          ? `Planned DB changes: +${plannedChanges.sessionsInserted} sessions, ~${plannedChanges.sessionsUpdated} sessions, -${plannedChanges.sessionsDeleted} sessions, +${plannedChanges.teachersAdded} teachers, +${plannedChanges.studentsAdded} students.`
+                          : groupTab.detectedChangeTooltip
+                      }
                     >
                       {n}
                     </span>
@@ -749,7 +1119,8 @@ export default function ScanPreviewModal({
           role="tablist"
           aria-label="Workbook sheets"
         >
-          {sheets.map((sheet, idx) => {
+          {visibleSheetIndices.map((idx) => {
+            const sheet = sheets[idx]!;
             const tabIssues = sheetIssueCounts[idx] ?? 0;
             const hasSkippedRows = sheetHasSkippedSessionRows.has(makeSheetKey(sheet));
             const isCurrentCourse = sheet.visibleOrderIndex === currentCourseVisibleIndex;
@@ -776,7 +1147,7 @@ export default function ScanPreviewModal({
                 key={idx}
                 type="button"
                 role="tab"
-                aria-selected={activeTab === idx && !isFutureCourseTab}
+                aria-selected={effectiveActiveTab === idx && !isFutureCourseTab}
                 disabled={isResyncing || isFutureCourseTab}
                 onClick={() =>
                   updateReviewSlice((slice) => ({
@@ -794,13 +1165,13 @@ export default function ScanPreviewModal({
                   isFutureCourseTab
                     ? 'shrink-0 rounded-t-lg border border-b-0 border-transparent bg-gray-100/80 px-5 py-3 text-sm font-semibold whitespace-nowrap text-gray-400 cursor-not-allowed inline-flex items-center gap-2'
                     : `shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60 ${
-                        hasReimportUpdates && activeTab !== idx
+                        hasReimportUpdates && effectiveActiveTab !== idx
                           ? 'border-sky-200/90 bg-sky-50/50'
-                          : isUnchangedReimportTab && activeTab !== idx
+                          : isUnchangedReimportTab && effectiveActiveTab !== idx
                             ? 'border-gray-200/90 bg-gray-100/80 text-gray-500'
                           : ''
                       } ${
-                        activeTab === idx
+                        effectiveActiveTab === idx
                           ? isUnchangedReimportTab
                             ? 'relative z-[1] -mb-px border-gray-200 bg-gray-100/90 text-gray-600 shadow-[0_-1px_0_0_white]'
                             : 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
@@ -838,7 +1209,7 @@ export default function ScanPreviewModal({
               </button>
             );
           })}
-          {sheets.length === 0 && (
+          {visibleSheetIndices.length === 0 && (
             <div className="flex min-h-[3.25rem] items-center px-4 py-3 text-sm text-gray-500">No sheets found</div>
           )}
         </div>
@@ -1011,6 +1382,19 @@ export default function ScanPreviewModal({
               {resyncError}
             </div>
           ) : null}
+          {onConfirmAllGroups && visibleGroupTabs.length === 0 ? (
+            <section
+              className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3"
+              role="status"
+              aria-live="polite"
+            >
+              <h3 className="text-sm font-semibold text-sky-950">No groups with pending DB changes</h3>
+              <p className="mt-1 text-xs text-sky-900">
+                All scanned groups currently resolve to zero inserts, updates, or deletes. Hidden groups are excluded
+                from import.
+              </p>
+            </section>
+          ) : null}
           {hasNoEffectiveImportChanges && !isImporting && !isResyncing ? (
             <section className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3" role="status" aria-live="polite">
               <h3 className="text-sm font-semibold text-sky-950">No updates detected</h3>
@@ -1019,6 +1403,39 @@ export default function ScanPreviewModal({
                   ? 'No lesson rows or core fields differ from the database for importable tabs. You can still import to apply attendance cell skips.'
                   : 'This import matches what is already in the database for the importable tabs (including skipped rows). There is nothing new to apply, so import is disabled.'}
               </p>
+            </section>
+          ) : null}
+          {onConfirmAllGroups && batchValidationByGroup.length > 0 ? (
+            <section
+              className="mb-4 rounded-md border border-yellow-300 bg-yellow-50/90 px-4 py-3"
+              role="alert"
+              aria-live="polite"
+            >
+              <h3 className="text-sm font-semibold text-yellow-950">Validation issues across groups</h3>
+              <p className="mt-1 text-xs text-yellow-900">
+                Resolve all validation warnings before using <strong>Update all groups</strong>. Total warnings:{' '}
+                {batchValidationIssueTotal}.
+              </p>
+              <ul className="mt-3 space-y-2 text-xs text-yellow-950">
+                {batchValidationByGroup.map((group) => (
+                  <li key={group.groupId}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectGroupTab?.(group.groupId)}
+                      disabled={busy || !onSelectGroupTab}
+                      className="w-full rounded border border-yellow-200/80 bg-white/90 px-3 py-2 text-left transition-colors hover:bg-yellow-100/80 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
+                      title="Open this group tab"
+                    >
+                      <p className="font-semibold">
+                        {group.groupLabel}: {group.totalIssueCount} warning{group.totalIssueCount === 1 ? '' : 's'}
+                      </p>
+                      <p className="mt-1 text-yellow-900">
+                        {group.sheetIssues.map((sheet) => `${sheet.title} (${sheet.issueCount})`).join(', ')}
+                      </p>
+                    </button>
+                  </li>
+                ))}
+              </ul>
             </section>
           ) : null}
           {importRequiresResync && !isImporting && !isResyncing ? (
@@ -1465,6 +1882,16 @@ export default function ScanPreviewModal({
             <button
               type="button"
               onClick={() => {
+                if (confirmAllBlockedByWarnings) {
+                  setConfirmAllError(
+                    `Cannot update all groups while validation warnings remain (${batchValidationIssueTotal} total).`
+                  );
+                  return;
+                }
+                if (updatableGroupIds.length === 0) {
+                  setConfirmAllError('No groups have pending DB changes. Hidden groups are excluded from import.');
+                  return;
+                }
                 const { teacherAliasResolutions, newTeacherCreateAcknowledgements } =
                   buildTeacherImportReviewPayload(detectedNewTeachers, teacherMergeByKey);
                 const studentAliasResolutions: StudentAliasResolution[] = [];
@@ -1481,14 +1908,26 @@ export default function ScanPreviewModal({
                   studentAliasResolutions,
                   newTeacherCreateAcknowledgements,
                   workbookClassTypeForApi,
-                  reviewSlicesByKey
+                  reviewSlicesByKey,
+                  updatableGroupIds
                 );
               }}
-              disabled={confirmAllBlocked}
+              disabled={confirmAllHardBlocked}
+              aria-disabled={confirmAllBlocked}
               title={
-                !busy && confirmAllTeacherMergeBlockedReason ? confirmAllTeacherMergeBlockedReason : undefined
+                !busy && confirmAllTeacherMergeBlockedReason
+                  ? confirmAllTeacherMergeBlockedReason
+                  : !busy && updatableGroupIds.length === 0
+                    ? 'No groups with DB changes to import.'
+                  : !busy && confirmAllBlockedByWarnings
+                    ? `Resolve all validation warnings across groups first (${batchValidationIssueTotal} total).`
+                    : undefined
               }
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
+              className={`px-4 py-2 text-sm font-medium text-white rounded focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors flex items-center gap-2 shadow-sm ${
+                confirmAllBlocked
+                  ? 'bg-blue-600/70 cursor-not-allowed opacity-50'
+                  : 'bg-blue-600 hover:bg-blue-700'
+              } disabled:cursor-not-allowed`}
             >
               {isImportingAllGroups ? (
                 <>
@@ -1499,6 +1938,11 @@ export default function ScanPreviewModal({
                 'Update all groups'
               )}
             </button>
+          ) : null}
+          {confirmAllError ? (
+            <p className="w-full text-right text-xs font-medium text-yellow-800" role="alert" aria-live="polite">
+              {confirmAllError}
+            </p>
           ) : null}
           <button
             type="button"
