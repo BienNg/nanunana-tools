@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { motion } from 'framer-motion';
 import { supabase } from '@/lib/supabase/client';
+import SheetSyncProgressOverlay from '@/components/SheetSyncProgressOverlay';
 import ScanPreviewModal, { type ReviewImportSlice } from '@/components/ScanPreviewModal';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import type {
@@ -461,38 +461,15 @@ export default function BulkActiveCoursesSyncModal({
       progressPercent = Math.min(100, basePercent + currentGroupPercent);
     }
 
-    return createPortal(
-      <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/40 backdrop-blur-sm">
-        <div className="w-[min(42rem,92vw)] rounded-2xl border border-white/20 bg-white p-6 shadow-2xl">
-          <h2 className="text-xl font-bold text-on-surface">Update all active courses</h2>
-          
-          <div className="mt-5 flex items-center gap-3">
-            <span className="material-symbols-outlined animate-spin text-primary">sync</span>
-            <span className="text-sm font-medium text-on-surface-variant">Collecting review data for each group</span>
-          </div>
-          <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-surface-variant/30">
-            <motion.div
-              className="h-full rounded-full bg-primary"
-              initial={{ width: 0 }}
-              animate={{ width: `${progressPercent}%` }}
-              transition={{ duration: 0.3, ease: 'easeOut' }}
-            />
-          </div>
-          <p className="mt-2 text-sm text-on-surface-variant">
-            {scanLoadError || scanProgressMessage || 'Preparing scans…'}
-          </p>
-          <div className="mt-6 flex justify-end">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-lg border border-outline-variant/50 bg-white px-4 py-2 text-sm font-semibold text-on-surface"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      </div>,
-      document.body
+    return (
+      <SheetSyncProgressOverlay
+        mounted={mounted}
+        title="Update all active courses"
+        headline="Collecting review data for each group"
+        progressPercent={progressPercent}
+        statusLine={scanLoadError || scanProgressMessage || 'Preparing scans…'}
+        onClose={onClose}
+      />
     );
   }
 

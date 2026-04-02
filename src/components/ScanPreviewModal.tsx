@@ -229,6 +229,73 @@ function emptyReviewSlice(activeTab = 0): ReviewImportSlice {
   };
 }
 
+function makeReviewSheetKey(sheet: ScannedSheet): string {
+  return `${sheet.visibleOrderIndex}:${sheet.title}`;
+}
+
+/** Sheet keys where structural row skips match the course tab "completed" / green-dot logic. */
+function sheetKeysWithStructuralSkipsForReview(
+  sheets: readonly ScannedSheet[],
+  cutoff: number | null,
+  skippedRowsBySheet: SkippedRowsBySheet,
+  now: Date
+): Set<string> {
+  const out = new Set<string>();
+  for (const s of sheets) {
+    if (cutoff !== null && s.visibleOrderIndex > cutoff) continue;
+    const skipped = new Set(skippedRowsBySheet[makeReviewSheetKey(s)] ?? []);
+    const trailingNoDateTeacherRows = trailingNoDateTeacherSessionRows(s.sampleRows);
+    const maxValidationRowIndex =
+      cutoff !== null && s.visibleOrderIndex === cutoff
+        ? findLastTaughtSessionRowIndex(s.sampleRows, now)
+        : null;
+    for (let rIdx = 0; rIdx < s.sampleRows.length; rIdx++) {
+      if (
+        rowOutsideValidationScope(
+          s.sampleRows,
+          rIdx,
+          skipped,
+          trailingNoDateTeacherRows,
+          maxValidationRowIndex,
+          now
+        )
+      ) {
+        out.add(makeReviewSheetKey(s));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * First importable sheet that is not completed in the review UI; if all importable sheets are completed, the last importable index.
+ */
+function preferredCourseTabIndexForScan(
+  scanResult: Extract<ScanGoogleSheetResult, { success: true }>,
+  skippedRowsBySheet: SkippedRowsBySheet,
+  now: Date
+): number {
+  const sheets = scanResult.sheets;
+  const cutoff = scanResult.currentCourseVisibleIndex;
+  const skipKeys = sheetKeysWithStructuralSkipsForReview(sheets, cutoff, skippedRowsBySheet, now);
+  const importableIndices: number[] = [];
+  for (let idx = 0; idx < sheets.length; idx++) {
+    const s = sheets[idx];
+    if (cutoff !== null && s.visibleOrderIndex > cutoff) continue;
+    importableIndices.push(idx);
+  }
+  if (importableIndices.length === 0) return 0;
+  for (const idx of importableIndices) {
+    const s = sheets[idx]!;
+    const analyzedCourseCompleted = Boolean(s.analyzedSyncCompleted);
+    const hasSkippedRows = skipKeys.has(makeReviewSheetKey(s));
+    const isCourseCompleted = analyzedCourseCompleted && !hasSkippedRows;
+    if (!isCourseCompleted) return idx;
+  }
+  return importableIndices[importableIndices.length - 1]!;
+}
+
 export default function ScanPreviewModal({
   isOpen,
   scanResult,
@@ -258,6 +325,7 @@ export default function ScanPreviewModal({
   const [reviewSlicesByKey, setReviewSlicesByKey] = useState<Record<string, ReviewImportSlice>>({});
   const [openRowActionIndex, setOpenRowActionIndex] = useState<number | null>(null);
   const [hoverHint, setHoverHint] = useState<HoverHint>(null);
+  const prevActiveGroupTabIdRef = useRef<string | undefined>(undefined);
   const persistPerGroupReview = Boolean(onSelectGroupTab);
   const reviewStorageKey = persistPerGroupReview ? (activeGroupTabId ?? '__none__') : '_single';
 
@@ -299,21 +367,33 @@ export default function ScanPreviewModal({
 
   useEffect(() => {
     if (!isOpen || !scanResult) return;
-    const cutoff = scanResult.currentCourseVisibleIndex;
-    const list = scanResult.sheets;
-    const firstImportable = list.findIndex(
-      (s) => cutoff === null || s.visibleOrderIndex <= cutoff
-    );
-    const nextTab = firstImportable >= 0 ? firstImportable : 0;
+    const preferred = preferredCourseTabIndexForScan(scanResult, {}, new Date());
     setReviewSlicesByKey((prev) => {
       const key = persistPerGroupReview ? (activeGroupTabId ?? '__none__') : '_single';
       if (persistPerGroupReview) {
         if (prev[key]) return prev;
-        return { ...prev, [key]: emptyReviewSlice(nextTab) };
+        return { ...prev, [key]: emptyReviewSlice(preferred) };
       }
-      return { ...prev, _single: emptyReviewSlice(nextTab) };
+      return { ...prev, _single: emptyReviewSlice(preferred) };
     });
     setOpenRowActionIndex(null);
+  }, [isOpen, scanResult, persistPerGroupReview, activeGroupTabId]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      prevActiveGroupTabIdRef.current = undefined;
+      return;
+    }
+    if (!scanResult || !persistPerGroupReview || activeGroupTabId == null) return;
+    const prevGid = prevActiveGroupTabIdRef.current;
+    if (prevGid === activeGroupTabId) return;
+    prevActiveGroupTabIdRef.current = activeGroupTabId;
+    setReviewSlicesByKey((state) => {
+      const slice = state[activeGroupTabId] ?? emptyReviewSlice();
+      const preferred = preferredCourseTabIndexForScan(scanResult, slice.skippedRowsBySheet, new Date());
+      if (slice.activeTab === preferred) return state;
+      return { ...state, [activeGroupTabId]: { ...slice, activeTab: preferred } };
+    });
   }, [isOpen, scanResult, persistPerGroupReview, activeGroupTabId]);
 
   useEffect(() => {

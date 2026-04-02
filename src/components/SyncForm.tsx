@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import ScanPreviewModal from './ScanPreviewModal';
+import SheetSyncProgressOverlay from './SheetSyncProgressOverlay';
 import type {
   ScanGoogleSheetResult,
   SkippedAttendanceCellsBySheet,
@@ -61,21 +62,23 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
 
 async function streamSheetScan(
   source: { url?: string; file?: File | null },
-  onProgress: (message: string) => void,
-  options?: { startMessage?: string }
+  onProgress: (message: string, currentTab?: number, totalTabs?: number) => void,
+  options?: { startMessage?: string; signal?: AbortSignal }
 ): Promise<ScanGoogleSheetResult | null> {
   onProgress(options?.startMessage ?? 'Scanning starting…');
+  const signal = options?.signal;
   const req =
     source.file != null
       ? (() => {
           const formData = new FormData();
           formData.set('file', source.file);
-          return { method: 'POST', body: formData } as const;
+          return { method: 'POST' as const, body: formData, ...(signal ? { signal } : {}) };
         })()
       : {
-          method: 'POST',
+          method: 'POST' as const,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: source.url ?? '' }),
+          ...(signal ? { signal } : {}),
         };
   const res = await fetch('/api/sync-sheet/scan', req);
 
@@ -112,7 +115,7 @@ async function streamSheetScan(
       if (!parsed) continue;
       if (parsed.kind === 'progress-status') onProgress(parsed.message);
       if (parsed.kind === 'progress-sheet') {
-        onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+        onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`, parsed.current, parsed.total);
       }
       if (parsed.kind === 'done') finalResult = parsed.result;
     }
@@ -124,7 +127,7 @@ async function streamSheetScan(
     if (parsed) {
       if (parsed.kind === 'progress-status') onProgress(parsed.message);
       if (parsed.kind === 'progress-sheet') {
-        onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+        onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`, parsed.current, parsed.total);
       }
       if (parsed.kind === 'done') finalResult = parsed.result;
     }
@@ -133,14 +136,22 @@ async function streamSheetScan(
   return finalResult;
 }
 
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
 export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => void }) {
   const router = useRouter();
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const [mounted, setMounted] = useState(false);
   const [url, setUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState('');
   const [progressMessage, setProgressMessage] = useState('');
+  const [sheetProgressTab, setSheetProgressTab] = useState(0);
+  const [sheetProgressTotal, setSheetProgressTotal] = useState(1);
 
   const [scanResult, setScanResult] = useState<Extract<ScanGoogleSheetResult, { success: true }> | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -148,13 +159,38 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   const [importDbLog, setImportDbLog] = useState<string[]>([]);
   const [importRequiresResync, setImportRequiresResync] = useState(false);
 
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const applyScanProgress = (msg: string, currentTab?: number, totalTabs?: number) => {
+    setProgressMessage(msg);
+    if (currentTab !== undefined) setSheetProgressTab(currentTab);
+    if (totalTabs !== undefined) setSheetProgressTotal(totalTabs);
+  };
+
+  const handleLoadOverlayClose = () => {
+    loadAbortRef.current?.abort();
+    loadAbortRef.current = null;
+    setIsScanning(false);
+    setIsImporting(false);
+    setProgressMessage('');
+    setSheetProgressTab(0);
+    setSheetProgressTotal(1);
+  };
+
   const handleScan = async () => {
     if (!url && !file) return;
+    loadAbortRef.current?.abort();
+    const ac = new AbortController();
+    loadAbortRef.current = ac;
     setIsScanning(true);
     setError('');
     setPreviewScanError('');
+    setSheetProgressTab(0);
+    setSheetProgressTotal(1);
     try {
-      const finalResult = await streamSheetScan({ url, file }, setProgressMessage);
+      const finalResult = await streamSheetScan({ url, file }, applyScanProgress, { signal: ac.signal });
       if (finalResult?.success) {
         setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
         setImportRequiresResync(false);
@@ -165,21 +201,34 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
         setError('Scan finished without a result');
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to scan');
+      if (isAbortError(err)) {
+        setError('');
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to scan');
+      }
     } finally {
       setIsScanning(false);
       setProgressMessage('');
+      setSheetProgressTab(0);
+      setSheetProgressTotal(1);
+      loadAbortRef.current = null;
     }
   };
 
   const handleResync = async () => {
     if (!url && !file) return;
+    loadAbortRef.current?.abort();
+    const ac = new AbortController();
+    loadAbortRef.current = ac;
     setIsScanning(true);
     setPreviewScanError('');
     setError('');
+    setSheetProgressTab(0);
+    setSheetProgressTotal(1);
     try {
-      const finalResult = await streamSheetScan({ url, file }, setProgressMessage, {
+      const finalResult = await streamSheetScan({ url, file }, applyScanProgress, {
         startMessage: 'Rescanning sheet…',
+        signal: ac.signal,
       });
       if (finalResult?.success) {
         setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
@@ -190,10 +239,15 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
         setPreviewScanError('Scan finished without a result');
       }
     } catch (err: unknown) {
-      setPreviewScanError(err instanceof Error ? err.message : 'Failed to scan');
+      if (!isAbortError(err)) {
+        setPreviewScanError(err instanceof Error ? err.message : 'Failed to scan');
+      }
     } finally {
       setIsScanning(false);
       setProgressMessage('');
+      setSheetProgressTab(0);
+      setSheetProgressTotal(1);
+      loadAbortRef.current = null;
     }
   };
 
@@ -205,10 +259,15 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     workbookClassType?: WorkbookClassType
   ) => {
     if (!scanResult) return;
+    loadAbortRef.current?.abort();
+    const ac = new AbortController();
+    loadAbortRef.current = ac;
     setIsImporting(true);
     setError('');
     setImportDbLog([]);
     setProgressMessage('Importing starting…');
+    setSheetProgressTab(0);
+    setSheetProgressTotal(1);
     let finalResult: SyncResult | null = null;
 
     try {
@@ -216,7 +275,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
         typeof structuredClone === 'function'
           ? structuredClone(scanResult)
           : JSON.parse(JSON.stringify(scanResult));
-      const req = {
+      const res = await fetch('/api/sync-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -227,8 +286,8 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
           studentAliasResolutions,
           ...(workbookClassType != null ? { workbookClassType } : {}),
         }),
-      };
-      const res = await fetch('/api/sync-sheet', req);
+        signal: ac.signal,
+      });
 
       if (!res.ok) {
         let errText = res.statusText;
@@ -267,6 +326,8 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
           if (parsed.kind === 'progress-status') setProgressMessage(parsed.message);
           if (parsed.kind === 'progress-sheet') {
             setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+            setSheetProgressTab(parsed.current);
+            setSheetProgressTotal(parsed.total);
           }
           if (parsed.kind === 'progress-db') {
             setImportDbLog((prev) => [...prev, parsed.message]);
@@ -282,6 +343,8 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
           if (parsed.kind === 'progress-status') setProgressMessage(parsed.message);
           if (parsed.kind === 'progress-sheet') {
             setProgressMessage(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+            setSheetProgressTab(parsed.current);
+            setSheetProgressTotal(parsed.total);
           }
           if (parsed.kind === 'progress-db') {
             setImportDbLog((prev) => [...prev, parsed.message]);
@@ -300,17 +363,34 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
         setError('Sync finished without a result');
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to sync');
+      if (!isAbortError(err)) {
+        setError(err instanceof Error ? err.message : 'Failed to sync');
+      }
     } finally {
       setIsImporting(false);
       setProgressMessage('');
+      setSheetProgressTab(0);
+      setSheetProgressTotal(1);
+      loadAbortRef.current = null;
     }
   };
 
   const isLoading = isScanning || isImporting;
+  const sheetProgressPercent =
+    sheetProgressTotal > 0 ? Math.min(100, (sheetProgressTab / sheetProgressTotal) * 100) : 0;
 
   return (
     <>
+      {mounted && isLoading ? (
+        <SheetSyncProgressOverlay
+          mounted={mounted}
+          title="Google Sheets sync"
+          headline={isImporting ? 'Importing changes…' : 'Scanning workbook…'}
+          progressPercent={sheetProgressPercent}
+          statusLine={progressMessage}
+          onClose={handleLoadOverlayClose}
+        />
+      ) : null}
       <div className="flex flex-col gap-2 min-w-[420px]">
         <div className="bg-surface-container-low p-5 rounded-2xl flex items-center space-x-4 shadow-sm relative">
           <div className="bg-white p-3 rounded-xl shadow-sm">
@@ -347,16 +427,9 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
             type="button"
             onClick={handleScan}
             disabled={isLoading || (!url && !file)}
-            className="shrink-0 bg-primary text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary-container transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            className="shrink-0 bg-primary text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary-container transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isScanning ? (
-              <>
-                <span className="material-symbols-outlined animate-spin text-sm">sync</span>
-                Scanning…
-              </>
-            ) : (
-              'Sync'
-            )}
+            Sync
           </button>
           {error && (
             <div className="absolute -bottom-6 left-0 text-xs font-bold text-error">
@@ -364,15 +437,6 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
             </div>
           )}
         </div>
-        {isLoading && progressMessage && (
-          <p
-            className="text-xs text-on-surface-variant font-medium truncate px-1"
-            role="status"
-            aria-live="polite"
-          >
-            {progressMessage}
-          </p>
-        )}
       </div>
 
       <ScanPreviewModal
