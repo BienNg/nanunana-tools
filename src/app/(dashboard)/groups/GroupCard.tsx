@@ -331,8 +331,12 @@ export default function GroupCard({
       }
 
       if (finalResult?.success) {
-        setImportRequiresResync(true);
         router.refresh();
+        setIsModalOpen(false);
+        setPreviewScanError('');
+        setScanResult(null);
+        setImportDbLog([]);
+        setImportRequiresResync(false);
       } else if (finalResult) {
         setActionError(finalResult.error || 'Failed to sync');
       } else {

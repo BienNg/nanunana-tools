@@ -358,9 +358,13 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
       }
 
       if (finalResult?.success) {
-        setImportRequiresResync(true);
         router.refresh();
         onSyncComplete();
+        setIsModalOpen(false);
+        setPreviewScanError('');
+        setScanResult(null);
+        setImportDbLog([]);
+        setImportRequiresResync(false);
       } else if (finalResult) {
         setError(finalResult.error || 'Failed to sync');
       } else {

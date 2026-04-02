@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { supabase } from '@/lib/supabase/client';
 import SheetSyncProgressOverlay from '@/components/SheetSyncProgressOverlay';
@@ -209,6 +210,7 @@ export default function BulkActiveCoursesSyncModal({
   onClose: () => void;
   onSyncComplete: () => void;
 }) {
+  const router = useRouter();
   const [targets, setTargets] = useState<GroupTarget[]>([]);
   const [scanResultsByGroup, setScanResultsByGroup] = useState<Record<string, ScanSuccess>>({});
   const [scanErrorsByGroup, setScanErrorsByGroup] = useState<Record<string, string>>({});
@@ -353,9 +355,9 @@ export default function BulkActiveCoursesSyncModal({
       studentAliasResolutions: StudentAliasResolution[];
       workbookClassType?: WorkbookClassType;
     }
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const scan = scanResultsByGroup[groupId];
-    if (!scan) return;
+    if (!scan) return false;
     setImportErrorsByGroup((prev) => ({ ...prev, [groupId]: '' }));
     setImportDbLogByGroup((prev) => ({ ...prev, [groupId]: [] }));
     const result = await streamImportFromSnapshot(scan, payload, {
@@ -369,15 +371,16 @@ export default function BulkActiveCoursesSyncModal({
     setImportProgressByGroup((prev) => ({ ...prev, [groupId]: '' }));
     if (!result) {
       setImportErrorsByGroup((prev) => ({ ...prev, [groupId]: 'Import finished without a result' }));
-      return;
+      return false;
     }
     if (!result.success) {
       setImportErrorsByGroup((prev) => ({ ...prev, [groupId]: result.error ?? 'Import failed' }));
-      return;
+      return false;
     }
     if (result.applySummary) {
       setImportSummaryByGroup((prev) => ({ ...prev, [groupId]: result.applySummary as SyncGroupApplySummary }));
     }
+    return true;
   };
 
   const handleImportSelected = async (
@@ -403,7 +406,7 @@ export default function BulkActiveCoursesSyncModal({
     }
     setIsImportingOne(true);
     try {
-      await runImportForGroup(selectedGroupId, {
+      const ok = await runImportForGroup(selectedGroupId, {
         skippedRowsBySheet,
         skippedAttendanceCellsBySheet,
         teacherAliasResolutions,
@@ -411,7 +414,11 @@ export default function BulkActiveCoursesSyncModal({
         studentAliasResolutions,
         workbookClassType,
       });
-      onSyncComplete();
+      if (ok) {
+        onSyncComplete();
+        router.refresh();
+        onClose();
+      }
     } catch (err) {
       setImportErrorsByGroup((prev) => ({
         ...prev,
@@ -435,6 +442,7 @@ export default function BulkActiveCoursesSyncModal({
     if (readyGroupIds.length === 0) return;
     setIsImportingAll(true);
     try {
+      let allOk = true;
       for (const groupId of readyGroupIds) {
         const scan = scanResultsByGroup[groupId];
         if (!scan) continue;
@@ -458,7 +466,7 @@ export default function BulkActiveCoursesSyncModal({
         const manualClassPick = slice?.manualWorkbookClassType ?? '';
         const workbookClassType =
           scan.workbookClassType == null ? (manualClassPick === '' ? undefined : manualClassPick) : undefined;
-        await runImportForGroup(groupId, {
+        const imported = await runImportForGroup(groupId, {
           skippedRowsBySheet,
           skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
@@ -466,8 +474,13 @@ export default function BulkActiveCoursesSyncModal({
           studentAliasResolutions,
           workbookClassType,
         });
+        if (!imported) allOk = false;
       }
-      onSyncComplete();
+      if (allOk) {
+        onSyncComplete();
+        router.refresh();
+        onClose();
+      }
     } finally {
       setIsImportingAll(false);
     }
