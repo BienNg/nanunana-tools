@@ -1,5 +1,6 @@
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import {
+  GroupClassType,
   lessonDurationMinutes,
   normalizeGroupClassType,
   normalizeGroupDefaultLessonMinutes,
@@ -20,7 +21,7 @@ export default async function HoursTaughtChart() {
     .from('courses')
     .select('id, groups ( class_type, default_lesson_minutes )');
 
-  const classTypeByCourseId = new Map<string, any>();
+  const classTypeByCourseId = new Map<string, GroupClassType | null>();
   const defaultLessonMinutesByCourseId = new Map<string, number | null>();
 
   (coursesData || []).forEach((course) => {
@@ -99,16 +100,41 @@ export default async function HoursTaughtChart() {
     trendMonthBuckets.push({ ym, label });
   }
 
+  const CLASS_TYPE_ORDER: readonly GroupClassType[] = [
+    'Online_DE',
+    'Online_VN',
+    'Offline',
+    'M',
+    'A',
+    'P',
+  ];
+  const UNKNOWN_CLASS_TYPE_KEY = 'Unknown';
+  type ClassTypeBucketKey = GroupClassType | typeof UNKNOWN_CLASS_TYPE_KEY;
+
   const minutesByYearMonth: Record<string, number> = {};
+  const minutesByYearMonthAndClassType: Record<string, Record<ClassTypeBucketKey, number>> = {};
   trendMonthBuckets.forEach(b => {
     minutesByYearMonth[b.ym] = 0;
+    minutesByYearMonthAndClassType[b.ym] = {
+      Online_DE: 0,
+      Online_VN: 0,
+      Offline: 0,
+      M: 0,
+      A: 0,
+      P: 0,
+      Unknown: 0,
+    };
   });
 
   for (const lesson of allLessons) {
     const ym = yearMonthFromLessonDate(lesson.date);
     if (!ym) continue;
     if (minutesByYearMonth[ym] !== undefined) {
-      minutesByYearMonth[ym] += lesson.calculatedDurationMinutes || 0;
+      const lessonMinutes = lesson.calculatedDurationMinutes || 0;
+      minutesByYearMonth[ym] += lessonMinutes;
+      const classType = classTypeByCourseId.get(lesson.course_id) ?? null;
+      const classTypeKey: ClassTypeBucketKey = classType ?? UNKNOWN_CLASS_TYPE_KEY;
+      minutesByYearMonthAndClassType[ym][classTypeKey] += lessonMinutes;
     }
   }
 
@@ -119,6 +145,18 @@ export default async function HoursTaughtChart() {
       label,
       minutes,
       hours: minutes / 60,
+      classTypeHours: [
+        ...CLASS_TYPE_ORDER.map((classType) => ({
+          classType,
+          minutes: minutesByYearMonthAndClassType[ym][classType],
+          hours: minutesByYearMonthAndClassType[ym][classType] / 60,
+        })),
+        {
+          classType: UNKNOWN_CLASS_TYPE_KEY,
+          minutes: minutesByYearMonthAndClassType[ym][UNKNOWN_CLASS_TYPE_KEY],
+          hours: minutesByYearMonthAndClassType[ym][UNKNOWN_CLASS_TYPE_KEY] / 60,
+        },
+      ],
     };
   });
 

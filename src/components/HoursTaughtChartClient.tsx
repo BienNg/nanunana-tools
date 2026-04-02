@@ -8,6 +8,21 @@ type ChartData = {
   label: string;
   minutes: number;
   hours: number;
+  classTypeHours: Array<{
+    classType: 'Online_DE' | 'Online_VN' | 'Offline' | 'M' | 'A' | 'P' | 'Unknown';
+    minutes: number;
+    hours: number;
+  }>;
+};
+
+const CLASS_TYPE_STYLES: Record<ChartData['classTypeHours'][number]['classType'], string> = {
+  Online_DE: 'bg-sky-500',
+  Online_VN: 'bg-indigo-500',
+  Offline: 'bg-emerald-500',
+  M: 'bg-amber-500',
+  A: 'bg-fuchsia-500',
+  P: 'bg-rose-500',
+  Unknown: 'bg-slate-500',
 };
 
 export default function HoursTaughtChartClient({ data }: { data: ChartData[] }) {
@@ -55,11 +70,12 @@ export default function HoursTaughtChartClient({ data }: { data: ChartData[] }) 
 
           {/* Bars */}
           <div className="relative h-full flex items-end justify-around gap-2 sm:gap-4 px-1 pt-2">
-            {data.map(({ ym, label, hours }, i) => {
+            {data.map(({ ym, label, hours, classTypeHours }, i) => {
               const barTrackPx = 200;
               const rawBarPx = yAxisMax > 0 ? (hours / yAxisMax) * barTrackPx : 0;
               const barPx = hours > 0 ? Math.max(rawBarPx, 8) : 0;
               const hoursStr = formatHours(hours);
+              const nonZeroClassTypeHours = classTypeHours.filter((entry) => entry.hours > 0);
 
               return (
                 <div key={ym} className="flex flex-col items-center flex-1 min-w-0 justify-end gap-3 group">
@@ -68,10 +84,20 @@ export default function HoursTaughtChartClient({ data }: { data: ChartData[] }) 
                     style={{ height: barTrackPx }}
                   >
                     {/* Tooltip / Value Label */}
-                    <div className="absolute -top-8 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none flex flex-col items-center">
-                      <span className="bg-inverse-surface text-inverse-on-surface text-[10px] font-bold px-2 py-1 rounded-md shadow-md whitespace-nowrap">
-                        {hoursStr} hrs
-                      </span>
+                    <div className="absolute -top-8 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none flex flex-col items-center z-20">
+                      <div className="bg-inverse-surface text-inverse-on-surface text-[10px] font-bold px-2 py-1 rounded-md shadow-md whitespace-nowrap min-w-[120px]">
+                        <div className="mb-1">{hoursStr} hrs total</div>
+                        {nonZeroClassTypeHours.length > 0 ? (
+                          nonZeroClassTypeHours.map(({ classType, hours: typeHours }) => (
+                            <div key={`${ym}-${classType}`} className="flex items-center justify-between gap-2 font-semibold">
+                              <span>{classType}</span>
+                              <span>{formatHours(typeHours)}h</span>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="font-semibold opacity-80">No classes</div>
+                        )}
+                      </div>
                       <div className="w-2 h-2 bg-inverse-surface rotate-45 -mt-1" />
                     </div>
 
@@ -95,8 +121,23 @@ export default function HoursTaughtChartClient({ data }: { data: ChartData[] }) 
                           delay: i * 0.1, 
                           ease: [0.25, 1, 0.5, 1] 
                         }}
-                        className="w-full rounded-t-[8px] bg-gradient-to-t from-primary/80 to-primary shadow-sm shadow-primary/20 group-hover:brightness-110 transition-all cursor-pointer"
-                      />
+                        className="w-full rounded-t-[8px] shadow-sm shadow-primary/20 group-hover:brightness-110 transition-all cursor-pointer overflow-hidden flex flex-col justify-end"
+                      >
+                        {nonZeroClassTypeHours.map(({ classType, hours: typeHours }, index) => {
+                          const segmentPct = hours > 0 ? (typeHours / hours) * 100 : 0;
+                          return (
+                            <div
+                              key={`${ym}-${classType}`}
+                              className={`${CLASS_TYPE_STYLES[classType]} ${index === 0 ? 'rounded-t-[8px]' : ''}`}
+                              style={{
+                                height: `${segmentPct}%`,
+                                minHeight: segmentPct > 0 ? 2 : 0,
+                              }}
+                              title={`${classType}: ${formatHours(typeHours)}h`}
+                            />
+                          );
+                        })}
+                      </motion.div>
                     ) : (
                       <div className="w-full rounded-t-[8px] bg-primary" style={{ height: 0 }} />
                     )}
