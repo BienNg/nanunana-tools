@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase/client';
 import { SyncCompletionPill } from '@/components/SyncCompletionPill';
+import CourseActionsMenu from '@/components/CourseActionsMenu';
 
 type Teacher = { id: string; name: string };
 
@@ -135,8 +136,8 @@ export default function ActiveCoursesPanel({ bodyRefreshKey = 0 }: { bodyRefresh
                 className="p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-surface-container-low/30 transition-colors group"
               >
                 <div className="flex items-start gap-4 min-w-0">
-                  <div className="w-10 h-10 rounded-full bg-secondary-container text-on-secondary-container flex items-center justify-center shrink-0 mt-1">
-                    <span className="material-symbols-outlined text-[20px]">class</span>
+                  <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center shrink-0 mt-1">
+                    <span className="material-symbols-outlined text-[20px]">auto_stories</span>
                   </div>
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 mb-1">
@@ -187,13 +188,16 @@ export default function ActiveCoursesPanel({ bodyRefreshKey = 0 }: { bodyRefresh
                     </p>
                   </div>
                 </div>
-                <Link
-                  href={`/courses/${course.id}`}
-                  className="text-primary opacity-0 group-hover:opacity-100 transition-opacity shrink-0 self-end sm:self-center p-1 -m-1 rounded-full hover:bg-primary/5"
-                  aria-label={`Open course ${course.name}`}
-                >
-                  <span className="material-symbols-outlined">chevron_right</span>
-                </Link>
+                <div className="flex items-center gap-1 shrink-0 self-end sm:self-center">
+                  <CourseActionsMenu courseId={course.id} courseName={course.name} />
+                  <Link
+                    href={`/courses/${course.id}`}
+                    className="text-primary opacity-0 group-hover:opacity-100 transition-opacity p-1 -m-1 rounded-full hover:bg-primary/5"
+                    aria-label={`Open course ${course.name}`}
+                  >
+                    <span className="material-symbols-outlined">chevron_right</span>
+                  </Link>
+                </div>
               </div>
             );
           })
