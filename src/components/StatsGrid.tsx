@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 
-export default function StatsGrid({ onUpdateAll }: { onUpdateAll?: () => void }) {
+export default function StatsGrid({
+  bodyRefreshKey = 0,
+  onUpdateAll,
+}: {
+  bodyRefreshKey?: number;
+  onUpdateAll?: () => void;
+}) {
   const [stats, setStats] = useState({
     totalStudents: 0,
     activeCourses: 0,
@@ -38,7 +44,7 @@ export default function StatsGrid({ onUpdateAll }: { onUpdateAll?: () => void })
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [bodyRefreshKey]);
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12 animate-fade-up">

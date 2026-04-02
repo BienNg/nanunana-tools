@@ -10,6 +10,8 @@ import BulkActiveCoursesSyncModal from './BulkActiveCoursesSyncModal';
 export default function DashboardContent({ hoursTaughtChart }: { hoursTaughtChart?: ReactNode }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
+  /** Bumps client-side Supabase refetches (stats + active courses); router.refresh alone does not update them. */
+  const [bodyRefreshKey, setBodyRefreshKey] = useState(0);
 
   useEffect(() => {
     const ctx = gsap.context(() => {
@@ -39,14 +41,14 @@ export default function DashboardContent({ hoursTaughtChart }: { hoursTaughtChar
         <div id="import-sheets" className="scroll-mt-28 shrink-0">
           <SyncForm
             onSyncComplete={() => {
-              console.log('Sync complete, children will auto-update via Supabase Realtime');
+              setBodyRefreshKey((k) => k + 1);
             }}
           />
         </div>
       </div>
 
       {/* Bento Stats Grid */}
-      <StatsGrid onUpdateAll={() => setIsBulkModalOpen(true)} />
+      <StatsGrid bodyRefreshKey={bodyRefreshKey} onUpdateAll={() => setIsBulkModalOpen(true)} />
 
       {hoursTaughtChart && (
         <div className="mt-8">
@@ -55,13 +57,13 @@ export default function DashboardContent({ hoursTaughtChart }: { hoursTaughtChar
       )}
 
       <div className="mt-8">
-        <ActiveCoursesPanel />
+        <ActiveCoursesPanel bodyRefreshKey={bodyRefreshKey} />
       </div>
       <BulkActiveCoursesSyncModal
         isOpen={isBulkModalOpen}
         onClose={() => setIsBulkModalOpen(false)}
         onSyncComplete={() => {
-          console.log('Bulk sync complete, children will auto-update via Supabase Realtime');
+          setBodyRefreshKey((k) => k + 1);
         }}
       />
     </section>

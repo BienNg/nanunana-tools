@@ -28,7 +28,7 @@ function sortActiveCourses(a: ActiveCourseRow, b: ActiveCourseRow): number {
   return groupNameCollator.compare(a.name.trim(), b.name.trim());
 }
 
-export default function ActiveCoursesPanel() {
+export default function ActiveCoursesPanel({ bodyRefreshKey = 0 }: { bodyRefreshKey?: number } = {}) {
   const [courses, setCourses] = useState<ActiveCourseRow[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -90,7 +90,7 @@ export default function ActiveCoursesPanel() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [refresh]);
+  }, [refresh, bodyRefreshKey]);
 
   return (
     <div className="animate-fade-up rounded-2xl border border-outline-variant/10 bg-surface-container-lowest shadow-sm overflow-hidden">
