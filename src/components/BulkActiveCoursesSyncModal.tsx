@@ -215,6 +215,10 @@ export default function BulkActiveCoursesSyncModal({
       sessionsDeleted: list.reduce((sum, row) => sum + row.totals.sessionsDeleted, 0),
     };
   }, [importSummaryByGroup]);
+  const hasSelectedError =
+    (selectedGroupId != null && Boolean(importErrorsByGroup[selectedGroupId])) ||
+    (selectedGroupId != null && Boolean(scanErrorsByGroup[selectedGroupId]));
+  const shouldShowBatchOverlay = batchSummary.groupsUpdated > 0 || hasSelectedError || isImportingAll;
 
   useEffect(() => {
     setMounted(true);
@@ -453,22 +457,24 @@ export default function BulkActiveCoursesSyncModal({
         onSelectGroupTab={setSelectedGroupId}
         isConfirmAllGroupsDisabled={targets.every((target) => !scanResultsByGroup[target.id])}
       />
-      {createPortal(
-        <div className="fixed bottom-6 right-6 z-[240] w-[min(28rem,92vw)] rounded-xl border border-outline-variant/20 bg-white/95 p-4 shadow-xl backdrop-blur">
-          <h3 className="text-sm font-semibold text-on-surface">Batch import summary</h3>
-          <p className="mt-1 text-xs text-on-surface-variant">
-            Groups updated: {batchSummary.groupsUpdated} · Sessions added: {batchSummary.sessionsInserted} · Sessions
-            changed: {batchSummary.sessionsUpdated} · Sessions removed: {batchSummary.sessionsDeleted}
-          </p>
-          {selectedGroupId && importErrorsByGroup[selectedGroupId] ? (
-            <p className="mt-2 text-xs font-medium text-error">{importErrorsByGroup[selectedGroupId]}</p>
-          ) : null}
-          {selectedGroupId && scanErrorsByGroup[selectedGroupId] ? (
-            <p className="mt-2 text-xs font-medium text-error">{scanErrorsByGroup[selectedGroupId]}</p>
-          ) : null}
-        </div>,
-        document.body
-      )}
+      {shouldShowBatchOverlay
+        ? createPortal(
+            <div className="pointer-events-none fixed bottom-6 right-6 z-[240] w-[min(28rem,92vw)] rounded-xl border border-outline-variant/20 bg-white/95 p-4 shadow-xl backdrop-blur">
+              <h3 className="text-sm font-semibold text-on-surface">Batch import summary</h3>
+              <p className="mt-1 text-xs text-on-surface-variant">
+                Groups updated: {batchSummary.groupsUpdated} · Sessions added: {batchSummary.sessionsInserted} · Sessions
+                changed: {batchSummary.sessionsUpdated} · Sessions removed: {batchSummary.sessionsDeleted}
+              </p>
+              {selectedGroupId && importErrorsByGroup[selectedGroupId] ? (
+                <p className="mt-2 text-xs font-medium text-error">{importErrorsByGroup[selectedGroupId]}</p>
+              ) : null}
+              {selectedGroupId && scanErrorsByGroup[selectedGroupId] ? (
+                <p className="mt-2 text-xs font-medium text-error">{scanErrorsByGroup[selectedGroupId]}</p>
+              ) : null}
+            </div>,
+            document.body
+          )
+        : null}
     </>
   );
 }

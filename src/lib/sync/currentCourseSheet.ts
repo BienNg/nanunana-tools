@@ -90,8 +90,9 @@ export function findCurrentCourseVisibleIndex(slots: CurrentCourseSlot[], now: D
 }
 
 /**
- * In one course tab, returns the last row index that appears to be already taught:
- * row has parseable date on/before today and non-empty teacher cell.
+ * In one course tab, returns the last row index whose Datum parses to on or before local today.
+ * Teacher is not required: a scheduled-today row without Lehrer must still fall inside Review Import’s
+ * validation window so missing teacher can be flagged.
  * Returns null when no row qualifies (e.g. all sessions are in the future).
  */
 export function findLastTaughtSessionRowIndex(
@@ -105,7 +106,6 @@ export function findLastTaughtSessionRowIndex(
   for (let i = 0; i < rows.length; i++) {
     const dt = parseSheetDatum(rows[i].values['Datum'] ?? '');
     if (dt === null || dt > todayTs) continue;
-    if (isEmptyCellValue(rows[i].values['Lehrer'])) continue;
     lastIdx = i;
   }
   return lastIdx;
@@ -123,6 +123,15 @@ export function isSheetDatumStrictlyAfterToday(datumRaw: string | undefined | nu
   const todayTs = localCalendarTodayTimestamp(now);
   if (todayTs === null) return false;
   return dt > todayTs;
+}
+
+/** True when Datum parses to a calendar day on or before local today (held or due). */
+export function isSheetDatumOnOrBeforeToday(datumRaw: string | undefined | null, now: Date): boolean {
+  const dt = parseSheetDatum(String(datumRaw ?? ''));
+  if (dt === null) return false;
+  const todayTs = localCalendarTodayTimestamp(now);
+  if (todayTs === null) return false;
+  return dt <= todayTs;
 }
 
 /**

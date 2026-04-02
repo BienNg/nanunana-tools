@@ -14,7 +14,11 @@ import type {
 } from '@/lib/sync/googleSheetSync';
 import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
 import { GROUP_CLASS_TYPE_OPTIONS } from '@/lib/courseDuration';
-import { findLastTaughtSessionRowIndex, parseSheetDatum } from '@/lib/sync/currentCourseSheet';
+import {
+  findLastTaughtSessionRowIndex,
+  isSheetDatumOnOrBeforeToday,
+  parseSheetDatum,
+} from '@/lib/sync/currentCourseSheet';
 import {
   datumChronoAppliesToRow,
   isDatumChronologyOutlier,
@@ -46,8 +50,8 @@ const HINT_EMPTY_VON =
   'Start time is missing. Add it when this session is scheduled.';
 const HINT_EMPTY_BIS =
   'End time is missing. Add it when this session is scheduled.';
-const HINT_EMPTY_LEHRER =
-  'Teacher name is missing. Add who led this session.';
+const HINT_LEHRER_PAST_OR_TODAY =
+  'This lesson’s date is today or in the past, but no teacher is set. Add who led this session.';
 function hintStudentAfterFirstSession(studentName: string): string {
   return `After attendance was first recorded for ${studentName}, later lessons usually need a mark or note (for example green for present, or “absent”). This cell is empty — you can fill it or skip the row if that’s intentional.`;
 }
@@ -230,6 +234,15 @@ function countSheetValidationIssues(
     if (!outsideFull) {
       for (const key of DATA_COLUMN_KEYS) {
         if (!validationInReimportScope(sheet, rIdx, key)) continue;
+        if (key === 'Lehrer') {
+          if (
+            isEmptyCellValue(row.values['Lehrer']) &&
+            isSheetDatumOnOrBeforeToday(row.values['Datum'] ?? '', now)
+          ) {
+            n++;
+          }
+          continue;
+        }
         if (isEmptyCellValue(row.values[key])) n++;
       }
       if (
@@ -330,6 +343,22 @@ function isDatabaseMutationLogLine(line: string): boolean {
   if (lower.includes('sync_completed=')) return true;
   // Attendance summary lines use +/~/- counters instead of action verbs.
   return /attendance\s+—\s+\+\d+\s+~\d+\s+[−-]\d+/i.test(line);
+}
+
+/** Pending re-import work after user session-row skips (matches server reimport diff semantics). */
+function sheetHasRemainingStructuralDiff(sheet: ScannedSheet, skippedRows: ReadonlySet<number>): boolean {
+  const d = sheet.reimportDiff;
+  if (!d) return false;
+  for (const idx of d.newSessionRowIndices) {
+    if (!skippedRows.has(idx)) return true;
+  }
+  for (const rowIdxStr of Object.keys(d.changedCellsByRow)) {
+    const rowIdx = Number(rowIdxStr);
+    if (!Number.isFinite(rowIdx) || skippedRows.has(rowIdx)) continue;
+    const cells = d.changedCellsByRow[rowIdx];
+    if (cells && cells.length > 0) return true;
+  }
+  return false;
 }
 
 type ScanPreviewModalProps = {
@@ -531,24 +560,27 @@ export default function ScanPreviewModal({
     return sheetIssueCounts.some((c) => c > 0);
   }, [isOpen, scanResult, mounted, sheetIssueCounts]);
 
-  /** Block no-op reimports: every importable matched sheet has no structural changes. */
-  const hasNoDetectedImportChanges = useMemo(() => {
+  /**
+   * No structural updates left to apply on importable tabs: either never had reimport diff, or every
+   * remaining new/changed session row is skipped. Session-row skips can clear the diff; attendance
+   * cell skips alone can still warrant an import.
+   */
+  const hasNoEffectiveImportChanges = useMemo(() => {
     if (!isOpen || !scanResult || !mounted) return false;
     const cutoff = scanResult.currentCourseVisibleIndex;
     const importable = scanResult.sheets.filter((s) => cutoff === null || s.visibleOrderIndex <= cutoff);
     if (importable.length === 0) return true;
     return !importable.some((s) => {
       if (!s.reimportDiff) return true;
-      return s.reimportDiff.hasStructuralChanges;
+      const skipped = new Set(skippedRowsBySheet[makeSheetKey(s)] ?? []);
+      return sheetHasRemainingStructuralDiff(s, skipped);
     });
-  }, [isOpen, scanResult, mounted]);
+  }, [isOpen, scanResult, mounted, skippedRowsBySheet]);
 
-  /** User-made skip selections are intentional import changes even when sheet diff is empty. */
-  const hasManualImportSelections = useMemo(() => {
-    const hasSkippedRows = Object.values(skippedRowsBySheet).some((rows) => rows.length > 0);
-    if (hasSkippedRows) return true;
-    return Object.values(skippedAttendanceCellsBySheet).some((cells) => cells.length > 0);
-  }, [skippedRowsBySheet, skippedAttendanceCellsBySheet]);
+  const hasSkippedAttendanceCells = useMemo(
+    () => Object.values(skippedAttendanceCellsBySheet).some((cells) => cells.length > 0),
+    [skippedAttendanceCellsBySheet]
+  );
 
   const resolvedWorkbookClassType: WorkbookClassType | null =
     scanResult?.workbookClassType ?? (manualWorkbookClassType === '' ? null : manualWorkbookClassType);
@@ -560,7 +592,7 @@ export default function ScanPreviewModal({
     importRequiresResync ||
     hasImportBlockingSheetIssues ||
     resolvedWorkbookClassType === null ||
-    (hasNoDetectedImportChanges && !hasManualImportSelections);
+    (hasNoEffectiveImportChanges && !hasSkippedAttendanceCells);
   const busy = isImporting || isResyncing || isImportingAllGroups;
   const confirmAllBlocked = busy || confirmImportBlocked || isConfirmAllGroupsDisabled;
   const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
@@ -745,7 +777,8 @@ export default function ScanPreviewModal({
             let tabLabel = tabLabelBase;
             if (isCurrentCourse) tabLabel = `${tabLabelBase}, current course`;
             else if (isFutureCourseTab) tabLabel = `${sheet.title}, not included in this import`;
-            const hasReimportUpdates = Boolean(sheet.reimportDiff?.hasStructuralChanges);
+            const skippedForSheet = new Set(skippedRowsBySheet[makeSheetKey(sheet)] ?? []);
+            const hasReimportUpdates = sheetHasRemainingStructuralDiff(sheet, skippedForSheet);
             const analyzedCourseCompleted = Boolean(
               sheet.analyzedSyncCompleted
             );
@@ -981,12 +1014,13 @@ export default function ScanPreviewModal({
               {resyncError}
             </div>
           ) : null}
-          {hasNoDetectedImportChanges && !isImporting && !isResyncing ? (
+          {hasNoEffectiveImportChanges && !isImporting && !isResyncing ? (
             <section className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3" role="status" aria-live="polite">
               <h3 className="text-sm font-semibold text-sky-950">No updates detected</h3>
               <p className="mt-1 text-xs text-sky-900">
-                This import matches what is already in the database for the importable tabs. There is nothing new to
-                apply, so import is disabled.
+                {hasSkippedAttendanceCells
+                  ? 'No lesson rows or core fields differ from the database for importable tabs. You can still import to apply attendance cell skips.'
+                  : 'This import matches what is already in the database for the importable tabs (including skipped rows). There is nothing new to apply, so import is disabled.'}
               </p>
             </section>
           ) : null}
@@ -1159,7 +1193,8 @@ export default function ScanPreviewModal({
                         !rowIsAutoSkipped &&
                         !rowOutsideValidation &&
                         validationInReimportScope(activeSheet, rIdx, 'Lehrer') &&
-                        isEmptyCellValue(row.values['Lehrer']);
+                        isEmptyCellValue(row.values['Lehrer']) &&
+                        isSheetDatumOnOrBeforeToday(row.values['Datum'] ?? '', previewValidationNow);
                       return (
                       <tr
                         key={rIdx}
@@ -1300,7 +1335,7 @@ export default function ScanPreviewModal({
                           }`}
                           {...hintHandlers(
                             warnLehrer
-                              ? HINT_EMPTY_LEHRER
+                              ? HINT_LEHRER_PAST_OR_TODAY
                               : reimportChangeHintText(activeSheet, rIdx, 'Lehrer')
                           )}
                         >
@@ -1475,8 +1510,8 @@ export default function ScanPreviewModal({
                 ? 'Select a class type (or fix the workbook title and resync).'
                 : !busy && importRequiresResync
                   ? 'Import completed. Resync first before importing again.'
-                : !busy && hasNoDetectedImportChanges
-                  ? 'No updates were found for importable tabs. Change the sheet and resync first.'
+                : !busy && hasNoEffectiveImportChanges && !hasSkippedAttendanceCells
+                  ? 'Nothing left to import for importable tabs. Edit the sheet and resync, or undo row skips if you still need those updates.'
                 : !busy && hasImportBlockingSheetIssues
                   ? 'Resolve validation issues on every sheet through the current course before importing.'
                   : undefined
