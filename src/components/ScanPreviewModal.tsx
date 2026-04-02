@@ -12,6 +12,11 @@ import type {
   WorkbookClassType,
 } from '@/lib/sync/googleSheetSync';
 import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
+import {
+  REVIEW_TEACHER_MERGE_CREATE_NEW,
+  buildTeacherImportReviewPayload,
+  teacherMergeDecisionError,
+} from '@/lib/sync/googleSheetTeacherSync';
 import { GROUP_CLASS_TYPE_OPTIONS } from '@/lib/courseDuration';
 import {
   findLastTaughtSessionRowIndex,
@@ -153,15 +158,23 @@ function isDatabaseMutationLogLine(line: string): boolean {
   return /attendance\s+—\s+\+\d+\s+~\d+\s+[−-]\d+/i.test(line);
 }
 
+type ScanSuccess = Extract<ScanGoogleSheetResult, { success: true }>;
+
 type ScanPreviewModalProps = {
   isOpen: boolean;
-  scanResult: Extract<ScanGoogleSheetResult, { success: true }> | null;
+  scanResult: ScanSuccess | null;
+  /**
+   * When batch-updating groups, pass every successful scan so "Update all groups" stays disabled until
+   * each tab’s new-teacher dropdowns are resolved (not only the active group).
+   */
+  batchScanResultsByGroup?: Record<string, ScanSuccess> | null;
   onClose: () => void;
   onConfirm: (
     skippedRowsBySheet: SkippedRowsBySheet,
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
     studentAliasResolutions: StudentAliasResolution[],
+    newTeacherCreateAcknowledgements: string[],
     /** Sent to the server only when the workbook title did not imply a class type. */
     workbookClassType?: WorkbookClassType
   ) => void;
@@ -192,6 +205,7 @@ type ScanPreviewModalProps = {
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
     studentAliasResolutions: StudentAliasResolution[],
+    newTeacherCreateAcknowledgements: string[],
     workbookClassType?: WorkbookClassType,
     /** Per-group review state so batch import keeps skips and alias picks from every group tab. */
     reviewStateByGroupId?: Record<string, ReviewImportSlice>
@@ -299,6 +313,7 @@ function preferredCourseTabIndexForScan(
 export default function ScanPreviewModal({
   isOpen,
   scanResult,
+  batchScanResultsByGroup = null,
   onClose,
   onConfirm,
   isImporting,
@@ -515,15 +530,6 @@ export default function ScanPreviewModal({
   /** Keep class-type picker visible whenever workbook title does not imply a class type. */
   const requiresManualWorkbookClassType = scanResult?.workbookClassType == null;
 
-  const confirmImportBlocked =
-    importRequiresResync ||
-    hasImportBlockingSheetIssues ||
-    resolvedWorkbookClassType === null ||
-    (hasNoEffectiveImportChanges && !hasSkippedAttendanceCells);
-  const busy = isImporting || isResyncing || isImportingAllGroups;
-  const confirmAllBlocked = busy || confirmImportBlocked || isConfirmAllGroupsDisabled;
-  const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
-
   const detectedNewTeachers = useMemo(() => {
     const raw = scanResult?.detectedNewTeachers ?? [];
     const byKey = new Map<string, string>();
@@ -534,6 +540,35 @@ export default function ScanPreviewModal({
     }
     return [...byKey.values()].sort((a, b) => a.localeCompare(b));
   }, [scanResult?.detectedNewTeachers]);
+
+  const teacherMergeBlockedReason = useMemo(
+    () => teacherMergeDecisionError(detectedNewTeachers, teacherMergeByKey),
+    [detectedNewTeachers, teacherMergeByKey]
+  );
+
+  const confirmAllTeacherMergeBlockedReason = useMemo(() => {
+    if (!onConfirmAllGroups || !batchScanResultsByGroup) return null;
+    for (const [groupId, scan] of Object.entries(batchScanResultsByGroup)) {
+      const slice = reviewSlicesByKey[groupId];
+      const err = teacherMergeDecisionError(scan.detectedNewTeachers, slice?.teacherMergeByKey ?? EMPTY_TEACHER_MERGE);
+      if (err) return err;
+    }
+    return null;
+  }, [onConfirmAllGroups, batchScanResultsByGroup, reviewSlicesByKey]);
+
+  const confirmImportBlocked =
+    importRequiresResync ||
+    hasImportBlockingSheetIssues ||
+    resolvedWorkbookClassType === null ||
+    (hasNoEffectiveImportChanges && !hasSkippedAttendanceCells) ||
+    teacherMergeBlockedReason !== null;
+  const busy = isImporting || isResyncing || isImportingAllGroups;
+  const confirmAllBlocked =
+    busy ||
+    confirmImportBlocked ||
+    isConfirmAllGroupsDisabled ||
+    confirmAllTeacherMergeBlockedReason !== null;
+  const emptyCellCount = sheetIssueCounts[activeTab] ?? 0;
 
   const existingTeachersForPicker = scanResult?.existingTeachersForPicker ?? [];
   const detectedNewStudents = useMemo(() => {
@@ -845,17 +880,20 @@ export default function ScanPreviewModal({
             <section className="mb-4 rounded-md border border-emerald-200 bg-emerald-50/70 px-4 py-3">
               <h3 className="text-sm font-semibold text-emerald-900">New teacher names</h3>
               <p className="mt-1 text-xs text-emerald-800">
-                These spellings are not matched yet (canonical name or saved alias). Choose an existing teacher to
-                treat a name as an alias—it is stored and used on future imports. Otherwise a new teacher is
-                created.
+                These spellings are not matched yet (canonical name or saved alias). For each name, choose an existing
+                teacher to save it as an alias for future imports, or explicitly choose &quot;Create new teacher&quot;.
+                Import stays disabled until every row has a choice.
               </p>
               <ul className="mt-3 space-y-2" aria-label="Map new teacher names">
                 {detectedNewTeachers.map((teacherName) => {
                   const nk = normalizePersonNameKey(teacherName);
                   const mergedId = teacherMergeByKey[nk];
-                  const mergedLabel = mergedId
-                    ? existingTeachersForPicker.find((t) => t.id === mergedId)?.name
-                    : undefined;
+                  const selectValue =
+                    mergedId === undefined || mergedId === '' ? '' : mergedId;
+                  const mergedLabel =
+                    mergedId && mergedId !== REVIEW_TEACHER_MERGE_CREATE_NEW
+                      ? existingTeachersForPicker.find((t) => t.id === mergedId)?.name
+                      : undefined;
                   return (
                     <li
                       key={nk}
@@ -864,7 +902,7 @@ export default function ScanPreviewModal({
                       <span className="min-w-[6rem] font-medium">{teacherName}</span>
                       <span className="text-xs text-emerald-800">→</span>
                       <select
-                        value={mergedId ?? ''}
+                        value={selectValue}
                         onChange={(e) => {
                           const v = e.target.value;
                           updateReviewSlice((slice) => {
@@ -878,13 +916,17 @@ export default function ScanPreviewModal({
                         className="min-w-[12rem] max-w-[min(100%,20rem)] rounded border border-emerald-300/80 bg-white px-2 py-1 text-xs font-medium text-gray-900 shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-50"
                         aria-label={`Link sheet name ${teacherName} to existing teacher`}
                       >
-                        <option value="">Create new teacher</option>
+                        <option value="">Choose…</option>
+                        <option value={REVIEW_TEACHER_MERGE_CREATE_NEW}>Create new teacher</option>
                         {existingTeachersForPicker.map((t) => (
                           <option key={t.id} value={t.id}>
                             {t.name}
                           </option>
                         ))}
                       </select>
+                      {mergedId === REVIEW_TEACHER_MERGE_CREATE_NEW ? (
+                        <span className="text-xs text-emerald-800">A new teacher row will be created on import.</span>
+                      ) : null}
                       {mergedLabel ? (
                         <span className="text-xs text-emerald-800">
                           Saved as alias for {mergedLabel} on import.
@@ -1418,11 +1460,8 @@ export default function ScanPreviewModal({
             <button
               type="button"
               onClick={() => {
-                const teacherAliasResolutions: TeacherAliasResolution[] = [];
-                for (const name of detectedNewTeachers) {
-                  const tid = teacherMergeByKey[normalizePersonNameKey(name)];
-                  if (tid) teacherAliasResolutions.push({ aliasName: name, teacherId: tid });
-                }
+                const { teacherAliasResolutions, newTeacherCreateAcknowledgements } =
+                  buildTeacherImportReviewPayload(detectedNewTeachers, teacherMergeByKey);
                 const studentAliasResolutions: StudentAliasResolution[] = [];
                 for (const name of detectedNewStudents) {
                   const sid = studentMergeByKey[normalizePersonNameKey(name)];
@@ -1435,11 +1474,15 @@ export default function ScanPreviewModal({
                   skippedAttendanceCellsBySheet,
                   teacherAliasResolutions,
                   studentAliasResolutions,
+                  newTeacherCreateAcknowledgements,
                   workbookClassTypeForApi,
                   reviewSlicesByKey
                 );
               }}
               disabled={confirmAllBlocked}
+              title={
+                !busy && confirmAllTeacherMergeBlockedReason ? confirmAllTeacherMergeBlockedReason : undefined
+              }
               className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
             >
               {isImportingAllGroups ? (
@@ -1455,11 +1498,8 @@ export default function ScanPreviewModal({
           <button
             type="button"
             onClick={() => {
-              const teacherAliasResolutions: TeacherAliasResolution[] = [];
-              for (const name of detectedNewTeachers) {
-                const tid = teacherMergeByKey[normalizePersonNameKey(name)];
-                if (tid) teacherAliasResolutions.push({ aliasName: name, teacherId: tid });
-              }
+              const { teacherAliasResolutions, newTeacherCreateAcknowledgements } =
+                buildTeacherImportReviewPayload(detectedNewTeachers, teacherMergeByKey);
               const studentAliasResolutions: StudentAliasResolution[] = [];
               for (const name of detectedNewStudents) {
                 const sid = studentMergeByKey[normalizePersonNameKey(name)];
@@ -1472,6 +1512,7 @@ export default function ScanPreviewModal({
                 skippedAttendanceCellsBySheet,
                 teacherAliasResolutions,
                 studentAliasResolutions,
+                newTeacherCreateAcknowledgements,
                 workbookClassTypeForApi
               );
             }}
@@ -1479,13 +1520,15 @@ export default function ScanPreviewModal({
             title={
               !busy && resolvedWorkbookClassType === null
                 ? 'Select a class type (or fix the workbook title and resync).'
+                : !busy && teacherMergeBlockedReason
+                  ? teacherMergeBlockedReason
                 : !busy && importRequiresResync
                   ? 'Import completed. Resync first before importing again.'
                 : !busy && hasNoEffectiveImportChanges && !hasSkippedAttendanceCells
                   ? 'Nothing left to import for importable tabs. Edit the sheet and resync, or undo row skips if you still need those updates.'
                 : !busy && hasImportBlockingSheetIssues
                   ? 'Resolve validation issues on every sheet through the current course before importing.'
-                  : undefined
+                : undefined
             }
             className="px-6 py-2 text-sm font-medium text-white bg-[#ff7a59] rounded hover:bg-[#ff8f73] focus:ring-2 focus:ring-offset-2 focus:ring-[#ff7a59] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
           >

@@ -243,6 +243,7 @@ export default function GroupCard({
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
     studentAliasResolutions: StudentAliasResolution[],
+    newTeacherCreateAcknowledgements: string[],
     workbookClassType?: WorkbookClassType
   ) => {
     if (!scanResult) return;
@@ -265,6 +266,7 @@ export default function GroupCard({
           skippedRowsBySheet,
           skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
+          newTeacherCreateAcknowledgements,
           studentAliasResolutions,
           ...(workbookClassType != null ? { workbookClassType } : {}),
         }),

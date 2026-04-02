@@ -949,6 +949,8 @@ export type ReviewedSnapshotImportPayload = {
   skippedRowsBySheet?: unknown;
   skippedAttendanceCellsBySheet?: unknown;
   teacherAliasResolutions?: unknown;
+  /** Display names from the scan for which the user explicitly chose "Create new teacher". */
+  newTeacherCreateAcknowledgements?: unknown;
   studentAliasResolutions?: unknown;
   workbookClassType?: unknown;
 };
@@ -958,6 +960,7 @@ export type ParsedReviewedSnapshotImportPayload = {
   skippedRowsBySheet: SkippedRowsBySheet;
   skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet;
   teacherAliasResolutions?: TeacherAliasResolution[];
+  newTeacherCreateAcknowledgements: string[];
   studentAliasResolutions?: StudentAliasResolution[];
   workbookClassType?: unknown;
 };
@@ -1098,6 +1101,38 @@ export function parseReviewedSnapshotImportPayload(raw: unknown): {
     return { ok: false, error: 'teacherAliasResolutions must be a list of { aliasName, teacherId }' };
   }
   const teacherAliasResolutions = parseTeacherAliasResolutions(teacherAliasRaw);
+  const createAckRaw = body.newTeacherCreateAcknowledgements;
+  if (createAckRaw != null && !Array.isArray(createAckRaw)) {
+    return { ok: false, error: 'newTeacherCreateAcknowledgements must be a list of strings' };
+  }
+  const newTeacherCreateAcknowledgements = [
+    ...new Set(
+      (createAckRaw as unknown[] | undefined)
+        ?.filter((x): x is string => typeof x === 'string')
+        .map((s) => s.trim())
+        .filter(Boolean) ?? []
+    ),
+  ];
+
+  const detectedNew = (snap as ReviewedImportSnapshot).detectedNewTeachers ?? [];
+  if (detectedNew.length > 0) {
+    const aliasNameKeys = new Set(
+      (teacherAliasResolutions ?? []).map((r) => normalizePersonNameKey(r.aliasName)).filter(Boolean)
+    );
+    const ackKeys = new Set(newTeacherCreateAcknowledgements.map((a) => normalizePersonNameKey(a)).filter(Boolean));
+    for (const name of detectedNew) {
+      const nk = normalizePersonNameKey(name);
+      if (!nk) continue;
+      if (!aliasNameKeys.has(nk) && !ackKeys.has(nk)) {
+        return {
+          ok: false,
+          error:
+            'Each new teacher name from the review must be linked to an existing teacher or included in newTeacherCreateAcknowledgements.',
+        };
+      }
+    }
+  }
+
   const studentAliasRaw = body.studentAliasResolutions;
   if (studentAliasRaw != null && !Array.isArray(studentAliasRaw)) {
     return { ok: false, error: 'studentAliasResolutions must be a list of { aliasName, studentId }' };
@@ -1111,6 +1146,7 @@ export function parseReviewedSnapshotImportPayload(raw: unknown): {
       skippedRowsBySheet,
       skippedAttendanceCellsBySheet,
       teacherAliasResolutions,
+      newTeacherCreateAcknowledgements,
       studentAliasResolutions,
       workbookClassType: body.workbookClassType,
     },

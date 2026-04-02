@@ -4,6 +4,65 @@ import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 /** Map a sheet spelling to an existing teacher during import; persisted as `teacher_aliases`. */
 export type TeacherAliasResolution = { aliasName: string; teacherId: string };
 
+/**
+ * Stored in review UI `teacherMergeByKey` when the user explicitly chooses "Create new teacher"
+ * (distinct from an unset choice, which blocks import).
+ */
+export const REVIEW_TEACHER_MERGE_CREATE_NEW = '__review_create_new__' as const;
+
+/** Returns an error message if any detected new teacher has no merge decision yet. */
+export function teacherMergeDecisionError(
+  detectedNewTeachers: readonly string[] | undefined,
+  mergeByKey: Record<string, string>
+): string | null {
+  for (const name of detectedNewTeachers ?? []) {
+    const nk = normalizePersonNameKey(name);
+    const v = mergeByKey[nk];
+    if (v === undefined || v === '') {
+      return `Choose "Create new teacher" or link "${name}" to an existing teacher before importing.`;
+    }
+  }
+  return null;
+}
+
+export function buildTeacherImportReviewPayload(
+  detectedNewTeachers: readonly string[] | undefined,
+  mergeByKey: Record<string, string>
+): { teacherAliasResolutions: TeacherAliasResolution[]; newTeacherCreateAcknowledgements: string[] } {
+  const teacherAliasResolutions: TeacherAliasResolution[] = [];
+  const newTeacherCreateAcknowledgements: string[] = [];
+  for (const name of detectedNewTeachers ?? []) {
+    const v = mergeByKey[normalizePersonNameKey(name)];
+    if (v === REVIEW_TEACHER_MERGE_CREATE_NEW) newTeacherCreateAcknowledgements.push(name);
+    else if (v) teacherAliasResolutions.push({ aliasName: name, teacherId: v });
+  }
+  return { teacherAliasResolutions, newTeacherCreateAcknowledgements };
+}
+
+/** Client-side guard matching `parseReviewedSnapshotImportPayload` new-teacher rules. */
+export function detectedNewTeachersPayloadError(
+  detectedNewTeachers: readonly string[] | undefined,
+  teacherAliasResolutions: TeacherAliasResolution[],
+  newTeacherCreateAcknowledgements: string[]
+): string | null {
+  const list = detectedNewTeachers ?? [];
+  if (list.length === 0) return null;
+  const aliasKeys = new Set(
+    teacherAliasResolutions.map((r) => normalizePersonNameKey(r.aliasName)).filter(Boolean)
+  );
+  const ackKeys = new Set(
+    newTeacherCreateAcknowledgements.map((a) => normalizePersonNameKey(a)).filter(Boolean)
+  );
+  for (const name of list) {
+    const nk = normalizePersonNameKey(name);
+    if (!nk) continue;
+    if (!aliasKeys.has(nk) && !ackKeys.has(nk)) {
+      return `Each new teacher must be linked or confirmed as new. Missing decision for "${name}".`;
+    }
+  }
+  return null;
+}
+
 type SyncProgressEventLike =
   | { type: 'status'; message: string }
   | { type: 'sheet'; title: string; current: number; total: number }

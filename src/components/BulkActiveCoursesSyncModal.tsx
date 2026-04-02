@@ -6,6 +6,10 @@ import { supabase } from '@/lib/supabase/client';
 import SheetSyncProgressOverlay from '@/components/SheetSyncProgressOverlay';
 import ScanPreviewModal, { type ReviewImportSlice } from '@/components/ScanPreviewModal';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
+import {
+  buildTeacherImportReviewPayload,
+  detectedNewTeachersPayloadError,
+} from '@/lib/sync/googleSheetTeacherSync';
 import type {
   ScanGoogleSheetResult,
   SkippedAttendanceCellsBySheet,
@@ -22,18 +26,6 @@ import {
 } from '@/lib/sync/googleSheetReimportDiff';
 
 type ScanSuccess = Extract<ScanGoogleSheetResult, { success: true }>;
-
-function buildTeacherResolutionsForScan(
-  scan: ScanSuccess,
-  mergeByKey: Record<string, string>
-): TeacherAliasResolution[] {
-  const resolutions: TeacherAliasResolution[] = [];
-  for (const name of scan.detectedNewTeachers ?? []) {
-    const tid = mergeByKey[normalizePersonNameKey(name)];
-    if (tid) resolutions.push({ aliasName: name, teacherId: tid });
-  }
-  return resolutions;
-}
 
 function buildStudentResolutionsForScan(
   scan: ScanSuccess,
@@ -146,6 +138,7 @@ async function streamImportFromSnapshot(
     skippedRowsBySheet: SkippedRowsBySheet;
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet;
     teacherAliasResolutions: TeacherAliasResolution[];
+    newTeacherCreateAcknowledgements: string[];
     studentAliasResolutions: StudentAliasResolution[];
     workbookClassType?: WorkbookClassType;
   },
@@ -166,6 +159,7 @@ async function streamImportFromSnapshot(
       skippedRowsBySheet: payload.skippedRowsBySheet,
       skippedAttendanceCellsBySheet: payload.skippedAttendanceCellsBySheet,
       teacherAliasResolutions: payload.teacherAliasResolutions,
+      newTeacherCreateAcknowledgements: payload.newTeacherCreateAcknowledgements,
       studentAliasResolutions: payload.studentAliasResolutions,
       ...(payload.workbookClassType != null ? { workbookClassType: payload.workbookClassType } : {}),
     }),
@@ -355,6 +349,7 @@ export default function BulkActiveCoursesSyncModal({
       skippedRowsBySheet: SkippedRowsBySheet;
       skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet;
       teacherAliasResolutions: TeacherAliasResolution[];
+      newTeacherCreateAcknowledgements: string[];
       studentAliasResolutions: StudentAliasResolution[];
       workbookClassType?: WorkbookClassType;
     }
@@ -390,15 +385,29 @@ export default function BulkActiveCoursesSyncModal({
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
     studentAliasResolutions: StudentAliasResolution[],
+    newTeacherCreateAcknowledgements: string[],
     workbookClassType?: WorkbookClassType
   ) => {
     if (!selectedGroupId) return;
+    const scan = scanResultsByGroup[selectedGroupId];
+    if (scan) {
+      const payloadErr = detectedNewTeachersPayloadError(
+        scan.detectedNewTeachers,
+        teacherAliasResolutions,
+        newTeacherCreateAcknowledgements
+      );
+      if (payloadErr) {
+        setImportErrorsByGroup((prev) => ({ ...prev, [selectedGroupId]: payloadErr }));
+        return;
+      }
+    }
     setIsImportingOne(true);
     try {
       await runImportForGroup(selectedGroupId, {
         skippedRowsBySheet,
         skippedAttendanceCellsBySheet,
         teacherAliasResolutions,
+        newTeacherCreateAcknowledgements,
         studentAliasResolutions,
         workbookClassType,
       });
@@ -418,6 +427,7 @@ export default function BulkActiveCoursesSyncModal({
     _selectedSkippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     _selectedTeacherAliasResolutions: TeacherAliasResolution[],
     _selectedStudentAliasResolutions: StudentAliasResolution[],
+    _selectedNewTeacherCreateAcknowledgements: string[],
     _selectedWorkbookClassType?: WorkbookClassType,
     reviewStateByGroupId?: Record<string, ReviewImportSlice>
   ) => {
@@ -431,7 +441,19 @@ export default function BulkActiveCoursesSyncModal({
         const slice = reviewStateByGroupId?.[groupId];
         const skippedRowsBySheet = slice?.skippedRowsBySheet ?? {};
         const skippedAttendanceCellsBySheet = slice?.skippedAttendanceCellsBySheet ?? {};
-        const teacherAliasResolutions = buildTeacherResolutionsForScan(scan, slice?.teacherMergeByKey ?? {});
+        const { teacherAliasResolutions, newTeacherCreateAcknowledgements } = buildTeacherImportReviewPayload(
+          scan.detectedNewTeachers,
+          slice?.teacherMergeByKey ?? {}
+        );
+        const payloadErr = detectedNewTeachersPayloadError(
+          scan.detectedNewTeachers,
+          teacherAliasResolutions,
+          newTeacherCreateAcknowledgements
+        );
+        if (payloadErr) {
+          setImportErrorsByGroup((prev) => ({ ...prev, [groupId]: payloadErr }));
+          return;
+        }
         const studentAliasResolutions = buildStudentResolutionsForScan(scan, slice?.studentMergeByKey ?? {});
         const manualClassPick = slice?.manualWorkbookClassType ?? '';
         const workbookClassType =
@@ -440,6 +462,7 @@ export default function BulkActiveCoursesSyncModal({
           skippedRowsBySheet,
           skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
+          newTeacherCreateAcknowledgements,
           studentAliasResolutions,
           workbookClassType,
         });
@@ -500,6 +523,7 @@ export default function BulkActiveCoursesSyncModal({
         activeGroupTabId={selectedGroupId ?? undefined}
         onSelectGroupTab={setSelectedGroupId}
         isConfirmAllGroupsDisabled={targets.every((target) => !scanResultsByGroup[target.id])}
+        batchScanResultsByGroup={scanResultsByGroup}
       />
       {shouldShowBatchOverlay
         ? createPortal(

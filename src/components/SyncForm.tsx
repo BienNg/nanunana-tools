@@ -256,6 +256,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
     studentAliasResolutions: StudentAliasResolution[],
+    newTeacherCreateAcknowledgements: string[],
     workbookClassType?: WorkbookClassType
   ) => {
     if (!scanResult) return;
@@ -283,6 +284,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
           skippedRowsBySheet,
           skippedAttendanceCellsBySheet,
           teacherAliasResolutions,
+          newTeacherCreateAcknowledgements,
           studentAliasResolutions,
           ...(workbookClassType != null ? { workbookClassType } : {}),
         }),
