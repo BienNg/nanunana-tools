@@ -2,6 +2,7 @@ import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import { dbTimeToComparable, normalizeTeacherCellForCompare, sheetStudentStatusForCompare } from '@/lib/sync/googleSheetReimportDiff';
 import { isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
 import { datumChronoAppliesToRow, isDatumChronologyOutlier } from '@/lib/sync/sheetSessionDatumChronology';
+import { newSheetRowExcludedFromImport } from '@/lib/sync/reviewImportValidation';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { syncCourseTeachers } from '@/lib/sync/googleSheetTeacherSync';
 import { getStudentCacheKey } from '@/lib/sync/googleSheetStudentSync';
@@ -350,6 +351,7 @@ export async function syncOneScannedCourseSheet(
   let userSkippedSessionRows = 0;
   let autoSkippedFutureRows = 0;
   let autoSkippedChronologyRows = 0;
+  let autoSkippedValidationRows = 0;
   const autoSkippedInvalidDateRows = 0;
   let sessionsInserted = 0;
   let sessionsUpdated = 0;
@@ -424,6 +426,21 @@ export async function syncOneScannedCourseSheet(
     ) {
       skippedSessionRows += 1;
       autoSkippedChronologyRows += 1;
+      continue;
+    }
+    if (
+      newSheetRowExcludedFromImport(
+        scannedSheet,
+        sess.previewRowIndex,
+        skippedPreviewRows,
+        skippedAttendanceCells,
+        autoSkippedNoDateTeacherPreviewRows,
+        maxValidationRowIndex,
+        scannedSyncNow
+      )
+    ) {
+      skippedSessionRows += 1;
+      autoSkippedValidationRows += 1;
       continue;
     }
     sess.teacherParts.forEach((n) => teachersForCourse.add(n));
@@ -558,7 +575,7 @@ export async function syncOneScannedCourseSheet(
   );
   await onProgress?.({
     type: 'db',
-    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, chrono_skipped=${autoSkippedChronologyRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
+    message: `${sheetLabel} courses — sync_completed=${courseSyncCompleted} (course_id=${courseId}, user_skipped=${userSkippedSessionRows}, future_skipped=${autoSkippedFutureRows}, chrono_skipped=${autoSkippedChronologyRows}, validation_skipped=${autoSkippedValidationRows}, invalid_date_skipped=${autoSkippedInvalidDateRows}, total_skipped=${skippedSessionRows})`,
   });
   const { error: courseSyncFlagErr } = await supabase
     .from('courses')

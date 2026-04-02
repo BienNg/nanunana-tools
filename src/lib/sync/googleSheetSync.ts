@@ -51,6 +51,7 @@ import {
   parseStudentAliasResolutions,
 } from '@/lib/sync/googleSheetStudentSync';
 import { syncOneScannedCourseSheet } from '@/lib/sync/googleSheetScannedCourseSync';
+import { sheetHasRemainingStructuralDiff } from '@/lib/sync/reviewImportValidation';
 import type { TeacherAliasResolution } from '@/lib/sync/googleSheetTeacherSync';
 import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
 
@@ -1586,6 +1587,18 @@ export async function runReviewedSnapshotSync(
         cutoff !== null && sheet.visibleOrderIndex === cutoff
           ? findLastTaughtSessionRowIndex(sheet.sampleRows, reviewedImportNow)
           : null;
+      const skippedPreviewRows = new Set(skippedRowsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []);
+      const skippedAttendanceCells = new Set(
+        skippedAttendanceCellsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []
+      );
+      if (sheet.reimportDiff && !sheetHasRemainingStructuralDiff(sheet, skippedPreviewRows)) {
+        skipped++;
+        await onProgress?.({
+          type: 'status',
+          message: `[${sheet.title}] No structural changes left after skips — not imported.`,
+        });
+        continue;
+      }
       const result = await syncOneScannedCourseSheet(
         supabase,
         group.id,
@@ -1593,8 +1606,8 @@ export async function runReviewedSnapshotSync(
         teacherCache,
         canonicalTeacherNameById,
         studentCache,
-        new Set(skippedRowsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []),
-        new Set(skippedAttendanceCellsBySheet[`${sheet.visibleOrderIndex}:${sheet.title}`] ?? []),
+        skippedPreviewRows,
+        skippedAttendanceCells,
         maxValidationRowIndex,
         onProgress
       );

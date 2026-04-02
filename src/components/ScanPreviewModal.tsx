@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
   ScanGoogleSheetResult,
-  ScannedSampleRow,
   ScannedSheet,
   SkippedAttendanceCellsBySheet,
   SkippedRowsBySheet,
@@ -20,15 +19,22 @@ import {
   parseSheetDatum,
 } from '@/lib/sync/currentCourseSheet';
 import {
-  datumChronoAppliesToRow,
   isDatumChronologyOutlier,
   rowOutsideChronologyValidationTarget,
-  rowOutsideDatumChronologyScope,
-  type DatumChronologyScope,
 } from '@/lib/sync/sheetSessionDatumChronology';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
-
-const DATA_COLUMN_KEYS = ['Folien', 'Datum', 'von', 'bis', 'Lehrer'] as const;
+import {
+  countSheetValidationIssues,
+  datumChronoInReimportScope,
+  isEmptyCellValue,
+  isStudentEmptyViolation,
+  normalizeDisplayCellText,
+  rowOutsideValidationScope,
+  sampleRowsDatumChronologyScope,
+  sheetHasRemainingStructuralDiff,
+  trailingNoDateTeacherSessionRows,
+  validationInReimportScope,
+} from '@/lib/sync/reviewImportValidation';
 
 const CELL_WARN_CLASS = 'bg-yellow-100 ring-1 ring-inset ring-yellow-300/90 cursor-help';
 /** Cell differs from the last imported lesson (re-import of an existing course tab). */
@@ -73,19 +79,6 @@ function datumCellHoverTitle(
   return parts.join(' ');
 }
 
-function isEmptyCellValue(v: unknown): boolean {
-  return normalizeDisplayCellText(v).length === 0;
-}
-
-function normalizeDisplayCellText(v: unknown): string {
-  const s = String(v ?? '').trim();
-  if (!s) return '';
-  const lower = s.toLowerCase();
-  if (lower === 'null' || lower === 'undefined') return '';
-  if (s === '[object Object]') return '';
-  return s;
-}
-
 function formatDatumForDisplay(raw: string): string {
   const s = normalizeDisplayCellText(raw);
   if (!s) return '';
@@ -96,191 +89,6 @@ function formatDatumForDisplay(raw: string): string {
   const month = String(dt.getMonth() + 1).padStart(2, '0');
   const year = String(dt.getFullYear());
   return `${day}.${month}.${year}`;
-}
-
-function sampleRowsDatumChronologyScope(
-  rows: ScannedSampleRow[],
-  skippedRows: ReadonlySet<number>,
-  trailingNoDateTeacherRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null,
-  now: Date
-): DatumChronologyScope {
-  return {
-    rowCount: rows.length,
-    getDatumRaw: (i) => String(rows[i]?.values['Datum'] ?? ''),
-    skippedRows,
-    trailingNoDateTeacherRows,
-    maxValidationRowIndex,
-    now,
-  };
-}
-
-function rowOutsideValidationScope(
-  rows: ScannedSampleRow[],
-  rowIndex: number,
-  skippedRows: ReadonlySet<number>,
-  trailingNoDateTeacherRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null,
-  now: Date
-): boolean {
-  return rowOutsideDatumChronologyScope(
-    sampleRowsDatumChronologyScope(rows, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now),
-    rowIndex
-  );
-}
-
-/** Sheet background color (Present / Absent) or explicit absent wording counts as attendance data — not plain feedback text alone (matches import: status comes from fill color). */
-function studentCellHasAttendanceData(row: ScannedSampleRow, studentName: string): boolean {
-  const a = row.studentAttendance[studentName];
-  if (a === 'Present' || a === 'Absent') return true;
-  const t = String(row.values[studentName] ?? '').trim();
-  return /\babwesend\b/i.test(t) || /\babsent\b/i.test(t);
-}
-
-/** Row index of first cell with text or color attendance, or -1 if they never appear. */
-function studentFirstAttendanceRowIndex(
-  rows: ScannedSampleRow[],
-  studentName: string,
-  skippedRows: ReadonlySet<number>,
-  trailingNoDateTeacherRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null,
-  now: Date
-): number {
-  const end = maxValidationRowIndex === null ? rows.length - 1 : Math.min(rows.length - 1, maxValidationRowIndex);
-  for (let r = 0; r <= end; r++) {
-    if (rowOutsideValidationScope(rows, r, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) continue;
-    if (studentCellHasAttendanceData(rows[r], studentName)) return r;
-  }
-  return -1;
-}
-
-/** Empty student cells before first attendance are allowed (not joined yet). */
-function isStudentEmptyViolation(
-  rows: ScannedSampleRow[],
-  rowIndex: number,
-  studentName: string,
-  skippedRows: ReadonlySet<number>,
-  trailingNoDateTeacherRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null,
-  now: Date
-): boolean {
-  if (rowOutsideValidationScope(rows, rowIndex, skippedRows, trailingNoDateTeacherRows, maxValidationRowIndex, now)) return false;
-  const first = studentFirstAttendanceRowIndex(
-    rows,
-    studentName,
-    skippedRows,
-    trailingNoDateTeacherRows,
-    maxValidationRowIndex,
-    now
-  );
-  if (first < 0) return false;
-  return rowIndex > first && !studentCellHasAttendanceData(rows[rowIndex], studentName);
-}
-
-function trailingNoDateTeacherSessionRows(rows: ScannedSampleRow[]): ReadonlySet<number> {
-  const out = new Set<number>();
-  let allFollowingNoDateTeacher = true;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const noDate = isEmptyCellValue(rows[i]?.values['Datum']);
-    const noTeacher = isEmptyCellValue(rows[i]?.values['Lehrer']);
-    const isNoDateTeacher = noDate && noTeacher;
-    if (allFollowingNoDateTeacher && isNoDateTeacher) {
-      out.add(i);
-    } else {
-      allFollowingNoDateTeacher = false;
-    }
-  }
-  return out;
-}
-
-/** When re-importing an existing tab, only count validation for new sessions or cells that will change. */
-function validationInReimportScope(sheet: ScannedSheet, rowIdx: number, columnKey: string): boolean {
-  const d = sheet.reimportDiff;
-  if (!d) return true;
-  if (d.newSessionRowIndices.includes(rowIdx)) return true;
-  return (d.changedCellsByRow[rowIdx] ?? []).includes(columnKey);
-}
-
-function datumChronoInReimportScope(sheet: ScannedSheet, rowIdx: number): boolean {
-  return datumChronoAppliesToRow(sheet.reimportDiff, rowIdx);
-}
-
-function countSheetValidationIssues(
-  sheet: ScannedSheet,
-  skippedRows: ReadonlySet<number>,
-  skippedAttendanceCells: ReadonlySet<string>,
-  trailingNoDateTeacherRows: ReadonlySet<number>,
-  maxValidationRowIndex: number | null,
-  now: Date
-): number {
-  const { sampleRows } = sheet;
-  const chronoScope = sampleRowsDatumChronologyScope(
-    sampleRows,
-    skippedRows,
-    trailingNoDateTeacherRows,
-    maxValidationRowIndex,
-    now
-  );
-  let n = 0;
-  sampleRows.forEach((row, rIdx) => {
-    const outsideFull = rowOutsideValidationScope(
-      sampleRows,
-      rIdx,
-      skippedRows,
-      trailingNoDateTeacherRows,
-      maxValidationRowIndex,
-      now
-    );
-    if (!outsideFull) {
-      for (const key of DATA_COLUMN_KEYS) {
-        if (!validationInReimportScope(sheet, rIdx, key)) continue;
-        if (key === 'Lehrer') {
-          if (
-            isEmptyCellValue(row.values['Lehrer']) &&
-            isSheetDatumOnOrBeforeToday(row.values['Datum'] ?? '', now)
-          ) {
-            n++;
-          }
-          continue;
-        }
-        if (isEmptyCellValue(row.values[key])) n++;
-      }
-      if (
-        !isEmptyCellValue(row.values['Datum']) &&
-        parseSheetDatum(row.values['Datum'] ?? '') === null &&
-        validationInReimportScope(sheet, rIdx, 'Datum')
-      ) {
-        n++;
-      }
-    }
-    if (
-      !rowOutsideChronologyValidationTarget(chronoScope, rIdx) &&
-      !isEmptyCellValue(row.values['Datum']) &&
-      datumChronoInReimportScope(sheet, rIdx) &&
-      isDatumChronologyOutlier(chronoScope, rIdx)
-    ) {
-      n++;
-    }
-    if (!outsideFull) {
-      for (const s of sheet.headers.students) {
-        if (!validationInReimportScope(sheet, rIdx, s.name)) continue;
-        if (skippedAttendanceCells.has(`${rIdx}:${s.name}`)) continue;
-        if (
-          isStudentEmptyViolation(
-            sampleRows,
-            rIdx,
-            s.name,
-            skippedRows,
-            trailingNoDateTeacherRows,
-            maxValidationRowIndex,
-            now
-          )
-        )
-          n++;
-      }
-    }
-  });
-  return n;
 }
 
 function validationIssuesTooltip(count: number): string {
@@ -343,22 +151,6 @@ function isDatabaseMutationLogLine(line: string): boolean {
   if (lower.includes('sync_completed=')) return true;
   // Attendance summary lines use +/~/- counters instead of action verbs.
   return /attendance\s+—\s+\+\d+\s+~\d+\s+[−-]\d+/i.test(line);
-}
-
-/** Pending re-import work after user session-row skips (matches server reimport diff semantics). */
-function sheetHasRemainingStructuralDiff(sheet: ScannedSheet, skippedRows: ReadonlySet<number>): boolean {
-  const d = sheet.reimportDiff;
-  if (!d) return false;
-  for (const idx of d.newSessionRowIndices) {
-    if (!skippedRows.has(idx)) return true;
-  }
-  for (const rowIdxStr of Object.keys(d.changedCellsByRow)) {
-    const rowIdx = Number(rowIdxStr);
-    if (!Number.isFinite(rowIdx) || skippedRows.has(rowIdx)) continue;
-    const cells = d.changedCellsByRow[rowIdx];
-    if (cells && cells.length > 0) return true;
-  }
-  return false;
 }
 
 type ScanPreviewModalProps = {
@@ -779,6 +571,7 @@ export default function ScanPreviewModal({
             else if (isFutureCourseTab) tabLabel = `${sheet.title}, not included in this import`;
             const skippedForSheet = new Set(skippedRowsBySheet[makeSheetKey(sheet)] ?? []);
             const hasReimportUpdates = sheetHasRemainingStructuralDiff(sheet, skippedForSheet);
+            const isUnchangedReimportTab = Boolean(sheet.reimportDiff) && !hasReimportUpdates;
             const analyzedCourseCompleted = Boolean(
               sheet.analyzedSyncCompleted
             );
@@ -805,10 +598,14 @@ export default function ScanPreviewModal({
                     : `shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-60 ${
                         hasReimportUpdates && activeTab !== idx
                           ? 'border-sky-200/90 bg-sky-50/50'
+                          : isUnchangedReimportTab && activeTab !== idx
+                            ? 'border-gray-200/90 bg-gray-100/80 text-gray-500'
                           : ''
                       } ${
                         activeTab === idx
-                          ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
+                          ? isUnchangedReimportTab
+                            ? 'relative z-[1] -mb-px border-gray-200 bg-gray-100/90 text-gray-600 shadow-[0_-1px_0_0_white]'
+                            : 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-600 shadow-[0_-1px_0_0_white]'
                           : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-100/80 hover:text-gray-900'
                       }`
                 }
@@ -1155,6 +952,8 @@ export default function ScanPreviewModal({
                       );
                       const changedCells = activeSheet.reimportDiff?.changedCellsByRow[rIdx] ?? [];
                       const hasRowReimportDiff = isNewReimportSession || changedCells.length > 0;
+                      const isUnchangedReimportRow =
+                        !rowIsAutoSkipped && Boolean(activeSheet.reimportDiff) && !hasRowReimportDiff;
                       const rowDiffText = rowDiffSummary(activeSheet, rIdx);
                       const warnFolien =
                         !rowIsAutoSkipped &&
@@ -1203,6 +1002,8 @@ export default function ScanPreviewModal({
                         } ${
                           !rowIsAutoSkipped && hasRowReimportDiff && activeSheet.reimportDiff
                             ? 'bg-sky-50/70'
+                            : isUnchangedReimportRow
+                              ? 'bg-gray-50/80 text-gray-400'
                             : ''
                         }`}
                       >
@@ -1261,6 +1062,8 @@ export default function ScanPreviewModal({
                               ? CELL_WARN_CLASS
                               : showReimportCellHighlight(activeSheet, rIdx, 'Folien', warnFolien)
                                 ? CELL_UPDATE_CLASS
+                                : isUnchangedReimportRow
+                                  ? 'bg-gray-50/80 text-gray-400'
                                 : isNewReimportSession && activeSheet.reimportDiff
                                   ? 'cursor-help'
                                   : ''
@@ -1281,6 +1084,8 @@ export default function ScanPreviewModal({
                               ? CELL_WARN_CLASS
                               : showReimportCellHighlight(activeSheet, rIdx, 'Datum', warnDatum)
                                 ? CELL_UPDATE_CLASS
+                                : isUnchangedReimportRow
+                                  ? 'bg-gray-50/80 text-gray-400'
                                 : ''
                           }`}
                           {...hintHandlers(
@@ -1303,6 +1108,8 @@ export default function ScanPreviewModal({
                               ? CELL_WARN_CLASS
                               : showReimportCellHighlight(activeSheet, rIdx, 'von', warnVon)
                                 ? CELL_UPDATE_CLASS
+                                : isUnchangedReimportRow
+                                  ? 'bg-gray-50/80 text-gray-400'
                                 : ''
                           }`}
                           {...hintHandlers(
@@ -1317,6 +1124,8 @@ export default function ScanPreviewModal({
                               ? CELL_WARN_CLASS
                               : showReimportCellHighlight(activeSheet, rIdx, 'bis', warnBis)
                                 ? CELL_UPDATE_CLASS
+                                : isUnchangedReimportRow
+                                  ? 'bg-gray-50/80 text-gray-400'
                                 : ''
                           }`}
                           {...hintHandlers(
@@ -1331,6 +1140,8 @@ export default function ScanPreviewModal({
                               ? CELL_WARN_CLASS
                               : showReimportCellHighlight(activeSheet, rIdx, 'Lehrer', warnLehrer)
                                 ? CELL_UPDATE_CLASS
+                                : isUnchangedReimportRow
+                                  ? 'bg-gray-50/80 text-gray-400'
                                 : ''
                           }`}
                           {...hintHandlers(
@@ -1367,6 +1178,8 @@ export default function ScanPreviewModal({
                             ? CELL_WARN_CLASS
                             : isCellSkipped
                               ? 'bg-gray-100 text-gray-500 border-r border-gray-200'
+                            : isUnchangedReimportRow
+                              ? 'bg-gray-50/80 text-gray-400 border-r border-gray-200'
                             : updateCell
                               ? CELL_UPDATE_CLASS
                               : studentAttendanceCellClass(cellText, row.studentAttendance[student.name]);
