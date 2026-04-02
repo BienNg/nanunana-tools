@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
   ScanGoogleSheetResult,
@@ -177,7 +177,14 @@ type ScanPreviewModalProps = {
   resyncError?: string;
   /** Import finished once; require a fresh resync before allowing another import. */
   importRequiresResync?: boolean;
-  groupTabs?: { id: string; label: string; disabled?: boolean }[];
+  groupTabs?: {
+    id: string;
+    label: string;
+    disabled?: boolean;
+    /** From scan: new/changed session rows (see tooltip). */
+    detectedChangeCount?: number;
+    detectedChangeTooltip?: string;
+  }[];
   activeGroupTabId?: string;
   onSelectGroupTab?: (groupId: string) => void;
   onConfirmAllGroups?: (
@@ -185,7 +192,9 @@ type ScanPreviewModalProps = {
     skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
     teacherAliasResolutions: TeacherAliasResolution[],
     studentAliasResolutions: StudentAliasResolution[],
-    workbookClassType?: WorkbookClassType
+    workbookClassType?: WorkbookClassType,
+    /** Per-group review state so batch import keeps skips and alias picks from every group tab. */
+    reviewStateByGroupId?: Record<string, ReviewImportSlice>
   ) => void;
   isImportingAllGroups?: boolean;
   isConfirmAllGroupsDisabled?: boolean;
@@ -193,6 +202,32 @@ type ScanPreviewModalProps = {
 };
 
 type HoverHint = { text: string; x: number; y: number } | null;
+
+/** Stable empty maps so `?? {}` does not break memo deps with a new object each render. */
+const EMPTY_SKIPPED_ROWS: SkippedRowsBySheet = {};
+const EMPTY_SKIPPED_ATTENDANCE: SkippedAttendanceCellsBySheet = {};
+const EMPTY_TEACHER_MERGE: Record<string, string> = {};
+const EMPTY_STUDENT_MERGE: Record<string, string> = {};
+
+export type ReviewImportSlice = {
+  activeTab: number;
+  skippedRowsBySheet: SkippedRowsBySheet;
+  skippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet;
+  teacherMergeByKey: Record<string, string>;
+  studentMergeByKey: Record<string, string>;
+  manualWorkbookClassType: '' | WorkbookClassType;
+};
+
+function emptyReviewSlice(activeTab = 0): ReviewImportSlice {
+  return {
+    activeTab,
+    skippedRowsBySheet: {},
+    skippedAttendanceCellsBySheet: {},
+    teacherMergeByKey: {},
+    studentMergeByKey: {},
+    manualWorkbookClassType: '',
+  };
+}
 
 export default function ScanPreviewModal({
   isOpen,
@@ -215,20 +250,37 @@ export default function ScanPreviewModal({
   isConfirmAllGroupsDisabled = false,
   importApplySummary = null,
 }: ScanPreviewModalProps) {
-  const [activeTab, setActiveTab] = useState(0);
   const [mounted, setMounted] = useState(false);
-  const [skippedRowsBySheet, setSkippedRowsBySheet] = useState<SkippedRowsBySheet>({});
-  const [skippedAttendanceCellsBySheet, setSkippedAttendanceCellsBySheet] = useState<SkippedAttendanceCellsBySheet>(
-    {}
-  );
+  /**
+   * Per–group-tab review state when `onSelectGroupTab` is used (bulk update modal); otherwise only `_single` is used.
+   * Switching group tabs must not clear skips / merges / sheet tab index for other groups.
+   */
+  const [reviewSlicesByKey, setReviewSlicesByKey] = useState<Record<string, ReviewImportSlice>>({});
   const [openRowActionIndex, setOpenRowActionIndex] = useState<number | null>(null);
   const [hoverHint, setHoverHint] = useState<HoverHint>(null);
-  /** normalized teacher name key → existing teacher id when user maps a sheet name to a known teacher */
-  const [teacherMergeByKey, setTeacherMergeByKey] = useState<Record<string, string>>({});
-  /** normalized student name key → existing student id when user maps a sheet name to a known student */
-  const [studentMergeByKey, setStudentMergeByKey] = useState<Record<string, string>>({});
-  /** When scan did not detect a class type from the workbook title, user must pick one. */
-  const [manualWorkbookClassType, setManualWorkbookClassType] = useState<'' | WorkbookClassType>('');
+  const persistPerGroupReview = Boolean(onSelectGroupTab);
+  const reviewStorageKey = persistPerGroupReview ? (activeGroupTabId ?? '__none__') : '_single';
+
+  const updateReviewSlice = useCallback(
+    (updater: (slice: ReviewImportSlice) => ReviewImportSlice) => {
+      setReviewSlicesByKey((prev) => {
+        const key = persistPerGroupReview ? (activeGroupTabId ?? '__none__') : '_single';
+        const cur = prev[key] ?? emptyReviewSlice();
+        return { ...prev, [key]: updater(cur) };
+      });
+    },
+    [persistPerGroupReview, activeGroupTabId]
+  );
+
+  const activeReviewSlice = reviewSlicesByKey[reviewStorageKey];
+  const activeTab = activeReviewSlice?.activeTab ?? 0;
+  const skippedRowsBySheet = activeReviewSlice?.skippedRowsBySheet ?? EMPTY_SKIPPED_ROWS;
+  const skippedAttendanceCellsBySheet =
+    activeReviewSlice?.skippedAttendanceCellsBySheet ?? EMPTY_SKIPPED_ATTENDANCE;
+  const teacherMergeByKey = activeReviewSlice?.teacherMergeByKey ?? EMPTY_TEACHER_MERGE;
+  const studentMergeByKey = activeReviewSlice?.studentMergeByKey ?? EMPTY_STUDENT_MERGE;
+  const manualWorkbookClassType = activeReviewSlice?.manualWorkbookClassType ?? '';
+
   const importLogScrollRef = useRef<HTMLDivElement | null>(null);
   const importMutationDbLog = useMemo(
     () => importDbLog.filter((line) => isDatabaseMutationLogLine(line)),
@@ -252,14 +304,17 @@ export default function ScanPreviewModal({
     const firstImportable = list.findIndex(
       (s) => cutoff === null || s.visibleOrderIndex <= cutoff
     );
-    setActiveTab(firstImportable >= 0 ? firstImportable : 0);
-    setSkippedRowsBySheet({});
-    setSkippedAttendanceCellsBySheet({});
+    const nextTab = firstImportable >= 0 ? firstImportable : 0;
+    setReviewSlicesByKey((prev) => {
+      const key = persistPerGroupReview ? (activeGroupTabId ?? '__none__') : '_single';
+      if (persistPerGroupReview) {
+        if (prev[key]) return prev;
+        return { ...prev, [key]: emptyReviewSlice(nextTab) };
+      }
+      return { ...prev, _single: emptyReviewSlice(nextTab) };
+    });
     setOpenRowActionIndex(null);
-    setTeacherMergeByKey({});
-    setStudentMergeByKey({});
-    setManualWorkbookClassType('');
-  }, [isOpen, scanResult]);
+  }, [isOpen, scanResult, persistPerGroupReview, activeGroupTabId]);
 
   useEffect(() => {
     setOpenRowActionIndex(null);
@@ -436,38 +491,40 @@ export default function ScanPreviewModal({
       : null;
 
   const toggleSkipRow = (sheet: ScannedSheet, rowIndex: number) => {
-    const key = makeSheetKey(sheet);
-    setSkippedRowsBySheet((prev) => {
-      const before = new Set(prev[key] ?? []);
+    const sheetKey = makeSheetKey(sheet);
+    updateReviewSlice((slice) => {
+      const prevRows = slice.skippedRowsBySheet;
+      const before = new Set(prevRows[sheetKey] ?? []);
       if (before.has(rowIndex)) before.delete(rowIndex);
       else before.add(rowIndex);
-      const next: SkippedRowsBySheet = { ...prev };
-      if (before.size === 0) delete next[key];
-      else next[key] = [...before].sort((a, b) => a - b);
-      return next;
-    });
-    setSkippedAttendanceCellsBySheet((prev) => {
-      const before = new Set(prev[key] ?? []);
-      const nextCells = [...before].filter((token) => !token.startsWith(`${rowIndex}:`));
-      const next: SkippedAttendanceCellsBySheet = { ...prev };
-      if (nextCells.length === 0) delete next[key];
-      else next[key] = nextCells;
-      return next;
+      const nextRows: SkippedRowsBySheet = { ...prevRows };
+      if (before.size === 0) delete nextRows[sheetKey];
+      else nextRows[sheetKey] = [...before].sort((a, b) => a - b);
+
+      const prevCells = slice.skippedAttendanceCellsBySheet;
+      const cellBefore = new Set(prevCells[sheetKey] ?? []);
+      const nextCellList = [...cellBefore].filter((token) => !token.startsWith(`${rowIndex}:`));
+      const nextCells: SkippedAttendanceCellsBySheet = { ...prevCells };
+      if (nextCellList.length === 0) delete nextCells[sheetKey];
+      else nextCells[sheetKey] = nextCellList;
+
+      return { ...slice, skippedRowsBySheet: nextRows, skippedAttendanceCellsBySheet: nextCells };
     });
     setOpenRowActionIndex(null);
   };
 
   const toggleSkipAttendanceCell = (sheet: ScannedSheet, rowIndex: number, studentName: string) => {
-    const key = makeSheetKey(sheet);
+    const sheetKey = makeSheetKey(sheet);
     const token = `${rowIndex}:${studentName}`;
-    setSkippedAttendanceCellsBySheet((prev) => {
-      const before = new Set(prev[key] ?? []);
+    updateReviewSlice((slice) => {
+      const prevCells = slice.skippedAttendanceCellsBySheet;
+      const before = new Set(prevCells[sheetKey] ?? []);
       if (before.has(token)) before.delete(token);
       else before.add(token);
-      const next: SkippedAttendanceCellsBySheet = { ...prev };
-      if (before.size === 0) delete next[key];
-      else next[key] = [...before].sort((a, b) => a.localeCompare(b));
-      return next;
+      const nextCells: SkippedAttendanceCellsBySheet = { ...prevCells };
+      if (before.size === 0) delete nextCells[sheetKey];
+      else nextCells[sheetKey] = [...before].sort((a, b) => a.localeCompare(b));
+      return { ...slice, skippedAttendanceCellsBySheet: nextCells };
     });
   };
 
@@ -536,21 +593,35 @@ export default function ScanPreviewModal({
           >
             {groupTabs.map((groupTab) => {
               const selected = groupTab.id === activeGroupTabId;
+              const n = groupTab.detectedChangeCount;
+              const tabAriaLabel =
+                n != null
+                  ? `${groupTab.label}, ${n} session rows with new or changed lesson data on scan`
+                  : groupTab.label;
               return (
                 <button
                   key={groupTab.id}
                   type="button"
                   role="tab"
                   aria-selected={selected}
+                  aria-label={tabAriaLabel}
                   disabled={busy || groupTab.disabled}
                   onClick={() => onSelectGroupTab?.(groupTab.id)}
-                  className={`shrink-0 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors ${
+                  className={`inline-flex shrink-0 items-center gap-2 rounded-t-lg border border-b-0 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-colors ${
                     selected
                       ? 'relative z-[1] -mb-px border-gray-200 bg-white text-blue-700 shadow-[0_-1px_0_0_white]'
                       : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-200/60 hover:text-gray-900'
                   }`}
                 >
-                  {groupTab.label}
+                  <span>{groupTab.label}</span>
+                  {n != null ? (
+                    <span
+                      className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-slate-200 px-1.5 py-0.5 text-[0.6875rem] font-bold leading-none text-slate-900 ring-1 ring-slate-400/35 tabular-nums"
+                      title={groupTab.detectedChangeTooltip}
+                    >
+                      {n}
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
@@ -591,7 +662,12 @@ export default function ScanPreviewModal({
                 role="tab"
                 aria-selected={activeTab === idx && !isFutureCourseTab}
                 disabled={isResyncing || isFutureCourseTab}
-                onClick={() => setActiveTab(idx)}
+                onClick={() =>
+                  updateReviewSlice((slice) => ({
+                    ...slice,
+                    activeTab: idx,
+                  }))
+                }
                 aria-label={tabLabel}
                 title={
                   hasReimportUpdates
@@ -666,7 +742,10 @@ export default function ScanPreviewModal({
                   value={manualWorkbookClassType}
                   onChange={(e) => {
                     const v = e.target.value;
-                    setManualWorkbookClassType(v === '' ? '' : (v as WorkbookClassType));
+                    updateReviewSlice((slice) => ({
+                      ...slice,
+                      manualWorkbookClassType: v === '' ? '' : (v as WorkbookClassType),
+                    }));
                   }}
                   disabled={busy}
                   className="min-w-[12rem] rounded border border-amber-400/90 bg-white px-2 py-1.5 text-sm font-medium text-gray-900 shadow-sm focus:border-amber-600 focus:outline-none focus:ring-1 focus:ring-amber-500 disabled:opacity-50"
@@ -708,11 +787,11 @@ export default function ScanPreviewModal({
                         value={mergedId ?? ''}
                         onChange={(e) => {
                           const v = e.target.value;
-                          setTeacherMergeByKey((prev) => {
-                            const next = { ...prev };
+                          updateReviewSlice((slice) => {
+                            const next = { ...slice.teacherMergeByKey };
                             if (!v) delete next[nk];
                             else next[nk] = v;
-                            return next;
+                            return { ...slice, teacherMergeByKey: next };
                           });
                         }}
                         disabled={busy}
@@ -763,11 +842,11 @@ export default function ScanPreviewModal({
                         value={mergedId ?? ''}
                         onChange={(e) => {
                           const v = e.target.value;
-                          setStudentMergeByKey((prev) => {
-                            const next = { ...prev };
+                          updateReviewSlice((slice) => {
+                            const next = { ...slice.studentMergeByKey };
                             if (!v) delete next[nk];
                             else next[nk] = v;
-                            return next;
+                            return { ...slice, studentMergeByKey: next };
                           });
                         }}
                         disabled={busy}
@@ -1276,7 +1355,8 @@ export default function ScanPreviewModal({
                   skippedAttendanceCellsBySheet,
                   teacherAliasResolutions,
                   studentAliasResolutions,
-                  workbookClassTypeForApi
+                  workbookClassTypeForApi,
+                  reviewSlicesByKey
                 );
               }}
               disabled={confirmAllBlocked}

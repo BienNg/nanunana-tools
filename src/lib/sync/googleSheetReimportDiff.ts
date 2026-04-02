@@ -2,7 +2,13 @@ import { parseSpreadsheetIdFromUrl } from '@/lib/googleSheets/parseSpreadsheetId
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import { isIsoDateStrictlyAfterLocalToday } from '@/lib/sync/currentCourseSheet';
-import type { ScannedSampleRow, ScannedSheet, ScannedSheetReimportDiff, SyncProgressEvent } from '@/lib/sync/googleSheetSync';
+import type {
+  ScanGoogleSheetResult,
+  ScannedSampleRow,
+  ScannedSheet,
+  ScannedSheetReimportDiff,
+  SyncProgressEvent,
+} from '@/lib/sync/googleSheetSync';
 
 type SessionDateSkipReason = 'future' | null;
 
@@ -453,6 +459,35 @@ export function buildReimportDiffForSheet(
     newSessionRowIndices,
     hasStructuralChanges,
   };
+}
+
+/** Shown on bulk group tabs for the structural change badge. */
+export const DETECTED_STRUCTURAL_CHANGES_TOOLTIP =
+  'Session rows with new lessons or changed core fields (Folien, date, times, teacher) detected on scan—importable tabs only. Attendance-only edits are not counted.';
+
+/**
+ * Session rows that scan treats as new or structurally changed (importable tabs only).
+ * Existing tabs: {@link ScannedSheetReimportDiff} new rows plus rows with any changed core column.
+ * Tabs without a DB course match: {@link analyzeScannedSheetSessionsForImport} eligible rows.
+ */
+export function countDetectedStructuralWorkForReviewScan(
+  scan: Extract<ScanGoogleSheetResult, { success: true }>,
+  now: Date = new Date()
+): number {
+  const cutoff = scan.currentCourseVisibleIndex;
+  let total = 0;
+  for (const sheet of scan.sheets) {
+    if (cutoff !== null && sheet.visibleOrderIndex > cutoff) continue;
+    const d = sheet.reimportDiff;
+    if (d) {
+      total += d.newSessionRowIndices.length;
+      total += Object.keys(d.changedCellsByRow).length;
+    } else {
+      const { eligibleRowIndices } = analyzeScannedSheetSessionsForImport(sheet, now);
+      total += eligibleRowIndices.length;
+    }
+  }
+  return total;
 }
 
 export function collectTeacherNamesFromScannedSheets(sheets: ScannedSheet[]): string[] {

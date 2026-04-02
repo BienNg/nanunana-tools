@@ -2,8 +2,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { motion } from 'framer-motion';
 import { supabase } from '@/lib/supabase/client';
-import ScanPreviewModal from '@/components/ScanPreviewModal';
+import ScanPreviewModal, { type ReviewImportSlice } from '@/components/ScanPreviewModal';
+import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import type {
   ScanGoogleSheetResult,
   SkippedAttendanceCellsBySheet,
@@ -14,14 +16,41 @@ import type {
   SyncGroupApplySummary,
 } from '@/lib/sync/googleSheetSync';
 import type { StudentAliasResolution } from '@/lib/sync/googleSheetStudentSync';
+import {
+  countDetectedStructuralWorkForReviewScan,
+  DETECTED_STRUCTURAL_CHANGES_TOOLTIP,
+} from '@/lib/sync/googleSheetReimportDiff';
 
 type ScanSuccess = Extract<ScanGoogleSheetResult, { success: true }>;
+
+function buildTeacherResolutionsForScan(
+  scan: ScanSuccess,
+  mergeByKey: Record<string, string>
+): TeacherAliasResolution[] {
+  const resolutions: TeacherAliasResolution[] = [];
+  for (const name of scan.detectedNewTeachers ?? []) {
+    const tid = mergeByKey[normalizePersonNameKey(name)];
+    if (tid) resolutions.push({ aliasName: name, teacherId: tid });
+  }
+  return resolutions;
+}
+
+function buildStudentResolutionsForScan(
+  scan: ScanSuccess,
+  mergeByKey: Record<string, string>
+): StudentAliasResolution[] {
+  const resolutions: StudentAliasResolution[] = [];
+  for (const name of scan.detectedNewStudents ?? []) {
+    const sid = mergeByKey[normalizePersonNameKey(name)];
+    if (sid) resolutions.push({ aliasName: name, studentId: sid });
+  }
+  return resolutions;
+}
 
 type GroupTarget = {
   id: string;
   name: string;
   spreadsheetUrl: string;
-  activeCourseCount: number;
 };
 
 type NdjsonLine =
@@ -70,7 +99,7 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
 
 async function streamScanFromUrl(
   url: string,
-  onProgress: (message: string) => void
+  onProgress: (message: string, currentTab?: number, totalTabs?: number) => void
 ): Promise<ScanGoogleSheetResult | null> {
   const res = await fetch('/api/sync-sheet/scan', {
     method: 'POST',
@@ -104,7 +133,7 @@ async function streamScanFromUrl(
       const parsed = parseSyncNdjsonLine(line);
       if (!parsed) continue;
       if (parsed.kind === 'progress-status') onProgress(parsed.message);
-      if (parsed.kind === 'progress-sheet') onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`);
+      if (parsed.kind === 'progress-sheet') onProgress(`Tab ${parsed.current}/${parsed.total}: ${parsed.title}`, parsed.current, parsed.total);
       if (parsed.kind === 'done') finalResult = parsed.result as ScanGoogleSheetResult;
     }
   }
@@ -190,6 +219,9 @@ export default function BulkActiveCoursesSyncModal({
   const [scanResultsByGroup, setScanResultsByGroup] = useState<Record<string, ScanSuccess>>({});
   const [scanErrorsByGroup, setScanErrorsByGroup] = useState<Record<string, string>>({});
   const [scanProgressMessage, setScanProgressMessage] = useState('');
+  const [currentScanIndex, setCurrentScanIndex] = useState(0);
+  const [currentScanTab, setCurrentScanTab] = useState(0);
+  const [totalScanTabs, setTotalScanTabs] = useState(0);
   const [isScanningAll, setIsScanningAll] = useState(false);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [isImportingOne, setIsImportingOne] = useState(false);
@@ -232,6 +264,9 @@ export default function BulkActiveCoursesSyncModal({
       setScanResultsByGroup({});
       setScanErrorsByGroup({});
       setScanProgressMessage('Loading active incomplete groups…');
+      setCurrentScanIndex(0);
+      setCurrentScanTab(0);
+      setTotalScanTabs(0);
       setIsScanningAll(true);
       setSelectedGroupId(null);
       setImportProgressByGroup({});
@@ -262,16 +297,11 @@ export default function BulkActiveCoursesSyncModal({
         if (!row.group_id || !group?.id) continue;
         const spreadsheetUrl = String(group.spreadsheet_url ?? '').trim();
         if (!spreadsheetUrl) continue;
-        const prev = grouped.get(group.id);
-        if (prev) {
-          prev.activeCourseCount += 1;
-          continue;
-        }
+        if (grouped.has(group.id)) continue;
         grouped.set(group.id, {
           id: group.id,
           name: group.name ?? 'Unnamed group',
           spreadsheetUrl,
-          activeCourseCount: 1,
         });
       }
 
@@ -287,12 +317,17 @@ export default function BulkActiveCoursesSyncModal({
       const nextScans: Record<string, ScanSuccess> = {};
       const nextScanErrors: Record<string, string> = {};
       for (let i = 0; i < nextTargets.length; i++) {
+        setCurrentScanIndex(i);
+        setCurrentScanTab(0);
+        setTotalScanTabs(1);
         const target = nextTargets[i];
         setScanProgressMessage(`Scanning ${i + 1}/${nextTargets.length}: ${target.name}`);
         try {
-          const scan = await streamScanFromUrl(target.spreadsheetUrl, (m) =>
-            setScanProgressMessage(`Scanning ${i + 1}/${nextTargets.length}: ${target.name} — ${m}`)
-          );
+          const scan = await streamScanFromUrl(target.spreadsheetUrl, (m, cTab, tTabs) => {
+            setScanProgressMessage(`Scanning ${i + 1}/${nextTargets.length}: ${target.name} — ${m}`);
+            if (cTab !== undefined) setCurrentScanTab(cTab);
+            if (tTabs !== undefined) setTotalScanTabs(tTabs);
+          });
           if (scan?.success) nextScans[target.id] = scan;
           else nextScanErrors[target.id] = scan?.error ?? 'Scan finished without a result';
         } catch (err) {
@@ -302,6 +337,7 @@ export default function BulkActiveCoursesSyncModal({
       }
       setScanResultsByGroup(nextScans);
       setScanErrorsByGroup(nextScanErrors);
+      setCurrentScanIndex(nextTargets.length);
       const firstReady = nextTargets.find((t) => nextScans[t.id])?.id ?? null;
       setSelectedGroupId(firstReady);
       setScanProgressMessage('');
@@ -378,24 +414,34 @@ export default function BulkActiveCoursesSyncModal({
   };
 
   const handleImportAll = async (
-    selectedSkippedRowsBySheet: SkippedRowsBySheet,
-    selectedSkippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
-    selectedTeacherAliasResolutions: TeacherAliasResolution[],
-    selectedStudentAliasResolutions: StudentAliasResolution[],
-    selectedWorkbookClassType?: WorkbookClassType
+    _selectedSkippedRowsBySheet: SkippedRowsBySheet,
+    _selectedSkippedAttendanceCellsBySheet: SkippedAttendanceCellsBySheet,
+    _selectedTeacherAliasResolutions: TeacherAliasResolution[],
+    _selectedStudentAliasResolutions: StudentAliasResolution[],
+    _selectedWorkbookClassType?: WorkbookClassType,
+    reviewStateByGroupId?: Record<string, ReviewImportSlice>
   ) => {
     const readyGroupIds = targets.map((t) => t.id).filter((id) => Boolean(scanResultsByGroup[id]));
     if (readyGroupIds.length === 0) return;
     setIsImportingAll(true);
     try {
       for (const groupId of readyGroupIds) {
-        const useSelectedPayload = groupId === selectedGroupId;
+        const scan = scanResultsByGroup[groupId];
+        if (!scan) continue;
+        const slice = reviewStateByGroupId?.[groupId];
+        const skippedRowsBySheet = slice?.skippedRowsBySheet ?? {};
+        const skippedAttendanceCellsBySheet = slice?.skippedAttendanceCellsBySheet ?? {};
+        const teacherAliasResolutions = buildTeacherResolutionsForScan(scan, slice?.teacherMergeByKey ?? {});
+        const studentAliasResolutions = buildStudentResolutionsForScan(scan, slice?.studentMergeByKey ?? {});
+        const manualClassPick = slice?.manualWorkbookClassType ?? '';
+        const workbookClassType =
+          scan.workbookClassType == null ? (manualClassPick === '' ? undefined : manualClassPick) : undefined;
         await runImportForGroup(groupId, {
-          skippedRowsBySheet: useSelectedPayload ? selectedSkippedRowsBySheet : {},
-          skippedAttendanceCellsBySheet: useSelectedPayload ? selectedSkippedAttendanceCellsBySheet : {},
-          teacherAliasResolutions: useSelectedPayload ? selectedTeacherAliasResolutions : [],
-          studentAliasResolutions: useSelectedPayload ? selectedStudentAliasResolutions : [],
-          workbookClassType: useSelectedPayload ? selectedWorkbookClassType : undefined,
+          skippedRowsBySheet,
+          skippedAttendanceCellsBySheet,
+          teacherAliasResolutions,
+          studentAliasResolutions,
+          workbookClassType,
         });
       }
       onSyncComplete();
@@ -407,17 +453,34 @@ export default function BulkActiveCoursesSyncModal({
   if (!isOpen || !mounted) return null;
 
   if (!selectedScan || isScanningAll) {
+    let progressPercent = 0;
+    if (targets.length > 0) {
+      const basePercent = (currentScanIndex / targets.length) * 100;
+      const tabFraction = totalScanTabs > 0 ? currentScanTab / totalScanTabs : 0;
+      const currentGroupPercent = (1 / targets.length) * tabFraction * 100;
+      progressPercent = Math.min(100, basePercent + currentGroupPercent);
+    }
+
     return createPortal(
       <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/40 backdrop-blur-sm">
         <div className="w-[min(42rem,92vw)] rounded-2xl border border-white/20 bg-white p-6 shadow-2xl">
           <h2 className="text-xl font-bold text-on-surface">Update all active courses</h2>
-          <p className="mt-1 text-sm text-on-surface-variant">
-            {scanLoadError || scanProgressMessage || 'Preparing scans…'}
-          </p>
+          
           <div className="mt-5 flex items-center gap-3">
             <span className="material-symbols-outlined animate-spin text-primary">sync</span>
             <span className="text-sm font-medium text-on-surface-variant">Collecting review data for each group</span>
           </div>
+          <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-surface-variant/30">
+            <motion.div
+              className="h-full rounded-full bg-primary"
+              initial={{ width: 0 }}
+              animate={{ width: `${progressPercent}%` }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
+            />
+          </div>
+          <p className="mt-2 text-sm text-on-surface-variant">
+            {scanLoadError || scanProgressMessage || 'Preparing scans…'}
+          </p>
           <div className="mt-6 flex justify-end">
             <button
               type="button"
@@ -446,13 +509,17 @@ export default function BulkActiveCoursesSyncModal({
         importProgressMessage={selectedImportProgress}
         importDbLog={selectedImportDbLog}
         importApplySummary={selectedImportSummary}
-        groupTabs={targets.map((target) => ({
-          id: target.id,
-          label: scanErrorsByGroup[target.id]
-            ? `${target.name} (scan failed)`
-            : `${target.name} (${target.activeCourseCount})`,
-          disabled: !scanResultsByGroup[target.id],
-        }))}
+        groupTabs={targets.map((target) => {
+          const scan = scanResultsByGroup[target.id];
+          const failed = Boolean(scanErrorsByGroup[target.id]);
+          return {
+            id: target.id,
+            label: failed ? `${target.name} (scan failed)` : target.name,
+            disabled: !scan,
+            detectedChangeCount: scan && !failed ? countDetectedStructuralWorkForReviewScan(scan) : undefined,
+            detectedChangeTooltip: DETECTED_STRUCTURAL_CHANGES_TOOLTIP,
+          };
+        })}
         activeGroupTabId={selectedGroupId ?? undefined}
         onSelectGroupTab={setSelectedGroupId}
         isConfirmAllGroupsDisabled={targets.every((target) => !scanResultsByGroup[target.id])}
