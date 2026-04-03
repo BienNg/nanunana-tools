@@ -1,23 +1,11 @@
 import Link from 'next/link';
-import { Fragment } from 'react';
 import { getFeedbackQueueCandidatesPage, type FeedbackQueueView } from './feedbackStudents.server';
-import { markStudentFeedbackDone } from '@/app/actions/markStudentFeedbackDone';
-import { snoozeStudentFeedback, unsnoozeStudentFeedback } from '@/app/actions/snoozeStudentFeedback';
+import FeedbackQueueViews from './FeedbackQueueViews';
 
 export const dynamic = 'force-dynamic';
 const FEEDBACKS_PER_PAGE = 25;
 
 type SearchParams = Record<string, string | string[] | undefined>;
-
-function formatDate(value: string | null): string {
-  if (!value) return 'Never';
-  return new Date(value).toLocaleDateString();
-}
-
-function formatOptionalDate(value: string | null): string {
-  if (!value) return '-';
-  return new Date(value).toLocaleDateString();
-}
 
 export default async function FeedbackPage({
   searchParams,
@@ -124,132 +112,7 @@ export default async function FeedbackPage({
         </Link>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-slate-50 border-b border-slate-200">
-              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Student
-              </th>
-              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Courses
-              </th>
-              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Missing since feedback
-              </th>
-              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Last feedback
-              </th>
-              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Snoozed until
-              </th>
-              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Queue reason
-              </th>
-              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Actions
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {students.map((student) => (
-              <tr key={student.id} className="hover:bg-slate-50/50 transition-colors">
-                <td className="py-4 px-6">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-bold text-primary">
-                      {student.name.charAt(0).toUpperCase()}
-                    </div>
-                    <span className="font-medium text-slate-900">{student.name}</span>
-                  </div>
-                </td>
-                <td className="py-4 px-6 text-sm text-slate-700">
-                  {student.courses.length === 0 ? (
-                    <span className="text-slate-400">—</span>
-                  ) : (
-                    <>
-                      {student.courses.map((course, i) => (
-                        <Fragment key={course.id}>
-                          {i > 0 ? <span className="text-slate-300"> · </span> : null}
-                          <Link
-                            href={`/courses/${course.id}`}
-                            className="text-primary font-medium underline-offset-2 hover:text-primary/80 hover:underline"
-                          >
-                            {course.groupName ? `${course.groupName} — ${course.name}` : course.name}
-                          </Link>
-                        </Fragment>
-                      ))}
-                    </>
-                  )}
-                </td>
-                <td className="py-4 px-6 text-sm text-slate-700">
-                  <span className={student.needsAttention ? 'font-semibold text-error' : ''}>
-                    {student.absentSinceFeedbackCount}
-                  </span>
-                </td>
-                <td className="py-4 px-6 text-sm text-slate-700">
-                  {formatDate(student.feedbackSentAt)}
-                </td>
-                <td className="py-4 px-6 text-sm text-slate-700">
-                  {formatOptionalDate(student.feedbackSnoozedUntil)}
-                </td>
-                <td className="py-4 px-6 text-sm text-slate-700">
-                  {student.queueReasonDetails.length > 0 ? (
-                    <p className="text-xs text-slate-500">{student.queueReasonDetails.join(' | ')}</p>
-                  ) : (
-                    <span className="text-slate-400">-</span>
-                  )}
-                </td>
-                <td className="py-4 px-6 text-sm text-slate-700">
-                  <div className="flex items-center gap-2">
-                    <form action={markStudentFeedbackDone.bind(null, student.id)}>
-                      <button
-                        type="submit"
-                        className="inline-flex items-center rounded-full bg-primary px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
-                      >
-                        Done
-                      </button>
-                    </form>
-                    {view === 'active' ? (
-                      <form action={snoozeStudentFeedback.bind(null, student.id, 7)}>
-                        <button
-                          type="submit"
-                          className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
-                        >
-                          Snooze 7d
-                        </button>
-                      </form>
-                    ) : (
-                      <form action={unsnoozeStudentFeedback.bind(null, student.id)}>
-                        <button
-                          type="submit"
-                          className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
-                        >
-                          Unsnooze
-                        </button>
-                      </form>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {students.length === 0 && (
-              <tr>
-                <td colSpan={7} className="py-12 text-center text-slate-500">
-                  <div className="flex flex-col items-center justify-center">
-                    <span className="material-symbols-outlined mb-3 text-4xl text-slate-300">inbox</span>
-                    <p>{view === 'snoozed' ? 'No snoozed students right now.' : 'No students are due for feedback right now.'}</p>
-                    <p className="mt-1 text-sm text-slate-400">
-                      {view === 'snoozed'
-                        ? 'Snoozed students with active queue reasons appear here until their snooze expires.'
-                        : 'Students appear after the first-week enrollment gate and queue rules are met.'}
-                    </p>
-                  </div>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <FeedbackQueueViews students={students} view={view} />
 
       {students.length > 0 ? (
         <p className="mt-4 text-sm text-slate-500">Sorted by priority: needs attention first, then oldest feedback date.</p>
@@ -269,7 +132,7 @@ export default async function FeedbackPage({
         </Link>
 
         {uniquePagesToRender.map((page) => (
-          <Fragment key={page}>
+          <span key={page}>
             {gapsBeforePage(page) ? (
               <span className="px-1 text-slate-400" aria-hidden="true">
                 ...
@@ -286,7 +149,7 @@ export default async function FeedbackPage({
             >
               {page}
             </Link>
-          </Fragment>
+          </span>
         ))}
 
         <Link
