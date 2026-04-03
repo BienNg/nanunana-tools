@@ -18,6 +18,17 @@ export type FeedbackQueueCandidate = {
 };
 
 type QueueView = 'active' | 'snoozed';
+export type FeedbackQueueView = QueueView;
+
+export type FeedbackQueuePage = {
+  items: FeedbackQueueCandidate[];
+  total: number;
+  totalPages: number;
+  page: number;
+  pageSize: number;
+  totalNeedsAttention: number;
+  totalDueOnly: number;
+};
 
 function asSingle<T>(x: T | T[] | null | undefined): T | null {
   if (x == null) return null;
@@ -230,7 +241,8 @@ export async function getFeedbackQueueCandidates(
       );
     }
 
-    if (!dueByTime && !needsAttention) continue;
+    // Product rule: only detect students with more than one absence since feedback.
+    if (!needsAttention) continue;
     if (view === 'active' && isCurrentlySnoozed) continue;
     if (view === 'snoozed' && !isCurrentlySnoozed) continue;
 
@@ -270,4 +282,36 @@ export async function getFeedbackQueueCandidates(
     if (aSent !== bSent) return aSent - bSent;
     return collator.compare(a.name, b.name);
   });
+}
+
+export async function getFeedbackQueueCandidatesPage(args?: {
+  nowArg?: Date;
+  view?: QueueView;
+  page?: number;
+  pageSize?: number;
+}): Promise<FeedbackQueuePage> {
+  const view = args?.view ?? 'active';
+  const pageSize = Number.isFinite(args?.pageSize)
+    ? Math.max(1, Math.floor(args?.pageSize as number))
+    : 25;
+  const requestedPage = Number.isFinite(args?.page) ? Math.max(1, Math.floor(args?.page as number)) : 1;
+  const all = await getFeedbackQueueCandidates(args?.nowArg, view);
+  const total = all.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const start = (page - 1) * pageSize;
+  const end = start + pageSize;
+  const items = all.slice(start, end);
+  const totalNeedsAttention = all.filter((s) => s.needsAttention).length;
+  const totalDueOnly = all.filter((s) => s.dueByTime && !s.needsAttention).length;
+
+  return {
+    items,
+    total,
+    totalPages,
+    page,
+    pageSize,
+    totalNeedsAttention,
+    totalDueOnly,
+  };
 }

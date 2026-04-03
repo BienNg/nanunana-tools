@@ -50,7 +50,7 @@ Store globally on `students`:
 1. "Last month" window definition: rolling last 30 days.
 2. First enrollment date source: first session date of the student's latest course.
 3. Done action semantics: marking done sets `feedback_sent_at = now`.
-4. If student is due by time but has <= 1 absence: include in queue.
+4. If student has <= 1 absence since last feedback: do not include in queue.
 
 ## Increment 0 acceptance criteria
 
