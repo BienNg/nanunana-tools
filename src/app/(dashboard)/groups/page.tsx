@@ -25,23 +25,24 @@ export default async function GroupsPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {groups?.map((group) => (
-          <GroupCard
-            key={group.id}
-            id={group.id}
-            name={group.name}
-            spreadsheetUrl={group.spreadsheet_url}
-            syncCompleted={group.sync_completed ?? false}
-          />
-        ))}
-        {(!groups || groups.length === 0) && (
-          <div className="col-span-full p-12 text-center bg-surface-container-lowest border border-outline-variant/10 rounded-2xl flex flex-col items-center justify-center min-h-[200px]">
-             <span className="material-symbols-outlined text-4xl text-outline mb-2">inbox</span>
-            <p className="text-on-surface-variant">No groups found. Import data to get started.</p>
-          </div>
-        )}
-      </div>
+      {groups && groups.length > 0 ? (
+        <div className="bg-surface-container-lowest border border-outline-variant/10 rounded-2xl overflow-hidden shadow-sm divide-y divide-outline-variant/10">
+          {groups.map((group) => (
+            <GroupCard
+              key={group.id}
+              id={group.id}
+              name={group.name}
+              spreadsheetUrl={group.spreadsheet_url}
+              syncCompleted={group.sync_completed ?? false}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="p-12 text-center bg-surface-container-lowest border border-outline-variant/10 rounded-2xl flex flex-col items-center justify-center min-h-[200px]">
+          <span className="material-symbols-outlined text-4xl text-outline mb-2">inbox</span>
+          <p className="text-on-surface-variant">No groups found. Import data to get started.</p>
+        </div>
+      )}
     </div>
   );
 }

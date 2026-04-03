@@ -352,7 +352,7 @@ export default function GroupCard({
 
   return (
     <div
-      className="bg-surface-container-lowest border border-outline-variant/10 rounded-2xl p-6 shadow-sm hover:shadow-md transition-all hover:-translate-y-1 hover:border-primary/30 h-full flex flex-col justify-between group cursor-pointer"
+      className="p-5 sm:p-6 hover:bg-surface-container-low/30 transition-colors group cursor-pointer"
       onClick={openDetails}
       onKeyDown={(event) => {
         if (isModalOpen) return;
@@ -365,34 +365,35 @@ export default function GroupCard({
       tabIndex={0}
       aria-label={`Open group ${name}, ${syncCompleted ? 'import completed' : 'import not completed'}`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1 pr-2">
-          <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center mb-4 text-primary group-hover:bg-primary group-hover:text-white transition-colors">
-            <span className="material-symbols-outlined">workspaces</span>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+        <div className="flex items-start gap-4 min-w-0 flex-1">
+          <div className="w-10 h-10 shrink-0 bg-primary/10 rounded-xl flex items-center justify-center text-primary group-hover:bg-primary group-hover:text-white transition-colors">
+            <span className="material-symbols-outlined text-[22px]">workspaces</span>
           </div>
-          <div className="flex flex-wrap items-center gap-2 mb-2">
-            <h3 className="text-xl font-bold text-on-surface">{name}</h3>
-            <SyncCompletionPill completed={syncCompleted} />
-          </div>
-          {spreadsheetUrl ? (
-            <a
-              href={spreadsheetUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(event) => event.stopPropagation()}
-              onKeyDown={(event) => event.stopPropagation()}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-outline-variant/20 hover:bg-green-50/80 hover:border-green-200/60 dark:hover:bg-green-950/30 dark:hover:border-green-800/50 transition-colors mt-2 p-1.5"
-              aria-label={`Open Google Sheet for ${name}`}
-              title={spreadsheetUrl}
-            >
-              <GoogleSheetsLogo className="h-[22px] w-[22px] shrink-0" />
-            </a>
-          ) : (
-            <div
-              className="mt-2 space-y-2"
-              onClick={(event) => event.stopPropagation()}
-              onKeyDown={(event) => event.stopPropagation()}
-            >
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <h3 className="text-lg sm:text-xl font-bold text-on-surface">{name}</h3>
+              <SyncCompletionPill completed={syncCompleted} />
+            </div>
+            {spreadsheetUrl ? (
+              <a
+                href={spreadsheetUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+                className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-outline-variant/20 hover:bg-green-50/80 hover:border-green-200/60 dark:hover:bg-green-950/30 dark:hover:border-green-800/50 transition-colors p-1.5"
+                aria-label={`Open Google Sheet for ${name}`}
+                title={spreadsheetUrl}
+              >
+                <GoogleSheetsLogo className="h-[22px] w-[22px] shrink-0" />
+              </a>
+            ) : (
+              <div
+                className="space-y-2"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
               {!sheetPanelOpen ? (
                 <button
                   type="button"
@@ -483,58 +484,67 @@ export default function GroupCard({
                 </form>
               )}
             </div>
-          )}
+            )}
+          </div>
         </div>
 
-        <div className="relative" ref={rootRef}>
-          <button
-            type="button"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              setOpen((v) => !v);
-            }}
-            disabled={pending}
-            className="h-9 w-9 rounded-lg border border-outline-variant/20 text-on-surface-variant hover:bg-surface-container-low transition-colors disabled:opacity-50 inline-flex items-center justify-center"
-            aria-label={`Open actions for group ${name}`}
-            aria-haspopup="menu"
-            aria-expanded={open}
-          >
-            <span className="material-symbols-outlined text-[18px]">more_vert</span>
-          </button>
-
-          {open ? (
-            <div
-              className="absolute right-0 mt-2 min-w-[160px] rounded-xl border border-outline-variant/20 bg-surface-container-lowest shadow-lg z-50 p-1"
-              role="menu"
+        <div className="flex items-center justify-between gap-3 sm:justify-end shrink-0 pl-14 sm:pl-0">
+          <p className="text-sm text-primary font-medium flex items-center gap-1">
+            View Details
+            <span className="material-symbols-outlined text-sm group-hover:translate-x-1 transition-transform">
+              arrow_forward
+            </span>
+          </p>
+          <div className="relative" ref={rootRef}>
+            <button
+              type="button"
               onClick={(event) => {
+                event.preventDefault();
                 event.stopPropagation();
+                setOpen((v) => !v);
               }}
+              disabled={pending}
+              className="h-9 w-9 rounded-lg border border-outline-variant/20 text-on-surface-variant hover:bg-surface-container-low transition-colors disabled:opacity-50 inline-flex items-center justify-center"
+              aria-label={`Open actions for group ${name}`}
+              aria-haspopup="menu"
+              aria-expanded={open}
             >
-              <button
-                type="button"
-                onClick={() => {
-                  void scanFromGroupUrl();
+              <span className="material-symbols-outlined text-[18px]">more_vert</span>
+            </button>
+
+            {open ? (
+              <div
+                className="absolute right-0 mt-2 min-w-[160px] rounded-xl border border-outline-variant/20 bg-surface-container-lowest shadow-lg z-50 p-1"
+                role="menu"
+                onClick={(event) => {
+                  event.stopPropagation();
                 }}
-                disabled={pending || isScanning || isImporting || !spreadsheetUrl}
-                className="w-full rounded-lg px-3 py-2 text-left text-sm font-semibold text-on-surface hover:bg-surface-container-low disabled:opacity-50 inline-flex items-center gap-2"
-                role="menuitem"
               >
-                <span className="material-symbols-outlined text-[16px]">sync</span>
-                {isScanning ? 'Scanning…' : 'Resync group'}
-              </button>
-              <button
-                type="button"
-                onClick={onDelete}
-                disabled={pending || isScanning || isImporting}
-                className="w-full rounded-lg px-3 py-2 text-left text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50 inline-flex items-center gap-2"
-                role="menuitem"
-              >
-                <span className="material-symbols-outlined text-[16px]">delete</span>
-                {pending ? 'Deleting…' : 'Delete group'}
-              </button>
-            </div>
-          ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    void scanFromGroupUrl();
+                  }}
+                  disabled={pending || isScanning || isImporting || !spreadsheetUrl}
+                  className="w-full rounded-lg px-3 py-2 text-left text-sm font-semibold text-on-surface hover:bg-surface-container-low disabled:opacity-50 inline-flex items-center gap-2"
+                  role="menuitem"
+                >
+                  <span className="material-symbols-outlined text-[16px]">sync</span>
+                  {isScanning ? 'Scanning…' : 'Resync group'}
+                </button>
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  disabled={pending || isScanning || isImporting}
+                  className="w-full rounded-lg px-3 py-2 text-left text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50 inline-flex items-center gap-2"
+                  role="menuitem"
+                >
+                  <span className="material-symbols-outlined text-[16px]">delete</span>
+                  {pending ? 'Deleting…' : 'Delete group'}
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -543,13 +553,6 @@ export default function GroupCard({
           {actionError}
         </p>
       ) : null}
-
-      <p className="text-sm text-primary font-medium flex items-center gap-1 mt-4">
-        View Details
-        <span className="material-symbols-outlined text-sm group-hover:translate-x-1 transition-transform">
-          arrow_forward
-        </span>
-      </p>
 
       <ScanPreviewModal
         isOpen={isModalOpen}

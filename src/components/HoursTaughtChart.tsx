@@ -18,18 +18,27 @@ function yearMonthFromLessonDate(dateStr: unknown): string | null {
   return m ? m[1] : null;
 }
 
+/** Groups display names like "A2.2 Online VN" → "A2.2_ONLINE_VN" for stacked segments. */
+function normalizeCourseStackKey(name: string): string {
+  const t = name.trim();
+  if (!t) return 'UNKNOWN_COURSE';
+  return t.replace(/\s+/g, '_').toUpperCase();
+}
+
 export default async function HoursTaughtChart() {
   const supabase = getSupabaseAdmin();
 
   // 1. Fetch courses and groups to get class types and default minutes
   const { data: coursesData } = await supabase
     .from('courses')
-    .select('id, groups ( class_type, default_lesson_minutes )');
+    .select('id, name, groups ( class_type, default_lesson_minutes )');
 
   const classTypeByCourseId = new Map<string, GroupClassType | null>();
   const defaultLessonMinutesByCourseId = new Map<string, number | null>();
+  const courseNameById = new Map<string, string>();
 
   (coursesData || []).forEach((course) => {
+    courseNameById.set(course.id, typeof course.name === 'string' ? course.name : '');
     const group = Array.isArray(course.groups) ? course.groups[0] : course.groups;
     classTypeByCourseId.set(course.id, normalizeGroupClassType(group?.class_type));
     defaultLessonMinutesByCourseId.set(
@@ -115,6 +124,7 @@ export default async function HoursTaughtChart() {
   const sessionsByYearMonthAndClassType: Record<string, Record<ClassTypeBucketKey, number>> = {};
   const groupsByYearMonth: Record<string, Set<string>> = {};
   const groupsByYearMonthAndClassType: Record<string, Record<ClassTypeBucketKey, Set<string>>> = {};
+  const studentsPresentByYmAndStack: Record<string, Record<string, Set<string>>> = {};
   trendMonthBuckets.forEach(b => {
     minutesByYearMonth[b.ym] = 0;
     minutesByYearMonthAndClassType[b.ym] = {
@@ -146,6 +156,7 @@ export default async function HoursTaughtChart() {
       P: new Set<string>(),
       Unknown: new Set<string>(),
     };
+    studentsPresentByYmAndStack[b.ym] = {};
   });
 
   for (const lesson of allLessons) {
@@ -166,10 +177,54 @@ export default async function HoursTaughtChart() {
     }
   }
 
+  const trendYmSet = new Set(trendMonthBuckets.map((b) => b.ym));
+  const lessonYmById = new Map<string, string>();
+  const lessonCourseById = new Map<string, string>();
+  for (const lesson of allLessons) {
+    if (typeof lesson.id !== 'string' || typeof lesson.course_id !== 'string') continue;
+    lessonCourseById.set(lesson.id, lesson.course_id);
+    const ym = yearMonthFromLessonDate(lesson.date);
+    if (ym && trendYmSet.has(ym)) lessonYmById.set(lesson.id, ym);
+  }
+
+  let attendanceRows: { lesson_id: string; student_id: string; status: string }[] = [];
+  offset = 0;
+  hasMore = true;
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from('attendance_records')
+      .select('lesson_id, student_id, status')
+      .range(offset, offset + pageSize - 1);
+
+    if (error || !data || data.length === 0) {
+      hasMore = false;
+    } else {
+      attendanceRows.push(...data);
+      offset += pageSize;
+      if (data.length < pageSize) hasMore = false;
+    }
+  }
+
+  for (const row of attendanceRows) {
+    if (row.status !== 'Present') continue;
+    const ym = lessonYmById.get(row.lesson_id);
+    if (!ym) continue;
+    const courseId = lessonCourseById.get(row.lesson_id);
+    if (!courseId) continue;
+    const stackKey = normalizeCourseStackKey(courseNameById.get(courseId) ?? '');
+    const bucket = studentsPresentByYmAndStack[ym];
+    if (!bucket[stackKey]) bucket[stackKey] = new Set();
+    bucket[stackKey].add(row.student_id);
+  }
+
   const chartData: HoursTaughtChartClientData = trendMonthBuckets.map(({ ym, label }) => {
     const minutes = minutesByYearMonth[ym] ?? 0;
     const sessions = sessionsByYearMonth[ym] ?? 0;
     const groups = groupsByYearMonth[ym]?.size ?? 0;
+    const courseStudentStacks = Object.entries(studentsPresentByYmAndStack[ym] ?? {})
+      .map(([stackKey, set]) => ({ stackKey, students: set.size }))
+      .filter((e) => e.students > 0)
+      .sort((a, b) => a.stackKey.localeCompare(b.stackKey));
     return {
       ym,
       label,
@@ -177,6 +232,7 @@ export default async function HoursTaughtChart() {
       hours: minutes / 60,
       sessions,
       groups,
+      courseStudentStacks,
       classTypeHours: [
         ...CLASS_TYPE_ORDER.map((classType) => ({
           classType,
