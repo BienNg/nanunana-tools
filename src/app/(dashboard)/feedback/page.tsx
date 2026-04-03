@@ -1,9 +1,8 @@
 import Link from 'next/link';
-import { getFeedbackQueueCandidatesPage, type FeedbackQueueView } from './feedbackStudents.server';
+import { getFeedbackQueueCandidates, type FeedbackQueueView } from './feedbackStudents.server';
 import FeedbackQueueViews from './FeedbackQueueViews';
 
 export const dynamic = 'force-dynamic';
-const FEEDBACKS_PER_PAGE = 25;
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -19,43 +18,11 @@ export default async function FeedbackPage({
   const modeParam = params.mode;
   const rawMode = Array.isArray(modeParam) ? modeParam[0] : modeParam;
   const mode: 'focused' | 'list' = rawMode === 'list' ? 'list' : 'focused';
-  const pageParam = params.page;
-  const rawPage = Array.isArray(pageParam) ? pageParam[0] : pageParam;
-  const currentPage = Math.max(1, Number.parseInt(rawPage ?? '1', 10) || 1);
 
-  const result = await getFeedbackQueueCandidatesPage({
-    view,
-    page: currentPage,
-    pageSize: FEEDBACKS_PER_PAGE,
-  });
-  const students = result.items;
-  const totalStudents = result.total;
-  const totalPages = result.totalPages;
-  const needsAttentionCount = result.totalNeedsAttention;
+  const students = await getFeedbackQueueCandidates(undefined, view);
+  const totalStudents = students.length;
+  const needsAttentionCount = students.filter((s) => s.needsAttention).length;
   const dueInQueueCount = students.filter((s) => s.dueByTime).length;
-  const hasPreviousPage = result.page > 1;
-  const hasNextPage = result.page < totalPages;
-  const pageStart = students.length === 0 ? 0 : (result.page - 1) * FEEDBACKS_PER_PAGE + 1;
-  const pageEnd = students.length === 0 ? 0 : Math.min(result.page * FEEDBACKS_PER_PAGE, totalStudents);
-  const pagesToRender = Array.from({ length: totalPages }, (_, idx) => idx + 1).filter(
-    (page) => Math.abs(page - result.page) <= 2 || page === 1 || page === totalPages
-  );
-  const uniquePagesToRender = pagesToRender.filter(
-    (page, index) => pagesToRender.indexOf(page) === index
-  );
-  const gapsBeforePage = (page: number): boolean => {
-    const idx = uniquePagesToRender.indexOf(page);
-    if (idx <= 0) return false;
-    return page - uniquePagesToRender[idx - 1] > 1;
-  };
-  const buildFeedbackUrl = (nextPage: number): string => {
-    const query = new URLSearchParams();
-    if (view === 'snoozed') query.set('view', 'snoozed');
-    if (view === 'active' && mode === 'list') query.set('mode', 'list');
-    if (nextPage > 1) query.set('page', String(nextPage));
-    const qs = query.toString();
-    return qs ? `/feedback?${qs}` : '/feedback';
-  };
 
   return (
     <div className="pt-24 px-10 pb-12 animate-fade-up">
@@ -86,11 +53,10 @@ export default async function FeedbackPage({
         </div>
       </div>
 
-      <div className="mb-3 flex items-center justify-between text-sm text-slate-500">
+      <div className="mb-3 text-sm text-slate-500">
         <p>
-          Showing {pageStart}-{pageEnd} of {totalStudents} students
+          {totalStudents === 0 ? 'No students in this view.' : `${totalStudents} student${totalStudents === 1 ? '' : 's'} in this view`}
         </p>
-        <p>{FEEDBACKS_PER_PAGE} per page</p>
       </div>
 
       <div className="mb-4 flex items-center gap-2">
@@ -138,53 +104,6 @@ export default async function FeedbackPage({
       {students.length > 0 ? (
         <p className="mt-4 text-sm text-slate-500">Sorted by priority: needs attention first, then oldest feedback date.</p>
       ) : null}
-
-      <div className="mt-5 flex flex-wrap items-center gap-2">
-        <Link
-          href={buildFeedbackUrl(Math.max(1, result.page - 1))}
-          aria-disabled={!hasPreviousPage}
-          className={`inline-flex h-9 items-center justify-center rounded-lg border px-3 text-sm font-medium transition ${
-            hasPreviousPage
-              ? 'border-slate-200 text-slate-700 hover:bg-slate-50'
-              : 'pointer-events-none border-slate-100 text-slate-300'
-          }`}
-        >
-          Previous
-        </Link>
-
-        {uniquePagesToRender.map((page) => (
-          <span key={page}>
-            {gapsBeforePage(page) ? (
-              <span className="px-1 text-slate-400" aria-hidden="true">
-                ...
-              </span>
-            ) : null}
-            <Link
-              href={buildFeedbackUrl(page)}
-              aria-current={result.page === page ? 'page' : undefined}
-              className={`inline-flex h-9 min-w-9 items-center justify-center rounded-lg border px-3 text-sm font-medium transition ${
-                result.page === page
-                  ? 'border-primary bg-primary text-white'
-                  : 'border-slate-200 text-slate-700 hover:bg-slate-50'
-              }`}
-            >
-              {page}
-            </Link>
-          </span>
-        ))}
-
-        <Link
-          href={buildFeedbackUrl(Math.min(totalPages, result.page + 1))}
-          aria-disabled={!hasNextPage}
-          className={`inline-flex h-9 items-center justify-center rounded-lg border px-3 text-sm font-medium transition ${
-            hasNextPage
-              ? 'border-slate-200 text-slate-700 hover:bg-slate-50'
-              : 'pointer-events-none border-slate-100 text-slate-300'
-          }`}
-        >
-          Next
-        </Link>
-      </div>
     </div>
   );
 }

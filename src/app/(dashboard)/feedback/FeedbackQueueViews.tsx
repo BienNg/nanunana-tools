@@ -43,11 +43,11 @@ export default function FeedbackQueueViews({
           {focusedStudent ? (
             <>
               <div className="mx-auto max-w-3xl">
-                <div className="mb-6 flex items-center justify-between">
+                <div className="mb-6 flex flex-col items-center gap-3">
                   <p className="text-sm text-slate-500">
                     Student {focusedIndex + 1} of {students.length}
                   </p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-center gap-2">
                     <button
                       type="button"
                       onClick={() => setFocusedIndex((i) => Math.max(0, i - 1))}
@@ -79,23 +79,20 @@ export default function FeedbackQueueViews({
 
                   <div className="rounded-xl border border-slate-100 p-4">
                     <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Courses</p>
-                    <div className="text-sm text-slate-700">
+                    <div className="flex flex-col gap-2 text-sm text-slate-700">
                       {focusedStudent.courses.length === 0 ? (
                         <span className="text-slate-400">-</span>
                       ) : (
-                        <>
-                          {focusedStudent.courses.map((course, i) => (
-                            <Fragment key={course.id}>
-                              {i > 0 ? <span className="text-slate-300"> · </span> : null}
-                              <Link
-                                href={`/courses/${course.id}`}
-                                className="text-primary font-medium underline-offset-2 hover:text-primary/80 hover:underline"
-                              >
-                                {course.groupName ? `${course.groupName} — ${course.name}` : course.name}
-                              </Link>
-                            </Fragment>
-                          ))}
-                        </>
+                        focusedStudent.courses.map((course) => (
+                          <div key={course.id} className="min-w-0">
+                            <Link
+                              href={`/courses/${course.id}`}
+                              className="text-primary font-medium underline-offset-2 hover:text-primary/80 hover:underline break-words"
+                            >
+                              {course.groupName ? `${course.groupName} — ${course.name}` : course.name}
+                            </Link>
+                          </div>
+                        ))
                       )}
                     </div>
                   </div>
