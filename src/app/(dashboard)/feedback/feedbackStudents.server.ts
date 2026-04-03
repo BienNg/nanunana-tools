@@ -9,11 +9,15 @@ export type FeedbackQueueCandidate = {
   feedbackSnoozedUntil: string | null;
   feedbackDoneAt: string | null;
   dueByTime: boolean;
+  dueDays: number;
   absentSinceFeedbackCount: number;
   needsAttention: boolean;
+  queueReasonDetails: string[];
   latestCourseFirstSessionDate: string | null;
   courses: CourseContext[];
 };
+
+type QueueView = 'active' | 'snoozed';
 
 function asSingle<T>(x: T | T[] | null | undefined): T | null {
   if (x == null) return null;
@@ -28,6 +32,11 @@ function minusDays(now: Date, days: number): Date {
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 }
 
+function wholeDaysBetween(from: Date, to: Date): number {
+  const ms = to.getTime() - from.getTime();
+  return Math.floor(ms / (24 * 60 * 60 * 1000));
+}
+
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -37,7 +46,10 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 }
 
 /** Increment 2: read-only queue detection, no workflow actions yet. */
-export async function getFeedbackQueueCandidates(nowArg?: Date): Promise<FeedbackQueueCandidate[]> {
+export async function getFeedbackQueueCandidates(
+  nowArg?: Date,
+  view: QueueView = 'active'
+): Promise<FeedbackQueueCandidate[]> {
   const supabase = getSupabaseAdmin();
   const now = nowArg ?? new Date();
   const lastMonthStart = minusDays(now, 30);
@@ -130,15 +142,17 @@ export async function getFeedbackQueueCandidates(nowArg?: Date): Promise<Feedbac
   }
 
   const latestCourseByStudent = new Map<string, string>();
-  for (const sid of recentStudentIds) {
-    const rows = enrollmentsByStudent.get(sid) ?? [];
-    if (rows.length === 0) continue;
-    const latest = [...rows].sort((a, b) => {
-      const ta = Date.parse(String(a.created_at ?? '')) || 0;
-      const tb = Date.parse(String(b.created_at ?? '')) || 0;
-      return tb - ta;
-    })[0];
-    if (latest?.course_id) latestCourseByStudent.set(sid, latest.course_id);
+  const latestEnrollmentTsByStudent = new Map<string, number>();
+  for (const row of allEnrollments) {
+    const sid = String(row.student_id ?? '');
+    const cid = String(row.course_id ?? '');
+    if (!sid || !cid) continue;
+    const ts = Date.parse(String(row.created_at ?? '')) || 0;
+    const prev = latestEnrollmentTsByStudent.get(sid);
+    if (prev == null || ts > prev) {
+      latestEnrollmentTsByStudent.set(sid, ts);
+      latestCourseByStudent.set(sid, cid);
+    }
   }
 
   const latestCourseIds = [...new Set([...latestCourseByStudent.values()])];
@@ -193,7 +207,12 @@ export async function getFeedbackQueueCandidates(nowArg?: Date): Promise<Feedbac
     }
 
     const feedbackSentAt = student.feedback_sent_at;
-    const dueByTime = !feedbackSentAt || new Date(feedbackSentAt) < weekAgo;
+    const feedbackSentAtDate = feedbackSentAt ? new Date(feedbackSentAt) : null;
+    const dueByTime = !feedbackSentAtDate || feedbackSentAtDate < weekAgo;
+    const dueDays = !feedbackSentAtDate ? 9999 : Math.max(0, wholeDaysBetween(feedbackSentAtDate, now));
+    const snoozedUntil = student.feedback_snoozed_until;
+    const isCurrentlySnoozed =
+      Boolean(snoozedUntil) && Date.parse(String(snoozedUntil)) > now.getTime();
 
     const absenceTimes = absencesByStudent.get(sid) ?? [];
     const absentSinceFeedbackCount = absenceTimes.filter((iso) => {
@@ -201,8 +220,19 @@ export async function getFeedbackQueueCandidates(nowArg?: Date): Promise<Feedbac
       return Date.parse(iso) > Date.parse(feedbackSentAt);
     }).length;
     const needsAttention = absentSinceFeedbackCount > 1;
+    const queueReasonDetails: string[] = [];
+    if (needsAttention) {
+      queueReasonDetails.push(`${absentSinceFeedbackCount} absences since last feedback`);
+    }
+    if (dueByTime) {
+      queueReasonDetails.push(
+        !feedbackSentAtDate ? 'No feedback sent yet' : `${dueDays} days since last feedback`
+      );
+    }
 
     if (!dueByTime && !needsAttention) continue;
+    if (view === 'active' && isCurrentlySnoozed) continue;
+    if (view === 'snoozed' && !isCurrentlySnoozed) continue;
 
     const coursesMap = new Map<string, CourseContext>();
     for (const row of enrollmentsByStudent.get(sid) ?? []) {
@@ -221,11 +251,13 @@ export async function getFeedbackQueueCandidates(nowArg?: Date): Promise<Feedbac
       id: sid,
       name: student.name,
       feedbackSentAt,
-      feedbackSnoozedUntil: student.feedback_snoozed_until,
+      feedbackSnoozedUntil: snoozedUntil,
       feedbackDoneAt: student.feedback_done_at,
       dueByTime,
+      dueDays,
       absentSinceFeedbackCount,
       needsAttention,
+      queueReasonDetails,
       latestCourseFirstSessionDate: firstSessionDate,
       courses,
     });

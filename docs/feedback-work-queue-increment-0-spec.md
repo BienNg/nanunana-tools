@@ -43,7 +43,7 @@ Store globally on `students`:
 
 - `feedback_sent_at` (timestamp, nullable)
 - `feedback_status` (optional, enum-like string: `ok` / `needs_attention` / `sent`)
-- queue fields for assignee/snooze/done (shape decided in Increment 1 migration)
+- queue fields for snooze/done
 
 ## Open decisions to resolve before Increment 1
 
