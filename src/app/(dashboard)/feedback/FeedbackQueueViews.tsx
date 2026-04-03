@@ -19,11 +19,12 @@ function formatOptionalDate(value: string | null): string {
 export default function FeedbackQueueViews({
   students,
   view,
+  mode,
 }: {
   students: FeedbackQueueCandidate[];
   view: FeedbackQueueView;
+  mode: 'focused' | 'list';
 }) {
-  const [mode, setMode] = useState<'focused' | 'list'>('focused');
   const [focusedIndex, setFocusedIndex] = useState(0);
 
   useEffect(() => {
@@ -37,27 +38,6 @@ export default function FeedbackQueueViews({
 
   return (
     <>
-      <div className="mb-4 inline-flex rounded-full bg-slate-100 p-1">
-        <button
-          type="button"
-          onClick={() => setMode('focused')}
-          className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${
-            mode === 'focused' ? 'bg-primary text-white' : 'text-slate-600 hover:bg-white'
-          }`}
-        >
-          Focused
-        </button>
-        <button
-          type="button"
-          onClick={() => setMode('list')}
-          className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${
-            mode === 'list' ? 'bg-primary text-white' : 'text-slate-600 hover:bg-white'
-          }`}
-        >
-          List
-        </button>
-      </div>
-
       {mode === 'focused' ? (
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           {focusedStudent ? (
