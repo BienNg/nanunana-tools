@@ -101,6 +101,7 @@ export async function getFeedbackQueueCandidates(
     (olderLessonsResult.data ?? []).map((r) => String(r.course_id ?? '')).filter(Boolean)
   );
   const recentlyStartedCourseIds = [...recentCourseIds].filter((courseId) => !olderCourseIds.has(courseId));
+  const recentlyStartedCourseIdSet = new Set(recentlyStartedCourseIds);
   if (recentlyStartedCourseIds.length === 0) return [];
 
   const seedEnrollmentRows: Array<{ student_id: string }> = [];
@@ -287,11 +288,12 @@ export async function getFeedbackQueueCandidates(
     let absentSinceFeedbackCount = 0;
     const absenceCourseIds = new Set<string>();
     for (const absence of studentAbsences) {
+      if (!absence.courseId || !recentlyStartedCourseIdSet.has(absence.courseId)) continue;
       const shouldCount =
         !feedbackSentAt || Date.parse(absence.createdAt) > Date.parse(feedbackSentAt);
       if (!shouldCount) continue;
       absentSinceFeedbackCount += 1;
-      if (absence.courseId) absenceCourseIds.add(absence.courseId);
+      absenceCourseIds.add(absence.courseId);
     }
     const needsAttention = absentSinceFeedbackCount > 1;
     const queueReasonDetails: string[] = [];
