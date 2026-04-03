@@ -111,6 +111,10 @@ export default async function HoursTaughtChart() {
 
   const minutesByYearMonth: Record<string, number> = {};
   const minutesByYearMonthAndClassType: Record<string, Record<ClassTypeBucketKey, number>> = {};
+  const sessionsByYearMonth: Record<string, number> = {};
+  const sessionsByYearMonthAndClassType: Record<string, Record<ClassTypeBucketKey, number>> = {};
+  const groupsByYearMonth: Record<string, Set<string>> = {};
+  const groupsByYearMonthAndClassType: Record<string, Record<ClassTypeBucketKey, Set<string>>> = {};
   trendMonthBuckets.forEach(b => {
     minutesByYearMonth[b.ym] = 0;
     minutesByYearMonthAndClassType[b.ym] = {
@@ -121,6 +125,26 @@ export default async function HoursTaughtChart() {
       A: 0,
       P: 0,
       Unknown: 0,
+    };
+    sessionsByYearMonth[b.ym] = 0;
+    sessionsByYearMonthAndClassType[b.ym] = {
+      Online_DE: 0,
+      Online_VN: 0,
+      Offline: 0,
+      M: 0,
+      A: 0,
+      P: 0,
+      Unknown: 0,
+    };
+    groupsByYearMonth[b.ym] = new Set<string>();
+    groupsByYearMonthAndClassType[b.ym] = {
+      Online_DE: new Set<string>(),
+      Online_VN: new Set<string>(),
+      Offline: new Set<string>(),
+      M: new Set<string>(),
+      A: new Set<string>(),
+      P: new Set<string>(),
+      Unknown: new Set<string>(),
     };
   });
 
@@ -133,16 +157,26 @@ export default async function HoursTaughtChart() {
       const classType = classTypeByCourseId.get(lesson.course_id) ?? null;
       const classTypeKey: ClassTypeBucketKey = classType ?? UNKNOWN_CLASS_TYPE_KEY;
       minutesByYearMonthAndClassType[ym][classTypeKey] += lessonMinutes;
+      sessionsByYearMonth[ym] += 1;
+      sessionsByYearMonthAndClassType[ym][classTypeKey] += 1;
+      if (typeof lesson.course_id === 'string' && lesson.course_id.length > 0) {
+        groupsByYearMonth[ym].add(lesson.course_id);
+        groupsByYearMonthAndClassType[ym][classTypeKey].add(lesson.course_id);
+      }
     }
   }
 
   const chartData: HoursTaughtChartClientData = trendMonthBuckets.map(({ ym, label }) => {
     const minutes = minutesByYearMonth[ym] ?? 0;
+    const sessions = sessionsByYearMonth[ym] ?? 0;
+    const groups = groupsByYearMonth[ym]?.size ?? 0;
     return {
       ym,
       label,
       minutes,
       hours: minutes / 60,
+      sessions,
+      groups,
       classTypeHours: [
         ...CLASS_TYPE_ORDER.map((classType) => ({
           classType,
@@ -153,6 +187,26 @@ export default async function HoursTaughtChart() {
           classType: UNKNOWN_CLASS_TYPE_KEY,
           minutes: minutesByYearMonthAndClassType[ym][UNKNOWN_CLASS_TYPE_KEY],
           hours: minutesByYearMonthAndClassType[ym][UNKNOWN_CLASS_TYPE_KEY] / 60,
+        },
+      ],
+      classTypeSessions: [
+        ...CLASS_TYPE_ORDER.map((classType) => ({
+          classType,
+          sessions: sessionsByYearMonthAndClassType[ym][classType],
+        })),
+        {
+          classType: UNKNOWN_CLASS_TYPE_KEY,
+          sessions: sessionsByYearMonthAndClassType[ym][UNKNOWN_CLASS_TYPE_KEY],
+        },
+      ],
+      classTypeGroups: [
+        ...CLASS_TYPE_ORDER.map((classType) => ({
+          classType,
+          groups: groupsByYearMonthAndClassType[ym][classType].size,
+        })),
+        {
+          classType: UNKNOWN_CLASS_TYPE_KEY,
+          groups: groupsByYearMonthAndClassType[ym][UNKNOWN_CLASS_TYPE_KEY].size,
         },
       ],
     };
