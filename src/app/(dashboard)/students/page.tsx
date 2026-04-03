@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { Fragment, Suspense, type ReactNode } from 'react';
+import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import StudentAliasesManager from '@/components/StudentAliasesManager';
 import StudentsFilters from '@/components/StudentsFilters';
@@ -154,7 +155,12 @@ export default async function StudentsPage({ searchParams }: StudentsPageProps) 
     .order('name');
 
   if (queryText) {
-    studentsQuery = studentsQuery.ilike('name', `%${queryText}%`);
+    const searchKey = normalizePersonNameKey(queryText);
+    if (searchKey) {
+      studentsQuery = studentsQuery.ilike('name_search_key', `%${searchKey}%`);
+    } else {
+      studentsQuery = studentsQuery.ilike('name', `%${queryText}%`);
+    }
   }
 
   if (groupFilter) {
