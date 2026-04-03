@@ -1,9 +1,11 @@
 import Link from 'next/link';
-import { Fragment, type ReactNode } from 'react';
+import { Fragment, Suspense, type ReactNode } from 'react';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import StudentAliasesManager from '@/components/StudentAliasesManager';
+import StudentsFilters from '@/components/StudentsFilters';
 
 export const dynamic = 'force-dynamic';
+const STUDENTS_PER_PAGE = 50;
 
 type TeacherRow = { id: string; name: string } | null;
 type CourseTeacherRow = { teachers: TeacherRow | TeacherRow[] | null } | null;
@@ -36,6 +38,12 @@ type StudentSummary = {
   courses: NamedEntity[];
   teachers: NamedEntity[];
   aliases: { id: string; alias: string }[];
+};
+
+type SearchParams = Record<string, string | string[] | undefined>;
+
+type StudentsPageProps = {
+  searchParams: Promise<SearchParams>;
 };
 
 function addById(map: Map<string, NamedEntity>, entity: NamedEntity | null | undefined): void {
@@ -74,12 +82,42 @@ function asArray<T>(value: T | T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [value];
 }
 
-export default async function StudentsPage() {
+function firstParam(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? (value[0] ?? '') : (value ?? '');
+}
+
+function buildStudentsUrl({
+  page,
+  query,
+  group,
+}: {
+  page: number;
+  query: string;
+  group: string;
+}): string {
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  if (group) params.set('group', group);
+  if (page > 1) params.set('page', String(page));
+  const qs = params.toString();
+  return qs ? `/students?${qs}` : '/students';
+}
+
+export default async function StudentsPage({ searchParams }: StudentsPageProps) {
+  const resolvedSearchParams = await searchParams;
+  const queryText = firstParam(resolvedSearchParams.q).trim();
+  const groupFilter = firstParam(resolvedSearchParams.group).trim();
+  const pageParam = Number.parseInt(firstParam(resolvedSearchParams.page), 10);
+  const currentPage = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+  const rangeFrom = (currentPage - 1) * STUDENTS_PER_PAGE;
+  const rangeTo = rangeFrom + STUDENTS_PER_PAGE - 1;
+
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  let studentsQuery = supabase
     .from('students')
     .select(`
       id,
+      group_id,
       name,
       groups ( id, name ),
       student_aliases ( id, alias ),
@@ -93,14 +131,52 @@ export default async function StudentsPage() {
           )
         )
       )
-    `)
+    `, { count: 'exact' })
     .order('name');
 
-  if (error) {
-    console.error('Error fetching students:', error);
+  if (queryText) {
+    studentsQuery = studentsQuery.ilike('name', `%${queryText}%`);
   }
 
-  const studentRows = (data ?? []) as StudentRow[];
+  if (groupFilter) {
+    studentsQuery = studentsQuery.eq('group_id', groupFilter);
+  }
+
+  const [studentsResponse, groupsResponse, studentOptionsResponse] = await Promise.all([
+    studentsQuery.range(rangeFrom, rangeTo),
+    supabase.from('groups').select('id, name').order('name'),
+    supabase.from('students').select('id, name').order('name'),
+  ]);
+
+  if (studentsResponse.error) {
+    console.error('Error fetching students:', studentsResponse.error);
+  }
+  if (groupsResponse.error) {
+    console.error('Error fetching groups:', groupsResponse.error);
+  }
+  if (studentOptionsResponse.error) {
+    console.error('Error fetching student options:', studentOptionsResponse.error);
+  }
+
+  const totalStudents = studentsResponse.count ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalStudents / STUDENTS_PER_PAGE));
+  const hasPreviousPage = currentPage > 1;
+  const hasNextPage = currentPage < totalPages;
+  const pagesToRender = Array.from({ length: totalPages }, (_, idx) => idx + 1).filter(
+    (page) => Math.abs(page - currentPage) <= 2 || page === 1 || page === totalPages
+  );
+
+  const uniquePagesToRender = pagesToRender.filter(
+    (page, index) => pagesToRender.indexOf(page) === index
+  );
+
+  const gapsBeforePage = (page: number): boolean => {
+    const idx = uniquePagesToRender.indexOf(page);
+    if (idx <= 0) return false;
+    return page - uniquePagesToRender[idx - 1] > 1;
+  };
+
+  const studentRows = (studentsResponse.data ?? []) as StudentRow[];
   const students: StudentSummary[] = studentRows.map((student) => {
     const groupsMap = new Map<string, NamedEntity>();
     const coursesMap = new Map<string, NamedEntity>();
@@ -138,9 +214,18 @@ export default async function StudentsPage() {
         .sort((a, b) => a.alias.localeCompare(b.alias)),
     };
   });
-  const studentOptions = students
+  const pageStart = students.length === 0 ? 0 : rangeFrom + 1;
+  const pageEnd = students.length === 0 ? 0 : Math.min(rangeTo + 1, totalStudents);
+
+  const studentOptions = ((studentOptionsResponse.data ?? []) as Array<{ id: string; name: string }>)
     .map((s) => ({ id: s.id, name: s.name }))
     .sort((a, b) => a.name.localeCompare(b.name));
+
+  const groups = ((groupsResponse.data ?? []) as Array<{ id: string; name: string }>)
+    .map((group) => ({ id: group.id, name: group.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const activeFilters = Boolean(queryText || groupFilter);
 
   return (
     <div className="pt-24 px-10 pb-12 animate-fade-up">
@@ -151,6 +236,24 @@ export default async function StudentsPage() {
         <p className="text-on-surface-variant max-w-2xl">
           View each student with the courses they attend, groups they belong to, and the teachers assigned through those courses.
         </p>
+      </div>
+
+      <Suspense
+        fallback={
+          <div
+            className="mb-5 h-[88px] animate-pulse rounded-xl border border-slate-200 bg-white"
+            aria-hidden
+          />
+        }
+      >
+        <StudentsFilters groups={groups} />
+      </Suspense>
+
+      <div className="mb-3 flex items-center justify-between text-sm text-slate-500">
+        <p>
+          Showing {pageStart}-{pageEnd} of {totalStudents} students
+        </p>
+        <p>{STUDENTS_PER_PAGE} per page</p>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -199,13 +302,64 @@ export default async function StudentsPage() {
                 <td colSpan={5} className="py-12 text-center text-slate-500">
                   <div className="flex flex-col items-center justify-center">
                     <span className="material-symbols-outlined text-4xl mb-3 text-slate-300">inbox</span>
-                    <p>No students found. Import data to get started.</p>
+                    <p>
+                      {activeFilters
+                        ? 'No students match your filters.'
+                        : 'No students found. Import data to get started.'}
+                    </p>
                   </div>
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="mt-5 flex flex-wrap items-center gap-2">
+        <Link
+          href={buildStudentsUrl({ page: Math.max(1, currentPage - 1), query: queryText, group: groupFilter })}
+          aria-disabled={!hasPreviousPage}
+          className={`inline-flex h-9 items-center justify-center rounded-lg border px-3 text-sm font-medium transition ${
+            hasPreviousPage
+              ? 'border-slate-200 text-slate-700 hover:bg-slate-50'
+              : 'pointer-events-none border-slate-100 text-slate-300'
+          }`}
+        >
+          Previous
+        </Link>
+
+        {uniquePagesToRender.map((page) => (
+          <Fragment key={page}>
+            {gapsBeforePage(page) ? (
+              <span className="px-1 text-slate-400" aria-hidden="true">
+                ...
+              </span>
+            ) : null}
+            <Link
+              href={buildStudentsUrl({ page, query: queryText, group: groupFilter })}
+              aria-current={currentPage === page ? 'page' : undefined}
+              className={`inline-flex h-9 min-w-9 items-center justify-center rounded-lg border px-3 text-sm font-medium transition ${
+                currentPage === page
+                  ? 'border-primary bg-primary text-white'
+                  : 'border-slate-200 text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              {page}
+            </Link>
+          </Fragment>
+        ))}
+
+        <Link
+          href={buildStudentsUrl({ page: Math.min(totalPages, currentPage + 1), query: queryText, group: groupFilter })}
+          aria-disabled={!hasNextPage}
+          className={`inline-flex h-9 items-center justify-center rounded-lg border px-3 text-sm font-medium transition ${
+            hasNextPage
+              ? 'border-slate-200 text-slate-700 hover:bg-slate-50'
+              : 'pointer-events-none border-slate-100 text-slate-300'
+          }`}
+        >
+          Next
+        </Link>
       </div>
     </div>
   );
