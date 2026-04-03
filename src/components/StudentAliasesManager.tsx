@@ -7,6 +7,10 @@ import { useRouter } from 'next/navigation';
 type AliasItem = { id: string; alias: string };
 type StudentOption = { id: string; name: string; groupIds: string[] };
 
+function charLength(value: string): number {
+  return [...value.trim()].length;
+}
+
 export default function StudentAliasesManager({
   studentId,
   studentName,
@@ -24,6 +28,7 @@ export default function StudentAliasesManager({
   const [open, setOpen] = useState(false);
   const [filterText, setFilterText] = useState('');
   const [selectedTargetStudentId, setSelectedTargetStudentId] = useState('');
+  const [tieWinnerStudentId, setTieWinnerStudentId] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: 240 });
@@ -55,6 +60,14 @@ export default function StudentAliasesManager({
     if (!selectedTargetStudentId) return '';
     return studentOptions.find((s) => s.id === selectedTargetStudentId)?.name ?? '';
   }, [selectedTargetStudentId, studentOptions]);
+  const selectedTargetStudent = useMemo(
+    () => studentOptions.find((s) => s.id === selectedTargetStudentId) ?? null,
+    [selectedTargetStudentId, studentOptions]
+  );
+  const isNameLengthTie = useMemo(() => {
+    if (!selectedTargetStudent) return false;
+    return charLength(selectedTargetStudent.name) === charLength(studentName);
+  }, [selectedTargetStudent, studentName]);
 
   const updateMenuPosition = useCallback(() => {
     const el = buttonRef.current;
@@ -115,22 +128,35 @@ export default function StudentAliasesManager({
     }
   }, [open]);
 
-  const linkCurrentNameAsAlias = async () => {
+  const mergeStudents = async () => {
     if (!selectedTargetStudentId || pending) return;
+    if (isNameLengthTie && !tieWinnerStudentId) {
+      setError('Choose which student to keep because both names have the same length.');
+      return;
+    }
     setPending(true);
     setError('');
     try {
       const res = await fetch('/api/students/aliases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ studentId: selectedTargetStudentId, alias: studentName }),
+        body: JSON.stringify({
+          mode: 'merge',
+          leftStudentId: studentId,
+          rightStudentId: selectedTargetStudentId,
+          ...(isNameLengthTie ? { tieWinnerStudentId } : {}),
+        }),
       });
-      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      const json = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
       if (!res.ok) {
-        setError(json.error ?? 'Failed to link alias');
+        setError(json.error ?? 'Failed to merge students');
+        if (json.code === 'TIE_CHOICE_REQUIRED' && !tieWinnerStudentId) {
+          setError('Choose which student to keep because both names have the same length.');
+        }
         return;
       }
       setSelectedTargetStudentId('');
+      setTieWinnerStudentId('');
       setFilterText('');
       setOpen(false);
       router.refresh();
@@ -162,6 +188,7 @@ export default function StudentAliasesManager({
 
   const pickStudent = (id: string) => {
     setSelectedTargetStudentId(id);
+    setTieWinnerStudentId('');
     setOpen(false);
   };
 
@@ -272,7 +299,7 @@ export default function StudentAliasesManager({
           <span className="text-xs text-slate-500">No aliases</span>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-start gap-2">
         <div className="relative min-w-[12rem] max-w-xs flex-1">
           <button
             ref={buttonRef}
@@ -293,14 +320,43 @@ export default function StudentAliasesManager({
           </button>
         </div>
         {dropdown}
-        <button
-          type="button"
-          onClick={() => void linkCurrentNameAsAlias()}
-          disabled={pending || !selectedTargetStudentId}
-          className="rounded bg-primary px-2 py-1 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-50"
-        >
-          Link name
-        </button>
+        <div className="space-y-1">
+          <button
+            type="button"
+            onClick={() => void mergeStudents()}
+            disabled={pending || !selectedTargetStudentId}
+            className="rounded bg-primary px-2 py-1 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-50"
+          >
+            Merge
+          </button>
+          {isNameLengthTie && selectedTargetStudent ? (
+            <div className="space-y-1 rounded border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-900">
+              <p className="font-semibold">Same length names: choose student to keep</p>
+              <label className="flex items-center gap-1">
+                <input
+                  type="radio"
+                  name={`tie-winner-${studentId}`}
+                  value={studentId}
+                  checked={tieWinnerStudentId === studentId}
+                  onChange={(e) => setTieWinnerStudentId(e.target.value)}
+                  disabled={pending}
+                />
+                <span>{studentName}</span>
+              </label>
+              <label className="flex items-center gap-1">
+                <input
+                  type="radio"
+                  name={`tie-winner-${studentId}`}
+                  value={selectedTargetStudent.id}
+                  checked={tieWinnerStudentId === selectedTargetStudent.id}
+                  onChange={(e) => setTieWinnerStudentId(e.target.value)}
+                  disabled={pending}
+                />
+                <span>{selectedTargetStudent.name}</span>
+              </label>
+            </div>
+          ) : null}
+        </div>
       </div>
       {error ? <p className="text-xs text-red-700">{error}</p> : null}
     </div>

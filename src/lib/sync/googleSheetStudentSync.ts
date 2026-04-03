@@ -1,8 +1,19 @@
 import { normalizePersonNameKey } from '@/lib/normalizePersonName';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import {
+  mergeStudentsByNameLength,
+  rewriteStudentIdMappings,
+  StudentMergeError,
+  type TieWinnerChoice,
+} from '@/lib/students/studentMerge';
 
 /** Map a sheet spelling to an existing student during import; persisted as `student_aliases`. */
-export type StudentAliasResolution = { aliasName: string; studentId: string };
+export type StudentAliasResolution = {
+  aliasName: string;
+  studentId: string;
+  /** Required when alias maps two same-length canonical names and winner cannot be inferred. */
+  tieWinnerStudentId?: string;
+};
 
 type SyncProgressEventLike =
   | { type: 'status'; message: string }
@@ -21,8 +32,14 @@ export function parseStudentAliasResolutions(raw: unknown): StudentAliasResoluti
     const o = item as Record<string, unknown>;
     const aliasName = typeof o.aliasName === 'string' ? o.aliasName.trim() : '';
     const studentId = typeof o.studentId === 'string' ? o.studentId.trim() : '';
+    const tieWinnerStudentId =
+      typeof o.tieWinnerStudentId === 'string' ? o.tieWinnerStudentId.trim() : '';
     if (!aliasName || !studentId) continue;
-    out.push({ aliasName, studentId });
+    out.push({
+      aliasName,
+      studentId,
+      ...(tieWinnerStudentId ? { tieWinnerStudentId } : {}),
+    });
   }
   return out.length ? out : undefined;
 }
@@ -83,23 +100,80 @@ export async function applyStudentAliasResolutions(
   onProgress?: (event: SyncProgressEventLike) => void | Promise<void>
 ) {
   if (!resolutions?.length) return;
-  for (const { aliasName, studentId } of resolutions) {
-    if (!validStudentIds.has(studentId)) {
+  const mergedInto = new Map<string, string>();
+  const resolveStudentId = (id: string): string => {
+    let current = id;
+    const seen = new Set<string>();
+    while (mergedInto.has(current) && !seen.has(current)) {
+      seen.add(current);
+      current = mergedInto.get(current) ?? current;
+    }
+    return current;
+  };
+
+  for (const resolution of resolutions) {
+    const aliasName = resolution.aliasName;
+    const requestedStudentId = resolveStudentId(resolution.studentId);
+    const tieWinnerStudentId = resolution.tieWinnerStudentId
+      ? resolveStudentId(resolution.tieWinnerStudentId)
+      : undefined;
+
+    if (!validStudentIds.has(requestedStudentId)) {
       throw new Error(`Unknown student for alias "${aliasName}"`);
     }
     const trimmed = String(aliasName).trim();
     const nk = studentCacheKey(trimmed);
     if (!nk) continue;
+
+    const currentOwnerId = resolveStudentId(studentCache.get(nk) ?? '');
+    let effectiveStudentId = requestedStudentId;
+    if (currentOwnerId && currentOwnerId !== requestedStudentId) {
+      const tieWinner: TieWinnerChoice | undefined = tieWinnerStudentId
+        ? { winnerStudentId: tieWinnerStudentId }
+        : undefined;
+      await onProgress?.({
+        type: 'db',
+        message: `students — merge records for alias "${trimmed}"`,
+      });
+      try {
+        const merged = await mergeStudentsByNameLength(supabase, {
+          leftStudentId: currentOwnerId,
+          rightStudentId: requestedStudentId,
+          tieWinner,
+          expectedGroupId: groupId,
+        });
+        mergedInto.set(merged.loserStudentId, merged.winnerStudentId);
+        rewriteStudentIdMappings(
+          studentCache,
+          validStudentIds,
+          merged.loserStudentId,
+          merged.winnerStudentId
+        );
+        effectiveStudentId = merged.winnerStudentId;
+      } catch (error) {
+        if (error instanceof StudentMergeError && error.code === 'TIE_CHOICE_REQUIRED') {
+          throw new Error(
+            `Alias "${trimmed}" maps to two same-length student names. Provide tieWinnerStudentId in studentAliasResolutions.`
+          );
+        }
+        throw error;
+      }
+    }
+
+    if (!validStudentIds.has(effectiveStudentId)) {
+      throw new Error(`Unknown student for alias "${aliasName}"`);
+    }
+
     await onProgress?.({
       type: 'db',
       message: `student_aliases — upsert "${trimmed}"`,
     });
     const { error } = await supabase.from('student_aliases').upsert(
-      { group_id: groupId, student_id: studentId, alias: trimmed, normalized_key: nk },
+      { group_id: groupId, student_id: effectiveStudentId, alias: trimmed, normalized_key: nk },
       { onConflict: 'group_id,normalized_key' }
     );
     if (error) throw new Error(error.message);
-    studentCache.set(nk, studentId);
+    studentCache.set(nk, effectiveStudentId);
   }
 }
 
