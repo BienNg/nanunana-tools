@@ -39,6 +39,10 @@ function toIsoDate(d: Date): string {
   return d.toISOString();
 }
 
+function toDateOnly(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
 function minusDays(now: Date, days: number): Date {
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 }
@@ -63,21 +67,57 @@ export async function getFeedbackQueueCandidates(
 ): Promise<FeedbackQueueCandidate[]> {
   const supabase = getSupabaseAdmin();
   const now = nowArg ?? new Date();
-  const lastMonthStart = minusDays(now, 30);
+  const recentCourseWindowStart = minusDays(now, 45);
+  const recentCourseWindowStartDate = toDateOnly(recentCourseWindowStart);
   const weekAgo = minusDays(now, 7);
   const IN_CHUNK_SIZE = 120;
 
-  const { data: recentEnrollments, error: recentEnrollErr } = await supabase
-    .from('course_students')
-    .select('student_id')
-    .gte('created_at', toIsoDate(lastMonthStart));
+  const [recentLessonsResult, olderLessonsResult] = await Promise.all([
+    supabase
+      .from('lessons')
+      .select('course_id')
+      .not('date', 'is', null)
+      .gte('date', recentCourseWindowStartDate),
+    supabase
+      .from('lessons')
+      .select('course_id')
+      .not('date', 'is', null)
+      .lt('date', recentCourseWindowStartDate),
+  ]);
 
-  if (recentEnrollErr) {
-    console.error('getFeedbackQueueCandidates — recent enrollments', recentEnrollErr);
+  if (recentLessonsResult.error) {
+    console.error('getFeedbackQueueCandidates — recent lessons', recentLessonsResult.error);
+    return [];
+  }
+  if (olderLessonsResult.error) {
+    console.error('getFeedbackQueueCandidates — older lessons', olderLessonsResult.error);
     return [];
   }
 
-  const recentStudentIds = [...new Set((recentEnrollments ?? []).map((r) => String(r.student_id ?? '')))].filter(Boolean);
+  const recentCourseIds = new Set(
+    (recentLessonsResult.data ?? []).map((r) => String(r.course_id ?? '')).filter(Boolean)
+  );
+  const olderCourseIds = new Set(
+    (olderLessonsResult.data ?? []).map((r) => String(r.course_id ?? '')).filter(Boolean)
+  );
+  const recentlyStartedCourseIds = [...recentCourseIds].filter((courseId) => !olderCourseIds.has(courseId));
+  if (recentlyStartedCourseIds.length === 0) return [];
+
+  const seedEnrollmentRows: Array<{ student_id: string }> = [];
+  const courseChunks = chunkArray(recentlyStartedCourseIds, IN_CHUNK_SIZE);
+  for (const chunk of courseChunks) {
+    const { data: enrollments, error: enrollmentsErr } = await supabase
+      .from('course_students')
+      .select('student_id')
+      .in('course_id', chunk);
+    if (enrollmentsErr) {
+      console.error('getFeedbackQueueCandidates — seed enrollments', enrollmentsErr);
+      return [];
+    }
+    seedEnrollmentRows.push(...((enrollments ?? []) as typeof seedEnrollmentRows));
+  }
+
+  const recentStudentIds = [...new Set(seedEnrollmentRows.map((r) => String(r.student_id ?? '')))].filter(Boolean);
   if (recentStudentIds.length === 0) return [];
 
   const studentChunks = chunkArray(recentStudentIds, IN_CHUNK_SIZE);
@@ -91,13 +131,16 @@ export async function getFeedbackQueueCandidates(
   const enrollmentRows: Array<{
     student_id: string;
     course_id: string;
-    created_at: string;
     courses:
       | { id: string; name: string; groups: { name: string } | { name: string }[] | null }
       | { id: string; name: string; groups: { name: string } | { name: string }[] | null }[]
       | null;
   }> = [];
-  const absenceRows: Array<{ student_id: string; created_at: string }> = [];
+  const absenceRows: Array<{
+    student_id: string;
+    created_at: string;
+    lessons: { course_id: string } | { course_id: string }[] | null;
+  }> = [];
 
   for (const chunk of studentChunks) {
     const [studentsResult, enrollmentsResult, absencesResult] = await Promise.all([
@@ -111,14 +154,13 @@ export async function getFeedbackQueueCandidates(
           `
           student_id,
           course_id,
-          created_at,
           courses ( id, name, groups:groups!group_id ( name ) )
         `
         )
         .in('student_id', chunk),
       supabase
         .from('attendance_records')
-        .select('student_id, status, created_at')
+        .select('student_id, status, created_at, lessons!lesson_id ( course_id )')
         .in('student_id', chunk)
         .eq('status', 'Absent'),
     ]);
@@ -138,7 +180,7 @@ export async function getFeedbackQueueCandidates(
 
     studentRows.push(...((studentsResult.data ?? []) as typeof studentRows));
     enrollmentRows.push(...((enrollmentsResult.data ?? []) as typeof enrollmentRows));
-    absenceRows.push(...((absencesResult.data ?? []) as Array<{ student_id: string; created_at: string }>));
+    absenceRows.push(...((absencesResult.data ?? []) as typeof absenceRows));
   }
 
   const allEnrollments = enrollmentRows;
@@ -152,25 +194,11 @@ export async function getFeedbackQueueCandidates(
     enrollmentsByStudent.set(sid, list);
   }
 
-  const latestCourseByStudent = new Map<string, string>();
-  const latestEnrollmentTsByStudent = new Map<string, number>();
-  for (const row of allEnrollments) {
-    const sid = String(row.student_id ?? '');
-    const cid = String(row.course_id ?? '');
-    if (!sid || !cid) continue;
-    const ts = Date.parse(String(row.created_at ?? '')) || 0;
-    const prev = latestEnrollmentTsByStudent.get(sid);
-    if (prev == null || ts > prev) {
-      latestEnrollmentTsByStudent.set(sid, ts);
-      latestCourseByStudent.set(sid, cid);
-    }
-  }
-
-  const latestCourseIds = [...new Set([...latestCourseByStudent.values()])];
+  const enrolledCourseIds = [...new Set(allEnrollments.map((row) => String(row.course_id ?? '')).filter(Boolean))];
   const firstSessionByCourseId = new Map<string, string>();
-  if (latestCourseIds.length > 0) {
-    const courseChunks = chunkArray(latestCourseIds, IN_CHUNK_SIZE);
-    for (const chunk of courseChunks) {
+  if (enrolledCourseIds.length > 0) {
+    const enrolledCourseChunks = chunkArray(enrolledCourseIds, IN_CHUNK_SIZE);
+    for (const chunk of enrolledCourseChunks) {
       const { data: lessons, error: lessonsErr } = await supabase
         .from('lessons')
         .select('course_id, date')
@@ -192,12 +220,42 @@ export async function getFeedbackQueueCandidates(
     }
   }
 
-  const absencesByStudent = new Map<string, string[]>();
+  const latestCourseByStudent = new Map<string, string>();
+  for (const [sid, enrollments] of enrollmentsByStudent.entries()) {
+    let latestCourseId: string | null = null;
+    let latestFirstSessionTs = Number.NEGATIVE_INFINITY;
+    for (const enrollment of enrollments) {
+      const cid = String(enrollment.course_id ?? '');
+      if (!cid) continue;
+      const firstSession = firstSessionByCourseId.get(cid);
+      const ts = firstSession ? Date.parse(firstSession) : Number.NEGATIVE_INFINITY;
+      if (ts > latestFirstSessionTs) {
+        latestFirstSessionTs = ts;
+        latestCourseId = cid;
+      }
+    }
+    if (latestCourseId) {
+      latestCourseByStudent.set(sid, latestCourseId);
+    }
+  }
+
+  const absencesByStudent = new Map<
+    string,
+    Array<{
+      createdAt: string;
+      courseId: string | null;
+    }>
+  >();
   for (const row of absenceRows) {
     const sid = String(row.student_id ?? '');
     if (!sid) continue;
     const list = absencesByStudent.get(sid) ?? [];
-    list.push(String(row.created_at ?? ''));
+    const lesson = asSingle(row.lessons);
+    const courseId = lesson?.course_id ? String(lesson.course_id) : null;
+    list.push({
+      createdAt: String(row.created_at ?? ''),
+      courseId: courseId || null,
+    });
     absencesByStudent.set(sid, list);
   }
 
@@ -225,11 +283,16 @@ export async function getFeedbackQueueCandidates(
     const isCurrentlySnoozed =
       Boolean(snoozedUntil) && Date.parse(String(snoozedUntil)) > now.getTime();
 
-    const absenceTimes = absencesByStudent.get(sid) ?? [];
-    const absentSinceFeedbackCount = absenceTimes.filter((iso) => {
-      if (!feedbackSentAt) return true;
-      return Date.parse(iso) > Date.parse(feedbackSentAt);
-    }).length;
+    const studentAbsences = absencesByStudent.get(sid) ?? [];
+    let absentSinceFeedbackCount = 0;
+    const absenceCourseIds = new Set<string>();
+    for (const absence of studentAbsences) {
+      const shouldCount =
+        !feedbackSentAt || Date.parse(absence.createdAt) > Date.parse(feedbackSentAt);
+      if (!shouldCount) continue;
+      absentSinceFeedbackCount += 1;
+      if (absence.courseId) absenceCourseIds.add(absence.courseId);
+    }
     const needsAttention = absentSinceFeedbackCount > 1;
     const queueReasonDetails: string[] = [];
     if (needsAttention) {
@@ -250,6 +313,7 @@ export async function getFeedbackQueueCandidates(
     for (const row of enrollmentsByStudent.get(sid) ?? []) {
       const c = asSingle(row.courses);
       if (!c?.id) continue;
+      if (!absenceCourseIds.has(c.id)) continue;
       const g = asSingle(c.groups);
       coursesMap.set(c.id, { id: c.id, name: c.name, groupName: g?.name ?? null });
     }

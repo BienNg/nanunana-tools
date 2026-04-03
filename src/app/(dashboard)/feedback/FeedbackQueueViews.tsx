@@ -126,37 +126,34 @@ export default function FeedbackQueueViews({
                     </p>
                   </div>
 
-                  <div className="rounded-xl border border-slate-100 p-4 md:col-span-2">
-                    <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Actions</p>
-                    <div className="flex items-center gap-2">
-                      <form action={markStudentFeedbackDone.bind(null, focusedStudent.id)}>
+                  <div className="flex flex-wrap items-center justify-center gap-4 md:col-span-2 pt-2">
+                    <form action={markStudentFeedbackDone.bind(null, focusedStudent.id)}>
+                      <button
+                        type="submit"
+                        className="inline-flex min-h-11 items-center justify-center rounded-full bg-primary px-8 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                      >
+                        Done
+                      </button>
+                    </form>
+                    {view === 'active' ? (
+                      <form action={snoozeStudentFeedback.bind(null, focusedStudent.id, 7)}>
                         <button
                           type="submit"
-                          className="inline-flex items-center rounded-full bg-primary px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
+                          className="inline-flex min-h-11 items-center justify-center rounded-full border border-slate-200 bg-white px-8 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
                         >
-                          Done
+                          Snooze 7d
                         </button>
                       </form>
-                      {view === 'active' ? (
-                        <form action={snoozeStudentFeedback.bind(null, focusedStudent.id, 7)}>
-                          <button
-                            type="submit"
-                            className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
-                          >
-                            Snooze 7d
-                          </button>
-                        </form>
-                      ) : (
-                        <form action={unsnoozeStudentFeedback.bind(null, focusedStudent.id)}>
-                          <button
-                            type="submit"
-                            className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
-                          >
-                            Unsnooze
-                          </button>
-                        </form>
-                      )}
-                    </div>
+                    ) : (
+                      <form action={unsnoozeStudentFeedback.bind(null, focusedStudent.id)}>
+                        <button
+                          type="submit"
+                          className="inline-flex min-h-11 items-center justify-center rounded-full border border-slate-200 bg-white px-8 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+                        >
+                          Unsnooze
+                        </button>
+                      </form>
+                    )}
                   </div>
                 </div>
               </div>
