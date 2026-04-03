@@ -82,6 +82,25 @@ function asArray<T>(value: T | T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [value];
 }
 
+/** Group ids for a student row (direct group + groups via courses), aligned with StudentSummary.groups. */
+type StudentOptionRow = Pick<StudentRow, 'id' | 'name' | 'groups' | 'course_students'>;
+
+function collectStudentGroupIds(row: StudentOptionRow): string[] {
+  const ids = new Set<string>();
+  asArray(row.groups).forEach((g) => {
+    if (g?.id) ids.add(g.id);
+  });
+  asArray(row.course_students).forEach((courseStudent) => {
+    asArray(courseStudent?.courses).forEach((course) => {
+      if (!course) return;
+      asArray(course.groups).forEach((g) => {
+        if (g?.id) ids.add(g.id);
+      });
+    });
+  });
+  return [...ids];
+}
+
 function firstParam(value: string | string[] | undefined): string {
   return Array.isArray(value) ? (value[0] ?? '') : (value ?? '');
 }
@@ -145,7 +164,19 @@ export default async function StudentsPage({ searchParams }: StudentsPageProps) 
   const [studentsResponse, groupsResponse, studentOptionsResponse] = await Promise.all([
     studentsQuery.range(rangeFrom, rangeTo),
     supabase.from('groups').select('id, name').order('name'),
-    supabase.from('students').select('id, name').order('name'),
+    supabase
+      .from('students')
+      .select(`
+        id,
+        name,
+        groups ( id ),
+        course_students (
+          courses (
+            groups ( id )
+          )
+        )
+      `)
+      .order('name'),
   ]);
 
   if (studentsResponse.error) {
@@ -217,8 +248,12 @@ export default async function StudentsPage({ searchParams }: StudentsPageProps) 
   const pageStart = students.length === 0 ? 0 : rangeFrom + 1;
   const pageEnd = students.length === 0 ? 0 : Math.min(rangeTo + 1, totalStudents);
 
-  const studentOptions = ((studentOptionsResponse.data ?? []) as Array<{ id: string; name: string }>)
-    .map((s) => ({ id: s.id, name: s.name }))
+  const studentOptions = ((studentOptionsResponse.data ?? []) as StudentOptionRow[])
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      groupIds: collectStudentGroupIds(s),
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const groups = ((groupsResponse.data ?? []) as Array<{ id: string; name: string }>)
@@ -292,6 +327,7 @@ export default async function StudentsPage({ searchParams }: StudentsPageProps) 
                     studentId={student.id}
                     studentName={student.name}
                     aliases={student.aliases}
+                    currentStudentGroupIds={student.groups.map((g) => g.id)}
                     studentOptions={studentOptions}
                   />
                 </td>

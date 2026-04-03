@@ -1,36 +1,119 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 type AliasItem = { id: string; alias: string };
-type StudentOption = { id: string; name: string };
+type StudentOption = { id: string; name: string; groupIds: string[] };
 
 export default function StudentAliasesManager({
   studentId,
   studentName,
   aliases,
+  currentStudentGroupIds,
   studentOptions,
 }: {
   studentId: string;
   studentName: string;
   aliases: AliasItem[];
+  currentStudentGroupIds: string[];
   studentOptions: StudentOption[];
 }) {
   const router = useRouter();
+  const [open, setOpen] = useState(false);
   const [filterText, setFilterText] = useState('');
   const [selectedTargetStudentId, setSelectedTargetStudentId] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: 240 });
 
-  const filteredStudents = useMemo(() => {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const filterInputRef = useRef<HTMLInputElement>(null);
+
+  const currentGroupSet = useMemo(
+    () => new Set(currentStudentGroupIds),
+    [currentStudentGroupIds]
+  );
+
+  const { sameGroup, other } = useMemo(() => {
     const q = filterText.trim().toLowerCase();
-    return studentOptions.filter((s) => {
-      if (s.id === studentId) return false;
-      if (!q) return true;
-      return s.name.toLowerCase().includes(q);
+    const candidates = studentOptions.filter((s) => s.id !== studentId);
+    const matches = candidates.filter((s) => !q || s.name.toLowerCase().includes(q));
+
+    const same = matches.filter((s) => s.groupIds.some((gid) => currentGroupSet.has(gid)));
+    const sameIds = new Set(same.map((s) => s.id));
+    const rest = matches.filter((s) => !sameIds.has(s.id));
+
+    same.sort((a, b) => a.name.localeCompare(b.name));
+    rest.sort((a, b) => a.name.localeCompare(b.name));
+    return { sameGroup: same, other: rest };
+  }, [studentId, studentOptions, filterText, currentGroupSet]);
+
+  const selectedLabel = useMemo(() => {
+    if (!selectedTargetStudentId) return '';
+    return studentOptions.find((s) => s.id === selectedTargetStudentId)?.name ?? '';
+  }, [selectedTargetStudentId, studentOptions]);
+
+  const updateMenuPosition = useCallback(() => {
+    const el = buttonRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setMenuPos({
+      top: rect.bottom + 4,
+      left: rect.left,
+      width: Math.max(rect.width, 200),
     });
-  }, [filterText, studentId, studentOptions]);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (open) updateMenuPosition();
+  }, [open, updateMenuPosition]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (buttonRef.current?.contains(t)) return;
+      if (menuRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onResize = () => setOpen(false);
+    /** Capture phase sees scrolls from nested scrollers; ignore scroll inside the dropdown list. */
+    const onScrollCapture = (e: Event) => {
+      const t = e.target;
+      if (t instanceof Node && menuRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    window.addEventListener('resize', onResize);
+    window.addEventListener('scroll', onScrollCapture, true);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('scroll', onScrollCapture, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open) {
+      queueMicrotask(() => filterInputRef.current?.focus());
+    }
+  }, [open]);
 
   const linkCurrentNameAsAlias = async () => {
     if (!selectedTargetStudentId || pending) return;
@@ -49,6 +132,7 @@ export default function StudentAliasesManager({
       }
       setSelectedTargetStudentId('');
       setFilterText('');
+      setOpen(false);
       router.refresh();
     } finally {
       setPending(false);
@@ -75,6 +159,92 @@ export default function StudentAliasesManager({
       setPending(false);
     }
   };
+
+  const pickStudent = (id: string) => {
+    setSelectedTargetStudentId(id);
+    setOpen(false);
+  };
+
+  const toggleOpen = () => {
+    if (pending) return;
+    setOpen((v) => !v);
+  };
+
+  const dropdown =
+    open &&
+    typeof document !== 'undefined' &&
+    createPortal(
+      <div
+        ref={menuRef}
+        className="z-[100] max-h-72 overflow-hidden rounded-md border border-slate-300 bg-white text-left shadow-lg"
+        style={{
+          position: 'fixed',
+          top: menuPos.top,
+          left: menuPos.left,
+          width: menuPos.width,
+        }}
+        role="listbox"
+        aria-label={`Students to link for ${studentName}`}
+      >
+        <div className="border-b border-slate-200 p-1.5">
+          <input
+            ref={filterInputRef}
+            type="search"
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            placeholder="Filter students..."
+            disabled={pending}
+            className="w-full rounded border border-slate-300 px-2 py-1 text-xs text-slate-900 outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+          />
+        </div>
+        <ul className="max-h-52 overflow-y-auto py-1">
+          {sameGroup.length > 0 ? (
+            <>
+              <li className="px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                Same group
+              </li>
+              {sameGroup.map((s) => (
+                <li key={s.id}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={selectedTargetStudentId === s.id}
+                    className="w-full px-2 py-1.5 text-left text-xs text-slate-900 hover:bg-slate-100"
+                    onClick={() => pickStudent(s.id)}
+                  >
+                    {s.name}
+                  </button>
+                </li>
+              ))}
+            </>
+          ) : null}
+          {other.length > 0 ? (
+            <>
+              <li className="px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                Other students
+              </li>
+              {other.map((s) => (
+                <li key={s.id}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={selectedTargetStudentId === s.id}
+                    className="w-full px-2 py-1.5 text-left text-xs text-slate-900 hover:bg-slate-100"
+                    onClick={() => pickStudent(s.id)}
+                  >
+                    {s.name}
+                  </button>
+                </li>
+              ))}
+            </>
+          ) : null}
+          {sameGroup.length === 0 && other.length === 0 ? (
+            <li className="px-2 py-3 text-center text-xs text-slate-500">No students match</li>
+          ) : null}
+        </ul>
+      </div>,
+      document.body
+    );
 
   return (
     <div className="space-y-2">
@@ -103,28 +273,26 @@ export default function StudentAliasesManager({
         )}
       </div>
       <div className="flex items-center gap-2">
-        <input
-          type="text"
-          value={filterText}
-          onChange={(e) => setFilterText(e.target.value)}
-          placeholder="Filter students..."
-          disabled={pending}
-          className="w-40 rounded border border-slate-300 px-2 py-1 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
-        />
-        <select
-          value={selectedTargetStudentId}
-          onChange={(e) => setSelectedTargetStudentId(e.target.value)}
-          disabled={pending}
-          className="max-w-48 rounded border border-slate-300 px-2 py-1 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
-          aria-label={`Select canonical student for ${studentName}`}
-        >
-          <option value="">Select student...</option>
-          {filteredStudents.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+        <div className="relative min-w-[12rem] max-w-xs flex-1">
+          <button
+            ref={buttonRef}
+            type="button"
+            disabled={pending}
+            onClick={toggleOpen}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+            className="flex w-full items-center justify-between gap-2 rounded border border-slate-300 bg-white px-2 py-1 text-left text-xs text-slate-900 outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+            aria-label={`Select canonical student for ${studentName}`}
+          >
+            <span className={selectedLabel ? 'text-slate-900' : 'text-slate-500'}>
+              {selectedLabel || 'Select student...'}
+            </span>
+            <span className="material-symbols-outlined text-base text-slate-500" aria-hidden>
+              {open ? 'expand_less' : 'expand_more'}
+            </span>
+          </button>
+        </div>
+        {dropdown}
         <button
           type="button"
           onClick={() => void linkCurrentNameAsAlias()}
