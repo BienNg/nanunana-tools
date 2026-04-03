@@ -1,11 +1,11 @@
 import Link from 'next/link';
 import { Fragment } from 'react';
-import { getStudentsInActiveCourses } from './feedbackStudents.server';
+import { getFeedbackQueueCandidates } from './feedbackStudents.server';
 
 export const dynamic = 'force-dynamic';
 
 export default async function FeedbackPage() {
-  const students = await getStudentsInActiveCourses();
+  const students = await getFeedbackQueueCandidates();
 
   return (
     <div className="pt-24 px-10 pb-12 animate-fade-up">
@@ -14,7 +14,7 @@ export default async function FeedbackPage() {
           Feedback
         </h2>
         <p className="text-on-surface-variant max-w-2xl">
-          Students enrolled in at least one course that is not marked completed (active course).
+          Students who are due for feedback this week or have more than one absence since last feedback.
         </p>
       </div>
 
@@ -26,7 +26,13 @@ export default async function FeedbackPage() {
                 Student
               </th>
               <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Active courses
+                Courses
+              </th>
+              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                Missing since feedback
+              </th>
+              <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                Last feedback
               </th>
             </tr>
           </thead>
@@ -60,16 +66,24 @@ export default async function FeedbackPage() {
                     </>
                   )}
                 </td>
+                <td className="py-4 px-6 text-sm text-slate-700">
+                  <span className={student.needsAttention ? 'font-semibold text-error' : ''}>
+                    {student.absentSinceFeedbackCount}
+                  </span>
+                </td>
+                <td className="py-4 px-6 text-sm text-slate-700">
+                  {student.feedbackSentAt ? new Date(student.feedbackSentAt).toLocaleDateString() : 'Never'}
+                </td>
               </tr>
             ))}
             {students.length === 0 && (
               <tr>
-                <td colSpan={2} className="py-12 text-center text-slate-500">
+                <td colSpan={4} className="py-12 text-center text-slate-500">
                   <div className="flex flex-col items-center justify-center">
                     <span className="material-symbols-outlined mb-3 text-4xl text-slate-300">inbox</span>
-                    <p>No students are enrolled in an active course.</p>
+                    <p>No students are due for feedback right now.</p>
                     <p className="mt-1 text-sm text-slate-400">
-                      Either every course is marked completed, or there are no enrollments yet.
+                      Students appear after the first-week enrollment gate and queue rules are met.
                     </p>
                   </div>
                 </td>
