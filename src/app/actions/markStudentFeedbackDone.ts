@@ -20,7 +20,6 @@ export async function markStudentFeedbackDone(studentId: string): Promise<void> 
     .update({
       feedback_sent_at: nowIso,
       feedback_done_at: nowIso,
-      feedback_snoozed_until: null,
     })
     .eq('id', studentId);
 

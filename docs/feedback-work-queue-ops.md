@@ -2,35 +2,24 @@
 
 This page explains how to use the Feedback queue in daily operations.
 
-## Queue views
+## Queue
 
-- `Active queue`: students currently actionable now.
-- `Snoozed`: students temporarily hidden from active work until snooze expires.
+- Single actionable queue: students who match the current detection rules.
 
 ## Why a student appears
 
 A student appears when at least one condition is true:
 
-- More than 1 `Absent` attendance record since `feedback_sent_at`.
+- More than 1 `Absent` attendance record since `feedback_sent_at` (within configured session and course scope).
 - `feedback_sent_at` is missing or older than 7 days.
 
-Additional eligibility gates:
-
-- Student must have enrollment activity in the last 30 days.
-- New students are hidden until 7 days after the first session date of their latest course.
+Additional eligibility gates are implemented in code (recently started courses, first-session delay, etc.).
 
 ## Actions
 
 - `Done`
   - Sets `feedback_done_at = now`.
   - Sets `feedback_sent_at = now`.
-  - Clears `feedback_snoozed_until`.
-- `Snooze 7d`
-  - Sets `feedback_snoozed_until = now + 7 days`.
-  - Moves student out of Active queue into Snoozed view.
-- `Unsnooze`
-  - Clears `feedback_snoozed_until`.
-  - Returns student to Active queue if they still match queue rules.
 
 ## Notes
 

@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { getFeedbackQueueCandidates, type FeedbackQueueView } from './feedbackStudents.server';
+import { getFeedbackQueueCandidates } from './feedbackStudents.server';
 import FeedbackQueueViews from './FeedbackQueueViews';
 
 export const dynamic = 'force-dynamic';
@@ -12,14 +12,11 @@ export default async function FeedbackPage({
   searchParams: Promise<SearchParams>;
 }) {
   const params = await searchParams;
-  const viewParam = params.view;
-  const rawView = Array.isArray(viewParam) ? viewParam[0] : viewParam;
-  const view: FeedbackQueueView = rawView === 'snoozed' ? 'snoozed' : 'active';
   const modeParam = params.mode;
   const rawMode = Array.isArray(modeParam) ? modeParam[0] : modeParam;
   const mode: 'focused' | 'list' = rawMode === 'list' ? 'list' : 'focused';
 
-  const students = await getFeedbackQueueCandidates(undefined, view);
+  const students = await getFeedbackQueueCandidates();
   const totalStudents = students.length;
   const needsAttentionCount = students.filter((s) => s.needsAttention).length;
   const dueInQueueCount = students.filter((s) => s.dueByTime).length;
@@ -60,46 +57,27 @@ export default async function FeedbackPage({
       </div>
 
       <div className="mb-4 flex items-center gap-2">
-        {view === 'active' ? (
-          <div className="inline-flex rounded-full bg-slate-100 p-1">
-            <Link
-              href="/feedback"
-              className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${
-                mode === 'focused' ? 'bg-primary text-white' : 'text-slate-600 hover:bg-white'
-              }`}
-            >
-              Focused
-            </Link>
-            <Link
-              href="/feedback?mode=list"
-              className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${
-                mode === 'list' ? 'bg-primary text-white' : 'text-slate-600 hover:bg-white'
-              }`}
-            >
-              List
-            </Link>
-          </div>
-        ) : (
+        <div className="inline-flex rounded-full bg-slate-100 p-1">
           <Link
             href="/feedback"
-            className="inline-flex items-center rounded-full px-3 py-1.5 text-sm font-semibold bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
+            className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${
+              mode === 'focused' ? 'bg-primary text-white' : 'text-slate-600 hover:bg-white'
+            }`}
           >
-            Active queue
+            Focused
           </Link>
-        )}
-        <Link
-          href="/feedback?view=snoozed"
-          className={`inline-flex items-center rounded-full px-3 py-1.5 text-sm font-semibold ${
-            view === 'snoozed'
-              ? 'bg-primary text-white'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          Snoozed
-        </Link>
+          <Link
+            href="/feedback?mode=list"
+            className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${
+              mode === 'list' ? 'bg-primary text-white' : 'text-slate-600 hover:bg-white'
+            }`}
+          >
+            List
+          </Link>
+        </div>
       </div>
 
-      <FeedbackQueueViews students={students} view={view} mode={mode} />
+      <FeedbackQueueViews students={students} mode={mode} />
 
       {students.length > 0 ? (
         <p className="mt-4 text-sm text-slate-500">Sorted by priority: needs attention first, then oldest feedback date.</p>

@@ -33,7 +33,6 @@ This document locks the v1 logic before implementation begins. It is intentional
 ## Queue behavior (v1 UX intent)
 
 - Feedback tab acts as a work queue with:
-  - snooze
   - done
 - The queue should show combined context for each student (single row), not one row per enrollment.
 
@@ -43,7 +42,7 @@ Store globally on `students`:
 
 - `feedback_sent_at` (timestamp, nullable)
 - `feedback_status` (optional, enum-like string: `ok` / `needs_attention` / `sent`)
-- queue fields for snooze/done
+- queue fields for done (and sent timestamps)
 
 ## Open decisions to resolve before Increment 1
 

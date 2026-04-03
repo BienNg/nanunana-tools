@@ -6,7 +6,6 @@ export type FeedbackQueueCandidate = {
   id: string;
   name: string;
   feedbackSentAt: string | null;
-  feedbackSnoozedUntil: string | null;
   feedbackDoneAt: string | null;
   dueByTime: boolean;
   dueDays: number;
@@ -16,9 +15,6 @@ export type FeedbackQueueCandidate = {
   latestCourseFirstSessionDate: string | null;
   courses: CourseContext[];
 };
-
-type QueueView = 'active' | 'snoozed';
-export type FeedbackQueueView = QueueView;
 
 export type FeedbackQueuePage = {
   items: FeedbackQueueCandidate[];
@@ -33,10 +29,6 @@ export type FeedbackQueuePage = {
 function asSingle<T>(x: T | T[] | null | undefined): T | null {
   if (x == null) return null;
   return Array.isArray(x) ? (x[0] ?? null) : x;
-}
-
-function toIsoDate(d: Date): string {
-  return d.toISOString();
 }
 
 function toDateOnly(d: Date): string {
@@ -60,16 +52,18 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
+/** Only count absences tied to a lesson whose calendar date falls in this rolling window (inclusive). */
+const ABSENCE_SESSION_LOOKBACK_DAYS = 14;
+
 /** Increment 2: read-only queue detection, no workflow actions yet. */
-export async function getFeedbackQueueCandidates(
-  nowArg?: Date,
-  view: QueueView = 'active'
-): Promise<FeedbackQueueCandidate[]> {
+export async function getFeedbackQueueCandidates(nowArg?: Date): Promise<FeedbackQueueCandidate[]> {
   const supabase = getSupabaseAdmin();
   const now = nowArg ?? new Date();
   const recentCourseWindowStart = minusDays(now, 45);
   const recentCourseWindowStartDate = toDateOnly(recentCourseWindowStart);
   const weekAgo = minusDays(now, 7);
+  const absenceSessionWindowStartDate = toDateOnly(minusDays(now, ABSENCE_SESSION_LOOKBACK_DAYS));
+  const absenceSessionWindowEndDate = toDateOnly(now);
   const IN_CHUNK_SIZE = 120;
 
   const [recentLessonsResult, olderLessonsResult] = await Promise.all([
@@ -126,7 +120,6 @@ export async function getFeedbackQueueCandidates(
     id: string;
     name: string;
     feedback_sent_at: string | null;
-    feedback_snoozed_until: string | null;
     feedback_done_at: string | null;
   }> = [];
   const enrollmentRows: Array<{
@@ -140,14 +133,17 @@ export async function getFeedbackQueueCandidates(
   const absenceRows: Array<{
     student_id: string;
     created_at: string;
-    lessons: { course_id: string } | { course_id: string }[] | null;
+    lessons:
+      | { course_id: string; date: string | null }
+      | { course_id: string; date: string | null }[]
+      | null;
   }> = [];
 
   for (const chunk of studentChunks) {
     const [studentsResult, enrollmentsResult, absencesResult] = await Promise.all([
       supabase
         .from('students')
-        .select('id, name, feedback_sent_at, feedback_snoozed_until, feedback_done_at')
+        .select('id, name, feedback_sent_at, feedback_done_at')
         .in('id', chunk),
       supabase
         .from('course_students')
@@ -161,7 +157,7 @@ export async function getFeedbackQueueCandidates(
         .in('student_id', chunk),
       supabase
         .from('attendance_records')
-        .select('student_id, status, created_at, lessons!lesson_id ( course_id )')
+        .select('student_id, status, created_at, lessons!lesson_id ( course_id, date )')
         .in('student_id', chunk)
         .eq('status', 'Absent'),
     ]);
@@ -245,6 +241,7 @@ export async function getFeedbackQueueCandidates(
     Array<{
       createdAt: string;
       courseId: string | null;
+      sessionDate: string | null;
     }>
   >();
   for (const row of absenceRows) {
@@ -253,9 +250,15 @@ export async function getFeedbackQueueCandidates(
     const list = absencesByStudent.get(sid) ?? [];
     const lesson = asSingle(row.lessons);
     const courseId = lesson?.course_id ? String(lesson.course_id) : null;
+    const rawLessonDate = lesson?.date;
+    const sessionDate =
+      rawLessonDate != null && String(rawLessonDate).trim() !== ''
+        ? String(rawLessonDate).slice(0, 10)
+        : null;
     list.push({
       createdAt: String(row.created_at ?? ''),
       courseId: courseId || null,
+      sessionDate,
     });
     absencesByStudent.set(sid, list);
   }
@@ -277,28 +280,34 @@ export async function getFeedbackQueueCandidates(
     }
 
     const feedbackSentAt = student.feedback_sent_at;
+    const feedbackSentDay = feedbackSentAt ? String(feedbackSentAt).slice(0, 10) : null;
     const feedbackSentAtDate = feedbackSentAt ? new Date(feedbackSentAt) : null;
     const dueByTime = !feedbackSentAtDate || feedbackSentAtDate < weekAgo;
     const dueDays = !feedbackSentAtDate ? 9999 : Math.max(0, wholeDaysBetween(feedbackSentAtDate, now));
-    const snoozedUntil = student.feedback_snoozed_until;
-    const isCurrentlySnoozed =
-      Boolean(snoozedUntil) && Date.parse(String(snoozedUntil)) > now.getTime();
-
     const studentAbsences = absencesByStudent.get(sid) ?? [];
     let absentSinceFeedbackCount = 0;
     const absenceCourseIds = new Set<string>();
     for (const absence of studentAbsences) {
       if (!absence.courseId || !recentlyStartedCourseIdSet.has(absence.courseId)) continue;
-      const shouldCount =
-        !feedbackSentAt || Date.parse(absence.createdAt) > Date.parse(feedbackSentAt);
-      if (!shouldCount) continue;
+      const sessionDate = absence.sessionDate;
+      if (!sessionDate) continue;
+      if (sessionDate < absenceSessionWindowStartDate || sessionDate > absenceSessionWindowEndDate) continue;
+      const sinceFeedback =
+        !feedbackSentAt ||
+        sessionDate > (feedbackSentDay ?? '') ||
+        (feedbackSentDay != null &&
+          sessionDate === feedbackSentDay &&
+          Date.parse(absence.createdAt) > Date.parse(feedbackSentAt));
+      if (!sinceFeedback) continue;
       absentSinceFeedbackCount += 1;
       absenceCourseIds.add(absence.courseId);
     }
     const needsAttention = absentSinceFeedbackCount > 1;
     const queueReasonDetails: string[] = [];
     if (needsAttention) {
-      queueReasonDetails.push(`${absentSinceFeedbackCount} absences since last feedback`);
+      queueReasonDetails.push(
+        `${absentSinceFeedbackCount} absences since last feedback (sessions in the last ${ABSENCE_SESSION_LOOKBACK_DAYS} days)`
+      );
     }
     if (dueByTime) {
       queueReasonDetails.push(
@@ -308,8 +317,6 @@ export async function getFeedbackQueueCandidates(
 
     // Product rule: only detect students with more than one absence since feedback.
     if (!needsAttention) continue;
-    if (view === 'active' && isCurrentlySnoozed) continue;
-    if (view === 'snoozed' && !isCurrentlySnoozed) continue;
 
     const coursesMap = new Map<string, CourseContext>();
     for (const row of enrollmentsByStudent.get(sid) ?? []) {
@@ -329,7 +336,6 @@ export async function getFeedbackQueueCandidates(
       id: sid,
       name: student.name,
       feedbackSentAt,
-      feedbackSnoozedUntil: snoozedUntil,
       feedbackDoneAt: student.feedback_done_at,
       dueByTime,
       dueDays,
@@ -352,16 +358,14 @@ export async function getFeedbackQueueCandidates(
 
 export async function getFeedbackQueueCandidatesPage(args?: {
   nowArg?: Date;
-  view?: QueueView;
   page?: number;
   pageSize?: number;
 }): Promise<FeedbackQueuePage> {
-  const view = args?.view ?? 'active';
   const pageSize = Number.isFinite(args?.pageSize)
     ? Math.max(1, Math.floor(args?.pageSize as number))
     : 25;
   const requestedPage = Number.isFinite(args?.page) ? Math.max(1, Math.floor(args?.page as number)) : 1;
-  const all = await getFeedbackQueueCandidates(args?.nowArg, view);
+  const all = await getFeedbackQueueCandidates(args?.nowArg);
   const total = all.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(requestedPage, totalPages);

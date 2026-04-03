@@ -2,34 +2,26 @@
 
 import Link from 'next/link';
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import type { FeedbackQueueCandidate, FeedbackQueueView } from './feedbackStudents.server';
+import type { FeedbackQueueCandidate } from './feedbackStudents.server';
 import { markStudentFeedbackDone } from '@/app/actions/markStudentFeedbackDone';
-import { snoozeStudentFeedback, unsnoozeStudentFeedback } from '@/app/actions/snoozeStudentFeedback';
 
 function formatDate(value: string | null): string {
   if (!value) return 'Never';
   return new Date(value).toLocaleDateString();
 }
 
-function formatOptionalDate(value: string | null): string {
-  if (!value) return '-';
-  return new Date(value).toLocaleDateString();
-}
-
 export default function FeedbackQueueViews({
   students,
-  view,
   mode,
 }: {
   students: FeedbackQueueCandidate[];
-  view: FeedbackQueueView;
   mode: 'focused' | 'list';
 }) {
   const [focusedIndex, setFocusedIndex] = useState(0);
 
   useEffect(() => {
     setFocusedIndex(0);
-  }, [students, view]);
+  }, [students]);
 
   const focusedStudent = useMemo(
     () => (students.length > 0 ? students[Math.min(focusedIndex, students.length - 1)] : null),
@@ -109,11 +101,6 @@ export default function FeedbackQueueViews({
                     <p className="text-sm text-slate-700">{formatDate(focusedStudent.feedbackSentAt)}</p>
                   </div>
 
-                  <div className="rounded-xl border border-slate-100 p-4">
-                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Snoozed until</p>
-                    <p className="text-sm text-slate-700">{formatOptionalDate(focusedStudent.feedbackSnoozedUntil)}</p>
-                  </div>
-
                   <div className="rounded-xl border border-slate-100 p-4 md:col-span-2">
                     <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Queue reason</p>
                     <p className="text-sm text-slate-700">
@@ -132,25 +119,6 @@ export default function FeedbackQueueViews({
                         Done
                       </button>
                     </form>
-                    {view === 'active' ? (
-                      <form action={snoozeStudentFeedback.bind(null, focusedStudent.id, 7)}>
-                        <button
-                          type="submit"
-                          className="inline-flex min-h-11 items-center justify-center rounded-full border border-slate-200 bg-white px-8 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
-                        >
-                          Snooze 7d
-                        </button>
-                      </form>
-                    ) : (
-                      <form action={unsnoozeStudentFeedback.bind(null, focusedStudent.id)}>
-                        <button
-                          type="submit"
-                          className="inline-flex min-h-11 items-center justify-center rounded-full border border-slate-200 bg-white px-8 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
-                        >
-                          Unsnooze
-                        </button>
-                      </form>
-                    )}
                   </div>
                 </div>
               </div>
@@ -175,9 +143,6 @@ export default function FeedbackQueueViews({
                 </th>
                 <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Last feedback
-                </th>
-                <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                  Snoozed until
                 </th>
                 <th className="py-4 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Queue reason
@@ -224,9 +189,6 @@ export default function FeedbackQueueViews({
                     {formatDate(student.feedbackSentAt)}
                   </td>
                   <td className="py-4 px-6 text-sm text-slate-700">
-                    {formatOptionalDate(student.feedbackSnoozedUntil)}
-                  </td>
-                  <td className="py-4 px-6 text-sm text-slate-700">
                     {student.queueReasonDetails.length > 0 ? (
                       <p className="text-xs text-slate-500">{student.queueReasonDetails.join(' | ')}</p>
                     ) : (
@@ -234,44 +196,23 @@ export default function FeedbackQueueViews({
                     )}
                   </td>
                   <td className="py-4 px-6 text-sm text-slate-700">
-                    <div className="flex items-center gap-2">
-                      <form action={markStudentFeedbackDone.bind(null, student.id)}>
-                        <button
-                          type="submit"
-                          className="inline-flex items-center rounded-full bg-primary px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
-                        >
-                          Done
-                        </button>
-                      </form>
-                      {view === 'active' ? (
-                        <form action={snoozeStudentFeedback.bind(null, student.id, 7)}>
-                          <button
-                            type="submit"
-                            className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
-                          >
-                            Snooze 7d
-                          </button>
-                        </form>
-                      ) : (
-                        <form action={unsnoozeStudentFeedback.bind(null, student.id)}>
-                          <button
-                            type="submit"
-                            className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
-                          >
-                            Unsnooze
-                          </button>
-                        </form>
-                      )}
-                    </div>
+                    <form action={markStudentFeedbackDone.bind(null, student.id)}>
+                      <button
+                        type="submit"
+                        className="inline-flex items-center rounded-full bg-primary px-3 py-1.5 text-xs font-semibold text-white transition-opacity hover:opacity-90"
+                      >
+                        Done
+                      </button>
+                    </form>
                   </td>
                 </tr>
               ))}
               {students.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-500">
+                  <td colSpan={6} className="py-12 text-center text-slate-500">
                     <div className="flex flex-col items-center justify-center">
                       <span className="material-symbols-outlined mb-3 text-4xl text-slate-300">inbox</span>
-                      <p>{view === 'snoozed' ? 'No snoozed students right now.' : 'No students are due for feedback right now.'}</p>
+                      <p>No students are due for feedback right now.</p>
                     </div>
                   </td>
                 </tr>
