@@ -1,13 +1,8 @@
 'use client';
 
-import ClearDatabaseButton from '@/components/ClearDatabaseButton';
 import { useSidebar } from '@/components/sidebar-context';
 
-type TopbarProps = {
-  showClearDatabase?: boolean;
-};
-
-export default function Topbar({ showClearDatabase = false }: TopbarProps) {
+export default function Topbar() {
   const { open, toggle, widthPx } = useSidebar();
 
   return (
@@ -27,7 +22,6 @@ export default function Topbar({ showClearDatabase = false }: TopbarProps) {
         </button>
       </div>
       <div className="flex items-center space-x-6">
-        {showClearDatabase ? <ClearDatabaseButton /> : null}
         <div className="flex items-center space-x-4">
           <button className="relative p-2 text-slate-600 hover:bg-blue-50 rounded-full transition-colors">
             <span className="material-symbols-outlined">notifications</span>

@@ -4,13 +4,7 @@ import { SidebarProvider, useSidebar } from '@/components/sidebar-context';
 import Sidebar from '@/components/Sidebar';
 import Topbar from '@/components/Topbar';
 
-function DashboardShellInner({
-  children,
-  showClearDatabase,
-}: {
-  children: React.ReactNode;
-  showClearDatabase: boolean;
-}) {
+function DashboardShellInner({ children }: { children: React.ReactNode }) {
   const { open, widthPx, setOpen } = useSidebar();
 
   return (
@@ -28,23 +22,17 @@ function DashboardShellInner({
         className="min-h-screen transition-[margin] duration-300 ease-out"
         style={{ marginLeft: open ? widthPx : 0 }}
       >
-        <Topbar showClearDatabase={showClearDatabase} />
+        <Topbar />
         {children}
       </main>
     </>
   );
 }
 
-export default function DashboardShell({
-  children,
-  showClearDatabase,
-}: {
-  children: React.ReactNode;
-  showClearDatabase: boolean;
-}) {
+export default function DashboardShell({ children }: { children: React.ReactNode }) {
   return (
     <SidebarProvider>
-      <DashboardShellInner showClearDatabase={showClearDatabase}>
+      <DashboardShellInner>
         {children}
       </DashboardShellInner>
     </SidebarProvider>
