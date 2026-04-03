@@ -16,6 +16,7 @@ export default function Sidebar() {
   const groupsActive = pathname.startsWith('/groups');
   const teachersActive = pathname.startsWith('/teachers');
   const studentsActive = pathname.startsWith('/students');
+  const feedbackActive = pathname.startsWith('/feedback');
 
   return (
     <aside
@@ -79,6 +80,14 @@ export default function Sidebar() {
             className={`font-headline text-sm ${studentsActive ? 'font-semibold' : 'font-medium'}`}
           >
             Students
+          </span>
+        </Link>
+        <Link href="/feedback" className={feedbackActive ? navActive : navInactive}>
+          <span className="material-symbols-outlined">feedback</span>
+          <span
+            className={`font-headline text-sm ${feedbackActive ? 'font-semibold' : 'font-medium'}`}
+          >
+            Feedback
           </span>
         </Link>
       </nav>
