@@ -61,26 +61,18 @@ function parseSyncNdjsonLine(line: string): NdjsonLine {
 }
 
 async function streamSheetScan(
-  source: { url?: string; file?: File | null },
+  url: string,
   onProgress: (message: string, currentTab?: number, totalTabs?: number) => void,
   options?: { startMessage?: string; signal?: AbortSignal }
 ): Promise<ScanGoogleSheetResult | null> {
   onProgress(options?.startMessage ?? 'Scanning starting…');
   const signal = options?.signal;
-  const req =
-    source.file != null
-      ? (() => {
-          const formData = new FormData();
-          formData.set('file', source.file);
-          return { method: 'POST' as const, body: formData, ...(signal ? { signal } : {}) };
-        })()
-      : {
-          method: 'POST' as const,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: source.url ?? '' }),
-          ...(signal ? { signal } : {}),
-        };
-  const res = await fetch('/api/sync-sheet/scan', req);
+  const res = await fetch('/api/sync-sheet/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+    ...(signal ? { signal } : {}),
+  });
 
   if (!res.ok) {
     let errText = res.statusText;
@@ -145,7 +137,6 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   const loadAbortRef = useRef<AbortController | null>(null);
   const [mounted, setMounted] = useState(false);
   const [url, setUrl] = useState('');
-  const [file, setFile] = useState<File | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState('');
@@ -180,7 +171,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   };
 
   const handleScan = async () => {
-    if (!url && !file) return;
+    if (!url.trim()) return;
     loadAbortRef.current?.abort();
     const ac = new AbortController();
     loadAbortRef.current = ac;
@@ -191,7 +182,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     setSheetProgressTab(0);
     setSheetProgressTotal(1);
     try {
-      const finalResult = await streamSheetScan({ url, file }, applyScanProgress, { signal: ac.signal });
+      const finalResult = await streamSheetScan(url.trim(), applyScanProgress, { signal: ac.signal });
       if (finalResult?.success) {
         setScanResult(finalResult as Extract<ScanGoogleSheetResult, { success: true }>);
         setImportRequiresResync(false);
@@ -217,7 +208,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
   };
 
   const handleResync = async () => {
-    if (!url && !file) return;
+    if (!url.trim()) return;
     loadAbortRef.current?.abort();
     const ac = new AbortController();
     loadAbortRef.current = ac;
@@ -228,7 +219,7 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
     setSheetProgressTab(0);
     setSheetProgressTotal(1);
     try {
-      const finalResult = await streamSheetScan({ url, file }, applyScanProgress, {
+      const finalResult = await streamSheetScan(url.trim(), applyScanProgress, {
         startMessage: 'Rescanning sheet…',
         signal: ac.signal,
       });
@@ -411,30 +402,16 @@ export default function SyncForm({ onSyncComplete }: { onSyncComplete: () => voi
             <input
               type="text"
               value={url}
-              onChange={(e) => {
-                setUrl(e.target.value);
-                if (e.target.value.trim()) setFile(null);
-              }}
-              placeholder="Google Sheets URL (or select .xlsx below)"
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="Google Sheets URL"
               disabled={isLoading}
               className="w-full bg-transparent border-none p-0 text-sm focus:ring-0 placeholder:text-slate-400 focus:outline-none disabled:opacity-60"
-            />
-            <input
-              type="file"
-              accept=".xlsx"
-              disabled={isLoading}
-              onChange={(e) => {
-                const picked = e.target.files?.[0] ?? null;
-                setFile(picked);
-                if (picked) setUrl('');
-              }}
-              className="mt-2 block w-full text-xs text-on-surface-variant file:mr-3 file:rounded-md file:border-0 file:bg-primary/10 file:px-2 file:py-1 file:text-primary disabled:opacity-60"
             />
           </div>
           <button
             type="button"
             onClick={handleScan}
-            disabled={isLoading || (!url && !file)}
+            disabled={isLoading || !url.trim()}
             className="shrink-0 bg-primary text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary-container transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Sync
