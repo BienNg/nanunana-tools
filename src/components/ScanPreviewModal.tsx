@@ -384,6 +384,111 @@ function preferredCourseTabIndexForScan(
   return importableIndices[importableIndices.length - 1]!;
 }
 
+function calculatePlannedChangesForScan(
+  scan: ScanSuccess,
+  slice: ReviewImportSlice,
+  now: Date
+): PlannedGroupDbChanges {
+  const skippedRowsBySheetForGroup = slice.skippedRowsBySheet ?? EMPTY_SKIPPED_ROWS;
+  const skippedAttendanceBySheetForGroup = slice.skippedAttendanceCellsBySheet ?? EMPTY_SKIPPED_ATTENDANCE;
+  const teacherCreateKeys = new Set(
+    (scan.detectedNewTeachers ?? [])
+      .filter((name) => {
+        const nk = normalizePersonNameKey(name);
+        return nk && slice.teacherMergeByKey[nk] === REVIEW_TEACHER_MERGE_CREATE_NEW;
+      })
+      .map((name) => normalizePersonNameKey(name))
+      .filter(Boolean) as string[]
+  );
+  const unresolvedStudentKeys = new Set(
+    (scan.detectedNewStudents ?? [])
+      .map((name) => normalizePersonNameKey(name))
+      .filter((nk) => nk && !slice.studentMergeByKey[nk]) as string[]
+  );
+  const importedSheetKeys = new Set<string>();
+  let sessionsInserted = 0;
+  let sessionsUpdated = 0;
+  let sessionsDeleted = 0;
+  const cutoff = scan.currentCourseVisibleIndex;
+  for (const sheet of scan.sheets) {
+    if (cutoff !== null && sheet.visibleOrderIndex > cutoff) continue;
+    const sheetKey = makeReviewSheetKey(sheet);
+    const skippedRows = new Set(skippedRowsBySheetForGroup[sheetKey] ?? []);
+    const skippedAttendance = new Set(skippedAttendanceBySheetForGroup[sheetKey] ?? []);
+    if (sheet.reimportDiff && !sheetHasRemainingStructuralDiff(sheet, skippedRows)) continue;
+    const maxValidationRowIndex =
+      cutoff !== null && sheet.visibleOrderIndex === cutoff
+        ? findLastTaughtSessionRowIndex(sheet.sampleRows, now)
+        : null;
+    const includedRows = includedSessionRowIndicesForImport(
+      sheet,
+      skippedRows,
+      skippedAttendance,
+      maxValidationRowIndex,
+      now
+    );
+    importedSheetKeys.add(sheetKey);
+    if (sheet.reimportDiff) {
+      const newSessionRows = new Set(sheet.reimportDiff.newSessionRowIndices);
+      for (const rowIdx of includedRows) {
+        if (newSessionRows.has(rowIdx)) sessionsInserted += 1;
+        else if ((sheet.reimportDiff.changedCellsByRow[rowIdx] ?? []).length > 0) sessionsUpdated += 1;
+      }
+      sessionsDeleted += Math.max(0, sheet.reimportDiff.existingLessonCount - includedRows.length);
+    } else {
+      sessionsInserted += includedRows.length;
+    }
+  }
+  const teacherNamesInImportedSessions = new Set<string>();
+  if (teacherCreateKeys.size > 0) {
+    for (const sheet of scan.sheets) {
+      const sheetKey = makeReviewSheetKey(sheet);
+      if (!importedSheetKeys.has(sheetKey)) continue;
+      const skippedRows = new Set(skippedRowsBySheetForGroup[sheetKey] ?? []);
+      const skippedAttendance = new Set(skippedAttendanceBySheetForGroup[sheetKey] ?? []);
+      const maxValidationRowIndex =
+        cutoff !== null && sheet.visibleOrderIndex === cutoff
+          ? findLastTaughtSessionRowIndex(sheet.sampleRows, now)
+          : null;
+      const includedRows = includedSessionRowIndicesForImport(
+        sheet,
+        skippedRows,
+        skippedAttendance,
+        maxValidationRowIndex,
+        now
+      );
+      for (const rowIdx of includedRows) {
+        const row = sheet.sampleRows[rowIdx];
+        if (!row) continue;
+        for (const teacherName of parseTeacherNamesFromCell(row.values['Lehrer'])) {
+          const nk = normalizePersonNameKey(teacherName);
+          if (nk && teacherCreateKeys.has(nk)) teacherNamesInImportedSessions.add(nk);
+        }
+      }
+    }
+  }
+  const unresolvedStudentsInImportedSheets = new Set<string>();
+  for (const sheet of scan.sheets) {
+    const sheetKey = makeReviewSheetKey(sheet);
+    if (!importedSheetKeys.has(sheetKey)) continue;
+    for (const student of sheet.headers.students) {
+      const nk = normalizePersonNameKey(student.name);
+      if (nk && unresolvedStudentKeys.has(nk)) unresolvedStudentsInImportedSheets.add(nk);
+    }
+  }
+  const teachersAdded = teacherNamesInImportedSessions.size;
+  const studentsAdded = unresolvedStudentsInImportedSheets.size;
+  const totalChanges = sessionsInserted + sessionsUpdated + sessionsDeleted + teachersAdded + studentsAdded;
+  return {
+    sessionsInserted,
+    sessionsUpdated,
+    sessionsDeleted,
+    teachersAdded,
+    studentsAdded,
+    totalChanges,
+  };
+}
+
 export default function ScanPreviewModal({
   isOpen,
   scanResult,
@@ -414,6 +519,7 @@ export default function ScanPreviewModal({
   const [reviewSlicesByKey, setReviewSlicesByKey] = useState<Record<string, ReviewImportSlice>>({});
   const [openRowActionIndex, setOpenRowActionIndex] = useState<number | null>(null);
   const [hoverHint, setHoverHint] = useState<HoverHint>(null);
+  const [showCrossGroupWarnings, setShowCrossGroupWarnings] = useState(false);
   const [confirmAllError, setConfirmAllError] = useState('');
   const prevActiveGroupTabIdRef = useRef<string | undefined>(undefined);
   const persistPerGroupReview = Boolean(onSelectGroupTab);
@@ -632,113 +738,20 @@ export default function ScanPreviewModal({
     const now = new Date();
     for (const [groupId, scan] of Object.entries(batchScanResultsByGroup)) {
       const slice = reviewSlicesByKey[groupId] ?? emptyReviewSlice();
-      const skippedRowsBySheetForGroup = slice.skippedRowsBySheet ?? EMPTY_SKIPPED_ROWS;
-      const skippedAttendanceBySheetForGroup =
-        slice.skippedAttendanceCellsBySheet ?? EMPTY_SKIPPED_ATTENDANCE;
-      const teacherCreateKeys = new Set(
-        (scan.detectedNewTeachers ?? [])
-          .filter((name) => {
-            const nk = normalizePersonNameKey(name);
-            return slice.teacherMergeByKey[nk] === REVIEW_TEACHER_MERGE_CREATE_NEW;
-          })
-          .map((name) => normalizePersonNameKey(name))
-          .filter(Boolean)
-      );
-      const unresolvedStudentKeys = new Set(
-        (scan.detectedNewStudents ?? [])
-          .map((name) => normalizePersonNameKey(name))
-          .filter((nk) => nk && !slice.studentMergeByKey[nk])
-      );
-      const importedSheetKeys = new Set<string>();
-      let sessionsInserted = 0;
-      let sessionsUpdated = 0;
-      let sessionsDeleted = 0;
-      const cutoff = scan.currentCourseVisibleIndex;
-      for (const sheet of scan.sheets) {
-        if (cutoff !== null && sheet.visibleOrderIndex > cutoff) continue;
-        const sheetKey = makeReviewSheetKey(sheet);
-        const skippedRows = new Set(skippedRowsBySheetForGroup[sheetKey] ?? []);
-        const skippedAttendance = new Set(skippedAttendanceBySheetForGroup[sheetKey] ?? []);
-        if (sheet.reimportDiff && !sheetHasRemainingStructuralDiff(sheet, skippedRows)) continue;
-        const maxValidationRowIndex =
-          cutoff !== null && sheet.visibleOrderIndex === cutoff
-            ? findLastTaughtSessionRowIndex(sheet.sampleRows, now)
-            : null;
-        const includedRows = includedSessionRowIndicesForImport(
-          sheet,
-          skippedRows,
-          skippedAttendance,
-          maxValidationRowIndex,
-          now
-        );
-        importedSheetKeys.add(sheetKey);
-        if (sheet.reimportDiff) {
-          const newSessionRows = new Set(sheet.reimportDiff.newSessionRowIndices);
-          for (const rowIdx of includedRows) {
-            if (newSessionRows.has(rowIdx)) sessionsInserted += 1;
-            else if ((sheet.reimportDiff.changedCellsByRow[rowIdx] ?? []).length > 0) sessionsUpdated += 1;
-          }
-          sessionsDeleted += Math.max(0, sheet.reimportDiff.existingLessonCount - includedRows.length);
-        } else {
-          sessionsInserted += includedRows.length;
-        }
-      }
-      const teacherNamesInImportedSessions = new Set<string>();
-      if (teacherCreateKeys.size > 0) {
-        for (const sheet of scan.sheets) {
-          const sheetKey = makeReviewSheetKey(sheet);
-          if (!importedSheetKeys.has(sheetKey)) continue;
-          const skippedRows = new Set(skippedRowsBySheetForGroup[sheetKey] ?? []);
-          const skippedAttendance = new Set(skippedAttendanceBySheetForGroup[sheetKey] ?? []);
-          const maxValidationRowIndex =
-            cutoff !== null && sheet.visibleOrderIndex === cutoff
-              ? findLastTaughtSessionRowIndex(sheet.sampleRows, now)
-              : null;
-          const includedRows = includedSessionRowIndicesForImport(
-            sheet,
-            skippedRows,
-            skippedAttendance,
-            maxValidationRowIndex,
-            now
-          );
-          for (const rowIdx of includedRows) {
-            const row = sheet.sampleRows[rowIdx];
-            for (const teacherName of parseTeacherNamesFromCell(row.values['Lehrer'])) {
-              const nk = normalizePersonNameKey(teacherName);
-              if (nk && teacherCreateKeys.has(nk)) teacherNamesInImportedSessions.add(nk);
-            }
-          }
-        }
-      }
-      const unresolvedStudentsInImportedSheets = new Set<string>();
-      for (const sheet of scan.sheets) {
-        const sheetKey = makeReviewSheetKey(sheet);
-        if (!importedSheetKeys.has(sheetKey)) continue;
-        for (const student of sheet.headers.students) {
-          const nk = normalizePersonNameKey(student.name);
-          if (nk && unresolvedStudentKeys.has(nk)) unresolvedStudentsInImportedSheets.add(nk);
-        }
-      }
-      const teachersAdded = teacherNamesInImportedSessions.size;
-      const studentsAdded = unresolvedStudentsInImportedSheets.size;
-      const totalChanges = sessionsInserted + sessionsUpdated + sessionsDeleted + teachersAdded + studentsAdded;
-      out.set(groupId, {
-        sessionsInserted,
-        sessionsUpdated,
-        sessionsDeleted,
-        teachersAdded,
-        studentsAdded,
-        totalChanges,
-      });
+      out.set(groupId, calculatePlannedChangesForScan(scan, slice, now));
     }
     return out;
   }, [onConfirmAllGroups, batchScanResultsByGroup, reviewSlicesByKey]);
 
-  /**
-   * No structural updates left to apply on importable tabs: either never had reimport diff, or every
-   * remaining new/changed session row is skipped. Session-row skips can clear the diff; attendance
-   * cell skips alone can still warrant an import.
-   */
+  const activeGroupPlannedChanges = useMemo(() => {
+    if (!scanResult) return null;
+    return calculatePlannedChangesForScan(
+      scanResult,
+      activeReviewSlice ?? emptyReviewSlice(),
+      new Date()
+    );
+  }, [scanResult, activeReviewSlice]);
+
   const hasNoEffectiveImportChanges = useMemo(() => {
     if (!isOpen || !scanResult || !mounted) return false;
     const cutoff = scanResult.currentCourseVisibleIndex;
@@ -1066,25 +1079,30 @@ export default function ScanPreviewModal({
         </div>
 
         {onConfirmAllGroups && batchValidationByGroup.length > 0 ? (
-          <div className="shrink-0 border-b border-gray-200 bg-white px-6 py-3">
-            <section
-              className="rounded-md border border-yellow-300 bg-yellow-50/90 px-4 py-3"
-              role="alert"
-              aria-live="polite"
-            >
-              <h3 className="text-sm font-semibold text-yellow-950">Validation issues across groups</h3>
-              <p className="mt-1 text-xs text-yellow-900">
-                Resolve all validation warnings before using <strong>Update all groups</strong>. Total warnings:{' '}
-                {batchValidationIssueTotal}.
-              </p>
-              <ul className="mt-3 max-h-[min(35vh,14rem)] space-y-2 overflow-y-auto pr-1 text-xs text-yellow-950">
+          <div className="shrink-0 border-b border-gray-200 bg-white px-6 py-2">
+            <div className="flex items-center gap-2 text-sm text-yellow-900">
+              <span className="material-symbols-outlined text-[1.125rem] text-yellow-600" aria-hidden>warning</span>
+              <span className="font-medium">{batchValidationIssueTotal} warnings across {batchValidationByGroup.length} groups</span>
+              <button
+                type="button"
+                onClick={() => setShowCrossGroupWarnings((prev) => !prev)}
+                className="ml-2 text-yellow-700 hover:text-yellow-900 flex items-center font-medium focus:outline-none"
+              >
+                {showCrossGroupWarnings ? 'Hide details' : 'View issues'}
+                <span className="material-symbols-outlined text-[1.125rem] ml-0.5" aria-hidden>
+                  {showCrossGroupWarnings ? 'expand_less' : 'expand_more'}
+                </span>
+              </button>
+            </div>
+            {showCrossGroupWarnings && (
+              <ul className="mt-3 max-h-[min(30vh,12rem)] space-y-2 overflow-y-auto pr-1 text-xs text-yellow-950">
                 {batchValidationByGroup.map((group) => (
                   <li key={group.groupId}>
                     <button
                       type="button"
                       onClick={() => onSelectGroupTab?.(group.groupId)}
                       disabled={busy || !onSelectGroupTab}
-                      className="w-full rounded border border-yellow-200/80 bg-white/90 px-3 py-2 text-left transition-colors hover:bg-yellow-100/80 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="w-full rounded border border-yellow-200/80 bg-yellow-50/90 px-3 py-2 text-left transition-colors hover:bg-yellow-100/80 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
                       title="Open this group tab"
                     >
                       <p className="font-semibold">
@@ -1097,7 +1115,28 @@ export default function ScanPreviewModal({
                   </li>
                 ))}
               </ul>
-            </section>
+            )}
+          </div>
+        ) : null}
+
+        {/* Live Summary Bar */}
+        {activeGroupPlannedChanges && !hasNoEffectiveImportChanges ? (
+          <div className="shrink-0 bg-blue-50/50 border-b border-blue-100 px-6 py-2 flex items-center justify-between text-sm">
+            <div className="text-blue-900">
+              <span className="font-medium">Will apply: </span>
+              <span className="font-semibold text-emerald-700">+{activeGroupPlannedChanges.sessionsInserted} sessions</span>
+              <span className="mx-1.5 text-blue-300">·</span>
+              <span className="font-semibold text-sky-700">~{activeGroupPlannedChanges.sessionsUpdated} changed</span>
+              <span className="mx-1.5 text-blue-300">·</span>
+              <span className="font-semibold text-red-700">−{activeGroupPlannedChanges.sessionsDeleted} removed</span>
+              <span className="mx-1.5 text-blue-300">·</span>
+              <span className="font-semibold text-emerald-700">+{activeGroupPlannedChanges.teachersAdded} teachers</span>
+              <span className="mx-1.5 text-blue-300">·</span>
+              <span className="font-semibold text-emerald-700">+{activeGroupPlannedChanges.studentsAdded} students</span>
+              <span className="ml-1 text-blue-800">
+                in {visibleGroupTabs.find(g => g.id === activeGroupTabId)?.label ?? scanResult.workbookTitle}
+              </span>
+            </div>
           </div>
         ) : null}
 
@@ -1401,108 +1440,91 @@ export default function ScanPreviewModal({
               </ul>
             </section>
           ) : null}
-          {isResyncing ? (
-            <div
-              className="mb-4 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-950"
-              role="status"
-              aria-live="polite"
-            >
-              <span className="material-symbols-outlined animate-spin text-lg shrink-0" aria-hidden>
-                sync
-              </span>
-              <span className="min-w-0">{resyncProgressMessage || 'Rescanning sheet…'}</span>
-            </div>
-          ) : null}
-          {resyncError ? (
-            <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-950" role="alert">
-              {resyncError}
-            </div>
-          ) : null}
-          {onConfirmAllGroups && visibleGroupTabs.length === 0 ? (
-            <section
-              className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3"
-              role="status"
-              aria-live="polite"
-            >
-              <h3 className="text-sm font-semibold text-sky-950">No groups with pending DB changes</h3>
-              <p className="mt-1 text-xs text-sky-900">
-                All scanned groups currently resolve to zero inserts, updates, or deletes. Hidden groups are excluded
-                from import.
-              </p>
-            </section>
-          ) : null}
-          {hasNoEffectiveImportChanges && !isImporting && !isResyncing ? (
-            <section className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3" role="status" aria-live="polite">
-              <h3 className="text-sm font-semibold text-sky-950">No updates detected</h3>
-              <p className="mt-1 text-xs text-sky-900">
-                {hasSkippedAttendanceCells
-                  ? 'No lesson rows or core fields differ from the database for importable tabs. You can still import to apply attendance cell skips.'
-                  : 'This import matches what is already in the database for the importable tabs (including skipped rows). There is nothing new to apply, so import is disabled.'}
-              </p>
-            </section>
-          ) : null}
-          {importRequiresResync && !isImporting && !isResyncing ? (
-            <section
-              className="mb-4 rounded-md border border-slate-300 bg-slate-50/90 px-4 py-3"
-              role="status"
-              aria-live="polite"
-            >
-              <h3 className="text-sm font-semibold text-slate-900">Import completed</h3>
-              <p className="mt-1 text-xs text-slate-700">
-                Confirm &amp; Import is disabled after a completed import. Use <strong>Resync</strong> to fetch the
-                latest sheet state before importing again.
-              </p>
-            </section>
-          ) : null}
-          {isImporting || importDbLog.length > 0 ? (
-            <div className="mb-4 space-y-3" role="status" aria-live="polite">
-              {importProgressMessage ? (
-                <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50/90 px-4 py-2 text-sm text-amber-950">
-                  <span className="material-symbols-outlined animate-spin text-lg shrink-0" aria-hidden>
-                    sync
-                  </span>
-                  <span className="min-w-0 font-medium">{importProgressMessage}</span>
+          {/* Consolidated Status Region */}
+          {(() => {
+            if (isResyncing) {
+              return (
+                <div className="mb-4 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950" role="status" aria-live="polite">
+                  <span className="material-symbols-outlined animate-spin text-lg shrink-0" aria-hidden>sync</span>
+                  <span className="min-w-0 font-medium">{resyncProgressMessage || 'Rescanning sheet…'}</span>
                 </div>
-              ) : null}
-              {importMutationDbLog.length > 0 ? (
-                <div className="rounded-md border border-slate-200 bg-slate-50/95">
-                  <div className="border-b border-slate-200 bg-slate-100/80 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-600">
-                    Database activity
+              );
+            }
+            if (resyncError) {
+              return (
+                <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-950 font-medium" role="alert">
+                  <span className="material-symbols-outlined mr-2 align-middle text-[1.125rem]">error</span>
+                  {resyncError}
+                </div>
+              );
+            }
+            if (isImporting || importDbLog.length > 0) {
+              return (
+                <div className="mb-4 space-y-3" role="status" aria-live="polite">
+                  {importProgressMessage ? (
+                    <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50/90 px-4 py-3 text-sm text-amber-950">
+                      <span className="material-symbols-outlined animate-spin text-lg shrink-0" aria-hidden>sync</span>
+                      <span className="min-w-0 font-medium">{importProgressMessage}</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                      <span className="material-symbols-outlined animate-spin text-lg shrink-0" aria-hidden>sync</span>
+                      <span className="font-medium">Preparing import…</span>
+                    </div>
+                  )}
+                  {importMutationDbLog.length > 0 && (
+                    <details className="rounded-md border border-slate-200 bg-slate-50/95 group">
+                      <summary className="cursor-pointer border-b border-transparent group-open:border-slate-200 bg-slate-100/80 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-600 hover:bg-slate-200/50 transition-colors">
+                        Database activity ({importMutationDbLog.length})
+                      </summary>
+                      <div ref={importLogScrollRef} className="max-h-[min(40vh,16rem)] overflow-y-auto px-3 py-2" aria-label="Database write steps">
+                        <ol className="font-mono text-[0.7rem] leading-relaxed text-slate-800 space-y-0.5 list-decimal list-inside marker:text-slate-400">
+                          {importMutationDbLog.map((line, idx) => (
+                            <li key={`${idx}-${line.slice(0, 48)}`} className="break-words">{line}</li>
+                          ))}
+                        </ol>
+                      </div>
+                    </details>
+                  )}
+                </div>
+              );
+            }
+            if (importApplySummary || importRequiresResync) {
+              return (
+                <section className="mb-4 rounded-md border border-emerald-300 bg-emerald-50/90 px-4 py-3" role="status" aria-live="polite">
+                  <div className="flex items-start gap-3">
+                    <span className="material-symbols-outlined text-emerald-600 text-2xl" aria-hidden>check_circle</span>
+                    <div>
+                      <h3 className="text-sm font-semibold text-emerald-950">Import completed</h3>
+                      <p className="mt-1 text-xs text-emerald-900 leading-relaxed">
+                        {importApplySummary ? `Added ${importApplySummary.totals.sessionsInserted}, changed ${importApplySummary.totals.sessionsUpdated}, removed ${importApplySummary.totals.sessionsDeleted}, skipped ${importApplySummary.totals.skippedSessionRows} session row(s). ` : ''}
+                        Use <strong>Resync</strong> to fetch the latest sheet state before importing again.
+                      </p>
+                    </div>
                   </div>
-                  <div
-                    ref={importLogScrollRef}
-                    className="max-h-[min(40vh,16rem)] overflow-y-auto px-3 py-2"
-                    aria-label="Database write steps"
-                  >
-                    <ol className="font-mono text-[0.7rem] leading-relaxed text-slate-800 space-y-0.5 list-decimal list-inside marker:text-slate-400">
-                      {importMutationDbLog.map((line, idx) => (
-                        <li key={`${idx}-${line.slice(0, 48)}`} className="break-words">
-                          {line}
-                        </li>
-                      ))}
-                    </ol>
-                  </div>
-                </div>
-              ) : importProgressMessage ? null : (
-                <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700">
-                  <span className="material-symbols-outlined animate-spin text-lg shrink-0" aria-hidden>
-                    sync
-                  </span>
-                  <span>Preparing import…</span>
-                </div>
-              )}
-            </div>
-          ) : null}
-          {importApplySummary ? (
-            <section className="mb-4 rounded-md border border-emerald-200 bg-emerald-50/80 px-4 py-3">
-              <h3 className="text-sm font-semibold text-emerald-900">Applied session summary</h3>
-              <p className="mt-1 text-xs text-emerald-800">
-                Added {importApplySummary.totals.sessionsInserted}, changed {importApplySummary.totals.sessionsUpdated}, removed{' '}
-                {importApplySummary.totals.sessionsDeleted}, skipped {importApplySummary.totals.skippedSessionRows} session
-                row(s).
-              </p>
-            </section>
-          ) : null}
+                </section>
+              );
+            }
+            if (onConfirmAllGroups && visibleGroupTabs.length === 0) {
+              return (
+                <section className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3" role="status" aria-live="polite">
+                  <h3 className="text-sm font-semibold text-sky-950">No groups with pending DB changes</h3>
+                  <p className="mt-1 text-xs text-sky-900">All scanned groups currently resolve to zero inserts, updates, or deletes. Hidden groups are excluded from import.</p>
+                </section>
+              );
+            }
+            if (hasNoEffectiveImportChanges) {
+              return (
+                <section className="mb-4 rounded-md border border-sky-300 bg-sky-50/90 px-4 py-3" role="status" aria-live="polite">
+                  <h3 className="text-sm font-semibold text-sky-950">No updates detected</h3>
+                  <p className="mt-1 text-xs text-sky-900">
+                    {hasSkippedAttendanceCells ? 'No lesson rows or core fields differ from the database for importable tabs. You can still import to apply attendance cell skips.' : 'This import matches what is already in the database for the importable tabs (including skipped rows). There is nothing new to apply, so import is disabled.'}
+                  </p>
+                </section>
+              );
+            }
+            return null;
+          })()}
           {activeSheet && activeIsFutureCourse ? (
             <div
               className="rounded-md border border-gray-200 bg-gray-50 px-6 py-10 text-center text-sm text-gray-500"
@@ -1982,7 +2004,7 @@ export default function ScanPreviewModal({
                   ? 'Resolve validation issues on every sheet through the current course before importing.'
                 : undefined
             }
-            className="px-6 py-2 text-sm font-medium text-white bg-[#ff7a59] rounded hover:bg-[#ff8f73] focus:ring-2 focus:ring-offset-2 focus:ring-[#ff7a59] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
+            className="px-6 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
           >
             {isImporting ? (
               <>
