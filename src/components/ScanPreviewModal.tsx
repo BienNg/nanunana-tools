@@ -1065,6 +1065,42 @@ export default function ScanPreviewModal({
           </div>
         </div>
 
+        {onConfirmAllGroups && batchValidationByGroup.length > 0 ? (
+          <div className="shrink-0 border-b border-gray-200 bg-white px-6 py-3">
+            <section
+              className="rounded-md border border-yellow-300 bg-yellow-50/90 px-4 py-3"
+              role="alert"
+              aria-live="polite"
+            >
+              <h3 className="text-sm font-semibold text-yellow-950">Validation issues across groups</h3>
+              <p className="mt-1 text-xs text-yellow-900">
+                Resolve all validation warnings before using <strong>Update all groups</strong>. Total warnings:{' '}
+                {batchValidationIssueTotal}.
+              </p>
+              <ul className="mt-3 max-h-[min(35vh,14rem)] space-y-2 overflow-y-auto pr-1 text-xs text-yellow-950">
+                {batchValidationByGroup.map((group) => (
+                  <li key={group.groupId}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectGroupTab?.(group.groupId)}
+                      disabled={busy || !onSelectGroupTab}
+                      className="w-full rounded border border-yellow-200/80 bg-white/90 px-3 py-2 text-left transition-colors hover:bg-yellow-100/80 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
+                      title="Open this group tab"
+                    >
+                      <p className="font-semibold">
+                        {group.groupLabel}: {group.totalIssueCount} warning{group.totalIssueCount === 1 ? '' : 's'}
+                      </p>
+                      <p className="mt-1 text-yellow-900">
+                        {group.sheetIssues.map((sheet) => `${sheet.title} (${sheet.issueCount})`).join(', ')}
+                      </p>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </div>
+        ) : null}
+
         {/* Tabs */}
         {visibleGroupTabs.length > 0 ? (
           <div
@@ -1403,39 +1439,6 @@ export default function ScanPreviewModal({
                   ? 'No lesson rows or core fields differ from the database for importable tabs. You can still import to apply attendance cell skips.'
                   : 'This import matches what is already in the database for the importable tabs (including skipped rows). There is nothing new to apply, so import is disabled.'}
               </p>
-            </section>
-          ) : null}
-          {onConfirmAllGroups && batchValidationByGroup.length > 0 ? (
-            <section
-              className="mb-4 rounded-md border border-yellow-300 bg-yellow-50/90 px-4 py-3"
-              role="alert"
-              aria-live="polite"
-            >
-              <h3 className="text-sm font-semibold text-yellow-950">Validation issues across groups</h3>
-              <p className="mt-1 text-xs text-yellow-900">
-                Resolve all validation warnings before using <strong>Update all groups</strong>. Total warnings:{' '}
-                {batchValidationIssueTotal}.
-              </p>
-              <ul className="mt-3 space-y-2 text-xs text-yellow-950">
-                {batchValidationByGroup.map((group) => (
-                  <li key={group.groupId}>
-                    <button
-                      type="button"
-                      onClick={() => onSelectGroupTab?.(group.groupId)}
-                      disabled={busy || !onSelectGroupTab}
-                      className="w-full rounded border border-yellow-200/80 bg-white/90 px-3 py-2 text-left transition-colors hover:bg-yellow-100/80 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
-                      title="Open this group tab"
-                    >
-                      <p className="font-semibold">
-                        {group.groupLabel}: {group.totalIssueCount} warning{group.totalIssueCount === 1 ? '' : 's'}
-                      </p>
-                      <p className="mt-1 text-yellow-900">
-                        {group.sheetIssues.map((sheet) => `${sheet.title} (${sheet.issueCount})`).join(', ')}
-                      </p>
-                    </button>
-                  </li>
-                ))}
-              </ul>
             </section>
           ) : null}
           {importRequiresResync && !isImporting && !isResyncing ? (
