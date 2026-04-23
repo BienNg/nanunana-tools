@@ -12,6 +12,7 @@ type ActiveCourseRow = {
   id: string;
   name: string;
   sync_completed: boolean;
+  sheet_url: string | null;
   group_id: string | null;
   groups: { id: string; name: string } | null;
   course_teachers: { teachers: Teacher | null }[] | null;
@@ -41,6 +42,7 @@ export default function ActiveCoursesPanel({ bodyRefreshKey = 0 }: { bodyRefresh
         id,
         name,
         sync_completed,
+        sheet_url,
         group_id,
         groups:groups!group_id ( id, name ),
         course_teachers (
@@ -61,6 +63,7 @@ export default function ActiveCoursesPanel({ bodyRefreshKey = 0 }: { bodyRefresh
       id: string;
       name: string;
       sync_completed: boolean;
+      sheet_url: string | null;
       group_id: string | null;
       groups: { id: string; name: string } | { id: string; name: string }[] | null;
       course_teachers: ActiveCourseRow['course_teachers'];
@@ -149,6 +152,19 @@ export default function ActiveCoursesPanel({ bodyRefreshKey = 0 }: { bodyRefresh
                       </Link>
                       <SyncCompletionPill completed={course.sync_completed ?? false} />
                     </div>
+                    {course.sheet_url ? (
+                      <a
+                        href={course.sheet_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex max-w-full items-center gap-1 text-xs text-primary/80 hover:text-primary hover:underline underline-offset-2 mb-1 break-all"
+                        title={course.sheet_url}
+                        aria-label={`Open Google Sheet for ${course.name}`}
+                      >
+                        <span className="material-symbols-outlined text-[14px] shrink-0">link</span>
+                        {course.sheet_url}
+                      </a>
+                    ) : null}
                     <p className="text-sm text-on-surface-variant flex flex-wrap items-center gap-x-2 gap-y-0.5 font-medium">
                       {course.groups ? (
                         <span className="inline-flex items-center gap-1">
